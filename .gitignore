@@ -1,0 +1,40 @@
+# 构建产物
+bin/
+obj/
+dist/
+dist-opt/
+dist-final/
+publish/
+*.exe
+*.dll
+*.pdb
+*.obj
+
+# .NET
+*.user
+*.suo
+project.lock.json
+project.assets.json
+
+# Node
+node_modules/
+package-lock.json
+
+# 测试/基准输出
+bench-output/
+*.log
+aot-runner-*.log
+acl-report-*.jsonl
+
+# 编辑器
+.vs/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 临时
+tmp/
+tmp-test/
+*.bak
+*.bak-*

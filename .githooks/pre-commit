@@ -1,0 +1,16 @@
+#!/bin/sh
+# 本仓库的回归闸门是 `node --test test/ab-verify.js`（node:test），
+# 不是 xp-gate 的 vitest 流程，因此不继承全局 hook。
+#
+# 但复杂度/重复度这类与语言无关的检查仍然有价值：如果本地存在 xp-gate
+# 的边界阈值检查，就跑一遍。
+set -e
+if [ -f package.json ]; then
+  if command -v node >/dev/null 2>&1; then
+    echo "[pre-commit] 语法检查"
+    node --check test/ab-verify.js
+    node --check test/runner-client.js
+    node --check bench/d1-ab-bench.js
+  fi
+fi
+echo "[pre-commit] OK（完整回归请跑 npm test）"
