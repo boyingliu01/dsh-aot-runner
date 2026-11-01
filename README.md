@@ -4,6 +4,14 @@ DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文�
 把每次子进程调用的固定开销从约 360ms 降到约 150ms（**消除约 60%**），且行为与 Node 版
 在 24 个用例上字节级一致。
 
+> 📋 **下一步计划看 [ROADMAP.md](ROADMAP.md)**，任务细节在
+> [Issues](https://github.com/boyingliu01/dsh-aot-runner/issues)（Issue 是唯一事实来源）。
+>
+> 当前状态下最该先做的三件事：
+> [#3 零泄漏回归](https://github.com/boyingliu01/dsh-aot-runner/issues/3) ·
+> [#2 control pipe](https://github.com/boyingliu01/dsh-aot-runner/issues/2) ·
+> [#5 依赖检查](https://github.com/boyingliu01/dsh-aot-runner/issues/5)
+
 ---
 
 ## 为什么做这个
