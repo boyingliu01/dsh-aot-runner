@@ -8,6 +8,8 @@
     "build": "dotnet publish -c Release -r win-x64",
     "clean": "rm -rf obj bin",
     "test": "node --test test/ab-verify.js",
+    "test:leak": "node --test test/leak-verify.js",
+    "test:all": "npm test && npm run test:leak",
     "bench": "node bench/d1-ab-bench.js"
   },
   "engines": {

@@ -308,21 +308,24 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 非 Issue 记录的技术债：
 
 - **JSON 迁移** `JsonDocument` → `Utf8JsonReader`（可再省 ~15ms）
-- **`resolveWindowsExecutable` 搜索根缺口** —— 见下节
 
-### 已知的契约漂移
+### 关于 `resolveWindowsExecutable`：已核对一致
 
-`resolveWindowsExecutable` 除了 PATH 与 cwd，还会把**解析出的 applicationName 的目录**
-作为额外搜索根。AOT 版目前缺这一条，导致：
+曾一度怀疑 AOT 缺「applicationName 所在目录作为额外搜索根」的回退。2026-11-01
+复核 `runner-launch-*.js:1485` 源码确认：**DSH 本身就没有这条回退**，搜索根只有
+`[""]`（cwd）+ PATH 两处。
+
+实测裸名命令在两种 runner 下（含 cwd 不在 PATH、找不到可执行文件等场景）
+ENOENT 行为与错误文本**完全一致**：
 
 ```
-cwd 不在 PATH 中，命令以裸名给出（如 hostname）
-  → DSH 下能跑（回退到 node.exe 所在目录）
-  → AOT 下报 spawn ENOENT，且错误文本里的程序名不同
+node → {"message":"spawn definitely-not-real-xyz ENOENT","code":"ENOENT",
+        "syscall":"spawn definitely-not-real-xyz","path":"definitely-not-real-xyz"}
+aot  → 同上，逐字节相同
 ```
 
-这条在 A/B 用例里**测不出来**，因为所有用例的 cwd 都是 `C:/Windows`（在 PATH 中）。
-修复会归入 [#7 接入](https://github.com/boyingliu01/dsh-aot-runner/issues/7) 的前置工作。
+早先观察到的差异是探测脚本把 cwd 传成 glob 模式、导致 runner 自身启动失败造成的
+测量伪迹，**不是真实缺口**。这条记录保留在此，避免后来者重复走一遍弯路。
 
 ---
 
