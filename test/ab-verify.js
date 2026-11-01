@@ -11,7 +11,13 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { runNode, runAot, targetEnv } = require('./runner-client.js');
+const { runNode, runAot, targetEnv, assertEnvironment, NODE_RUNNER, AOT_RUNNER } = require('./runner-client.js');
+
+// 环境缺失（找不到 node runner / 未构建 AOT 产物）必须报出可操作的错误，
+// 而不是在第一个用例里以 TypeError 崩溃 —— 两者是完全不同的失败含义。
+assertEnvironment();
+console.log(`node runner: ${NODE_RUNNER}`);
+console.log(`AOT runner : ${AOT_RUNNER}\n`);
 
 /** 用例定义 */
 const CASES = [

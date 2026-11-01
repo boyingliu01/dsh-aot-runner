@@ -112,32 +112,61 @@ node 的 `resolveWindowsExecutable` 规则（`runner-launch-*.js`）：
 
 - .NET 8 SDK（含 NativeAOT 工具链，即 MSVC 链接器）
 - Node.js 22+
+- 本机安装 DSH（A/B 验证需要 `@deepseek-ai/dsh-subprocess-local` 作为基线）
+
+详细的工具链版本、验证命令与故障排查见 **[docs/开发环境.md](docs/开发环境.md)**。
 
 ### 构建
 
 ```bash
 ./build.sh                 # 增量构建
+./build.sh --check         # 只跑质量门禁（格式 + 静态检查 + JS 语法）
 ./build.sh --clean         # 清理后重建
 ./build.sh --test          # 构建 + 跑 24 项 A/B 验证
-./build.sh --all           # 清理重建 + 测试 + 基准
+./build.sh --all           # 质量门禁 + 清理重建 + 测试 + 基准
+./build.sh --out <目录>    # 指定产物目录
 ```
 
-产物默认落在 `%TEMP%/dsh-aot-runner-dist/dsh-aot-runner.exe`，可用
-`-p:RunnerOutDir=...` 覆盖。
+产物默认落在仓库内 `dist/dsh-aot-runner.exe`。构建前会自动做
+**Low Integrity 目录自检**（见下文「重要陷阱」），命中 Low IL 会直接中止而不是产出一个跑不起来的 exe。
 
 ### 手动构建
 
 ```bash
-dotnet publish -c Release -r win-x64 -o "%TEMP%/dsh-aot-runner-dist"
+dotnet publish -c Release -r win-x64 -o dist
 ```
 
 ### 测试与基准
 
 ```bash
-export AOT_RUNNER="$TEMP/dsh-aot-runner-dist/dsh-aot-runner.exe"
-node --test test/ab-verify.js   # 24 项字节级 A/B
-node bench/d1-ab-bench.js               # 性能对比
+./build.sh --test          # 构建 + A/B（推荐）
+npm test                   # 只跑 A/B，需先构建
+node bench/d1-ab-bench.js  # 性能对比
 ```
+
+A/B 需要两个 runner：AOT 产物与 node runner。两者路径自动解析：
+
+| runner | 查找顺序 |
+|---|---|
+| AOT | `AOT_RUNNER` → 仓库内 `dist/dsh-aot-runner.exe` |
+| node | `DSH_RUNNER` → `NODE_RUNNER` → 仓库 `node_modules` → `DSH_HOME` / `%USERPROFILE%/.workbuddy/binaries/node/workspace` |
+
+找不到时测试会**明确报错并给出修复建议**，而不是静默跑空或拿一个过期二进制去比对。
+
+---
+
+## 质量门禁
+
+`./build.sh --check` 跑三道检查，任何一道失败即非零退出：
+
+| 门禁 | 实现 | 说明 |
+|---|---|---|
+| C# 代码格式 | `dotnet format --verify-no-changes` | 规则来自 `.editorconfig` + `.csharp-formatting.json` |
+| C# 静态检查 | 编译期 analyzer | csproj 里 `TreatWarningsAsErrors=true`，**0 警告是硬约束** |
+| JS 语法 | `node --check` | 测试与基准脚本 |
+
+一键修复格式：`dotnet format`。
+
 
 ---
 
@@ -168,12 +197,17 @@ exit code = -1073741502
 ```bash
 icacls "D:\your\workspace" | grep -i "mandatory\|label"
 # 出现 "Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)" 就是它
+
+# 或者直接用项目自带的自检脚本
+./scripts/check-integrity.sh dist
 ```
 
 **确认是路径问题而非代码问题的判据**：把**同一个 exe**（md5 不变）复制到
 `%TEMP%` 下再跑，若恢复正常则确认。
 
-**规避**：构建输出放到 Medium IL 目录（`%TEMP%` 即可），本项目默认已这么做。
+**规避**：构建输出放到 Medium IL 目录。`build.sh` 在构建前会调用
+`scripts/check-integrity.sh` 自检产物目录，命中 Low IL 直接中止并提示改用
+`--out` 换目录，而不是产出一个跑不起来的 exe。
 
 > 想彻底清除标签需要 `WRITE_DAC` 权限，而沙箱留下的 ACL 里
 > `Authenticated Users` 只有 `(M)`，通常不够 —— 所以**规避比清除更实际**。
@@ -184,21 +218,27 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 
 ```
 .
-├── DshAotRunner.csproj        # NativeAOT 配置（13 个优化开关）
-├── build.sh                   # 构建/测试/基准一键脚本
+├── DshAotRunner.csproj        # NativeAOT 配置 + 严格静态检查
+├── build.sh                   # 构建 / 质量门禁 / 测试 / 基准 一键脚本
+├── .editorconfig              # C# 格式规则
+├── .csharp-formatting.json    # dotnet format 规则
 ├── src/
 │   ├── Program.cs             # 入口 + 顶层异常兜底
 │   ├── JobRunner.cs           # 核心：启动/监控/终止 target
 │   ├── JobHandle.cs           # Job Object 封装
 │   ├── Native.cs              # P/Invoke 声明
 │   ├── Protocol.cs            # 协议 POCO
-│   └── ProtocolJson.cs        # 手写序列化（零反射）
+│   ├── ProtocolJson.cs        # 手写序列化（零反射）
+│   └── Trace.cs               # 诊断日志（唯一写入口）
+├── scripts/
+│   └── check-integrity.sh     # Low IL 目录自检
 ├── test/
 │   ├── runner-client.js       # 共享测试工具（真实 DSH 调用契约）
-│   └── ab-verify.js   # 24 项 A/B 验证
+│   └── ab-verify.js           # 24 项 A/B 验证
 ├── bench/
 │   └── d1-ab-bench.js         # 交错采样性能基准
 └── docs/
+    ├── 开发环境.md             # 本文件：搭环境、跑验证、故障排查
     ├── 调研报告-JSON序列化与启动优化.md
     ├── S2b-性能实测报告.md
     └── S2-进展与阻塞.md
@@ -253,13 +293,36 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 
 ### 已知待办
 
-1. **S5** 进程树零泄漏回归（100 连续调用）+ 混沌测试
-2. **control pipe** —— `Control` 字段已解析但未使用
-3. **terminate 竞态** 高频 start/terminate 交替
-4. **`dumpbin /DEPENDENTS`** 确认无 VC++ 运行时依赖
-5. **S6 接入** —— 子类化 `LocalSubprocessRuntime` 覆盖 `ctx.subprocess`
-6. **熔断器** NORMAL→SUSPECT→FALLBACK→DISABLED + 运行时探针
-7. **JSON 迁移** `JsonDocument` → `Utf8JsonReader`
+按线上 Issue 的优先级排列（**Issue 是唯一事实来源**，编号以 GitHub 为准）：
+
+| Issue | 优先级 | 内容 |
+|---|---|---|
+| [#3](https://github.com/boyingliu01/dsh-aot-runner/issues/3) | P0 | S5 进程树零泄漏回归（100 连续调用）+ 混沌测试 |
+| [#2](https://github.com/boyingliu01/dsh-aot-runner/issues/2) | P0 | S3 control pipe —— fd 7 透传 + 环境标记 + 关闭副本 |
+| [#6](https://github.com/boyingliu01/dsh-aot-runner/issues/6) | P0 | S6 熔断器 NORMAL→SUSPECT→FALLBACK→DISABLED + 运行时探针 |
+| [#4](https://github.com/boyingliu01/dsh-aot-runner/issues/4) | P1 | S3 terminate 竞态，高频 start/terminate 交替 |
+| [#5](https://github.com/boyingliu01/dsh-aot-runner/issues/5) | P1 | S1b `dumpbin /DEPENDENTS` 确认无 VC++ 运行时依赖 |
+| [#7](https://github.com/boyingliu01/dsh-aot-runner/issues/7) | P1 | S6 接入 `ctx.subprocess` seam |
+| [#8](https://github.com/boyingliu01/dsh-aot-runner/issues/8) | P2 | S1c 签名与分发布置 |
+
+非 Issue 记录的技术债：
+
+- **JSON 迁移** `JsonDocument` → `Utf8JsonReader`（可再省 ~15ms）
+- **`resolveWindowsExecutable` 搜索根缺口** —— 见下节
+
+### 已知的契约漂移
+
+`resolveWindowsExecutable` 除了 PATH 与 cwd，还会把**解析出的 applicationName 的目录**
+作为额外搜索根。AOT 版目前缺这一条，导致：
+
+```
+cwd 不在 PATH 中，命令以裸名给出（如 hostname）
+  → DSH 下能跑（回退到 node.exe 所在目录）
+  → AOT 下报 spawn ENOENT，且错误文本里的程序名不同
+```
+
+这条在 A/B 用例里**测不出来**，因为所有用例的 cwd 都是 `C:/Windows`（在 PATH 中）。
+修复会归入 [#7 接入](https://github.com/boyingliu01/dsh-aot-runner/issues/7) 的前置工作。
 
 ---
 

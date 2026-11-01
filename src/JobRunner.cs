@@ -9,13 +9,14 @@ namespace DshAotRunner;
 /// Windows Job runner：把一个目标命令放进 Job Object，使其可整树回收。
 /// 语义基线见 RUNNER-SPEC.md。
 /// </summary>
-internal sealed class JobRunner
+internal sealed class JobRunner : IDisposable
 {
     private const int PollIntervalMs = 10;          // RUNNER-SPEC §7
 
     private readonly string[] _argv;
     private readonly Stream _out;
     private readonly object _gate = new();
+    private bool _disposed;
 
     // 状态字段 —— 对齐 RUNNER-SPEC §4.1
     private bool _startSeen;
@@ -61,7 +62,7 @@ internal sealed class JobRunner
             }
 
             if (line.Length == 0) continue;
-            DbgT($"got message: {line}");
+            Trace.Timed($"got message: {line}");
             HandleMessage(line);
         }
 
@@ -202,13 +203,6 @@ internal sealed class JobRunner
         var hStdOut = IsValid(hOut) ? hOut : Native.GetStdHandle(Native.STD_OUTPUT_HANDLE);
         var hStdErr = IsValid(hErr) ? hErr : Native.GetStdHandle(Native.STD_ERROR_HANDLE);
 
-        // 【临时诊断已移除】
-
-        if (Native.GetHandleInformation(hStdOut, out var infOut))
-            Dbg($"hStdOut flags={infOut:X} (inherit={(infOut & 1)})");
-        else
-            Dbg($"hStdOut GetHandleInformation FAILED err={Marshal.GetLastWin32Error()}");
-
         // ---- 3b. 精确控制继承：只放行 target 需要的 3 个句柄 ----
         // CreateProcessW 的 bInheritHandles=true 会继承本进程所有「可继承」句柄。
         // runner 自己从 host 继承来的协议管道（fd0/fd1/fd2）默认就是可继承的，
@@ -219,9 +213,8 @@ internal sealed class JobRunner
         //   NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022
         // 实测 bash 因此 100% 启动失败（exit=-1073741502）。
         //
-        // 做法（对齐 @deepseek-ai/dsh-win32-process 的 spawnJobProcess）：
-        //   1. 把 target 要用的 3 个句柄显式置为 HANDLE_FLAG_INHERIT
-        //   2. 把这些句柄以外的继承标志关掉——通过「先全部关、再逐个开」实现
+        // 做法：把 target 要用的 3 个句柄显式置为 HANDLE_FLAG_INHERIT，
+        // CreateProcessW 返回后在 finally 里原样恢复。
         var inheritToggled = new List<(IntPtr Handle, bool WasInheritable)>(3);
         foreach (var h in new[] { hStdIn, hStdOut, hStdErr })
         {
@@ -235,23 +228,11 @@ internal sealed class JobRunner
             }
         }
 
-        // 关掉 runner 自身协议通道的继承标志（target 绝不该看到它们）
-        // 【实验】暂时全部禁用，验证继承抑制是否为 bash 崩溃的原因
-        var suppressedInherit = new List<IntPtr>(0);
-        if (Environment.GetEnvironmentVariable("DSH_AOT_SUPPRESS") == "1")
-        {
-            foreach (var fd in new[] { 0, 1, 2 })
-            {
-                var h = Native.CrtGetOsFHandle(fd);
-                if (!IsValid(h)) continue;
-                if (h == hStdIn || h == hStdOut || h == hStdErr) continue;
-                if (Native.GetHandleInformation(h, out var f) && (f & Native.HANDLE_FLAG_INHERIT) != 0)
-                {
-                    suppressedInherit.Add(h);
-                    Native.SetHandleInformation(h, Native.HANDLE_FLAG_INHERIT, 0);
-                }
-            }
-        }
+        // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
+        // 那是实验残留 —— runner 是 console 程序，fd 0/1/2 由 host 映射到 target 的
+        // stdout/stderr，动它们会连带关掉输出通道，而抑制继承本来就不依赖这一步。
+        // 真正保证 target 拿不到协议句柄的是：fd 4/5/6 之外不额外打开可继承句柄，
+        // 且 CreateProcessW 返回后立刻在 finally 里恢复所有被改过的标志。
 
         var si = new Native.STARTUPINFO
         {
@@ -273,7 +254,7 @@ internal sealed class JobRunner
             var cwd = NormalizeWindowsPath(req.Cwd);
 
             // RUNNER-SPEC §5.3 步骤 3
-            DbgT($"about to CreateProcessW: {appName}");
+            Trace.Timed($"about to CreateProcessW: {appName}");
             try
             {
                 if (!Native.CreateProcessW(appName, cmdline, IntPtr.Zero, IntPtr.Zero,
@@ -292,29 +273,36 @@ internal sealed class JobRunner
                 _thread = new SafeKernelHandle(pi.hThread);
                 _targetPid = pi.dwProcessId;
 
-                DbgT($"CreateProcessW ok, pid={pi.dwProcessId}");
-                // RUNNER-SPEC §5.3 步骤 4：先入 Job
-                // 【实验】可用 DSH_AOT_NOJOB=1 跳过入 Job，验证 Job 是否为主要限制
-                if (Environment.GetEnvironmentVariable("DSH_AOT_NOJOB") != "1")
-                {
-                    job.AssignProcess(pi.hProcess);
-                    DbgT("AssignProcessToJobObject ok");
-                }
-                else
-                {
-                    DbgT("SKIP AssignProcessToJobObject (experiment)");
-                }
+                Trace.Timed($"CreateProcessW ok, pid={pi.dwProcessId}");
+                // RUNNER-SPEC §5.3 步骤 4：先入 Job。
+                // 无条件执行 —— 曾经有一个 DSH_AOT_NOJOB=1 实验开关用来诊断，
+                // 但实测它会让 terminate 失效、target 进程树泄漏，属于生产路径上的
+                // 定时炸弹，已移除。Job 隔离是本 runner 的核心契约，不可绕过。
+                job.AssignProcess(pi.hProcess);
+                Trace.Timed("AssignProcessToJobObject ok");
 
-                // RUNNER-SPEC §5.3 步骤 5：再放行
-                Native.ResumeThread(pi.hThread);
-                DbgT("ResumeThread ok");
+                // RUNNER-SPEC §5.3 步骤 5：再放行。
+                // ResumeThread 失败时返回 0xFFFFFFFF，必须检查 —— 不检查的话线程
+                // 永远挂起，target 静默不执行，而我们却在等一个永远不会出现的退出码，
+                // 外部表现为「调用卡住」。
+                var suspendCount = Native.ResumeThread(pi.hThread);
+                if (suspendCount == Native.RESUME_THREAD_FAILED)
+                {
+                    var resumeError = Marshal.GetLastWin32Error();
+                    // ERROR_NOT_SUSPENDED 说明线程已经是运行态，不是失败
+                    if (resumeError != Native.ERROR_NOT_SUSPENDED)
+                    {
+                        EmitCreateProcessError(resumeError, _argv[0]);
+                        Finish();
+                        return;
+                    }
+                }
+                Trace.Timed("ResumeThread ok");
             }
             finally
             {
                 // 恢复句柄继承标志：CreateProcessW 一返回就没用了，
                 // 留着会污染 runner 后续创建的其他 target。
-                foreach (var h in suppressedInherit)
-                    Native.SetHandleInformation(h, Native.HANDLE_FLAG_INHERIT, Native.HANDLE_FLAG_INHERIT);
                 foreach (var (h, wasInheritable) in inheritToggled)
                 {
                     if (!wasInheritable)
@@ -372,7 +360,7 @@ internal sealed class JobRunner
         // 扩展名判定：点号存在且不是最后一个字符
         var dot = name.IndexOf('.');
         var hasExtension = dot >= 0 && dot < name.Length - 1;
-        var separator = name.EndsWith(".") ? "" : ".";
+        var separator = name.EndsWith('.') ? "" : ".";
 
         // 候选名顺序：自带扩展名的原样名 → .com → .exe
         var candidates = new List<string>(3);
@@ -455,22 +443,6 @@ internal sealed class JobRunner
         return root.TrimEnd('\\', '/') + "\\";
     }
 
-    private static readonly System.Diagnostics.Stopwatch Sw = System.Diagnostics.Stopwatch.StartNew();
-    private static void DbgT(string msg) => Dbg($"[{Sw.ElapsedMilliseconds,5}ms] {msg}");
-
-    private static void Dbg(string msg)
-    {
-        if (Environment.GetEnvironmentVariable("DSH_AOT_DEBUG") != "1") return;
-        // 写文件而不是 stderr：stderr 已被重定向到 fd2 管道，会丢
-        try
-        {
-            var p = Environment.GetEnvironmentVariable("DSH_AOT_DEBUG_FILE")
-                    ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "aot-runner-trace.log");
-            System.IO.File.AppendAllText(p, "[dbg] " + msg + Environment.NewLine);
-        }
-        catch { }
-    }
-
     private static string BuildCommandLine(string[] argv)
     {
         var sb = new StringBuilder();
@@ -482,10 +454,13 @@ internal sealed class JobRunner
         return sb.ToString();
     }
 
+    /// <summary>命令行里需要加引号的字符。静态复用，避免每次构串都分配数组。</summary>
+    private static readonly char[] QuoteRequiredChars = { ' ', '\t', '"' };
+
     /// <summary>按 Windows 命令行解析规则加引号（CommandLineToArgvW 兼容）。</summary>
     private static void AppendQuoted(StringBuilder sb, string arg)
     {
-        if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
+        if (arg.Length > 0 && arg.IndexOfAny(QuoteRequiredChars) < 0)
         {
             sb.Append(arg);
             return;
@@ -583,7 +558,7 @@ internal sealed class JobRunner
             if (Native.GetExitCodeProcess(process.DangerousGetHandle(), out var code)
                 && code != Native.STILL_ACTIVE)
             {
-                DbgT($"target exited code={code}");
+                Trace.Timed($"target exited code={code}");
 
                 process.Dispose();
                 _process = null;
@@ -769,6 +744,21 @@ internal sealed class JobRunner
                 _thread = null;
             }
         }
+    }
+
+    /// <summary>
+    /// 释放 runner 拥有的全部内核句柄（Job / process / thread）。
+    /// 正常路径由 <see cref="Run"/> 在结束时调用；<see cref="Dispose"/> 只是把
+    /// 同一套清理挂到语言级释放约定上，保证任何退出路径都不会漏句柄。
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+        }
+        ReleaseOwnedJob();
     }
 }
 

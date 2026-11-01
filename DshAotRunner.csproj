@@ -13,16 +13,18 @@
     <RootNamespace>DshAotRunner</RootNamespace>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 
-    <!-- ===== 规避 Low Integrity 陷阱 =====
-         若源码树位于被 DSH Windows 沙箱标记为
-         "Mandatory Label\Low Mandatory Level" 的目录下（例如曾经的
-         workspace-write 会话留下的 ACL 缓存），从该目录启动的 exe 会继承
-         Low IL，导致 MSYS/Cygwin 程序（bash/ls/sh）在
-         NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-*) 处
-         崩溃 0xC0000022，并且无法写 C 盘 TEMP。
-         构建产物默认落到 %TEMP% 下即可避开（%TEMP% 通常是 Medium IL）。
-         需要自定义时用 -p:RunnerOutDir=... 覆盖。 -->
-    <RunnerOutDir Condition="'$(RunnerOutDir)' == ''">$(TEMP)\dsh-aot-runner-dist</RunnerOutDir>
+    <!-- ===== 产物目录 =====
+         正式产物落在仓库内 dist/，可追溯、可进 CI artifact。
+
+         ⚠️ Low Integrity 陷阱（build.sh 会自动自检，见 scripts/check-integrity.sh）：
+         若产物目录被标记为 "Mandatory Label\Low Mandatory Level"（例如曾被
+         DSH Windows 沙箱以 workspace-write 模式打过标签，且退出时有意保留），
+         从该目录启动的 exe 会继承 Low IL，导致：
+           - MSYS/Cygwin 程序（bash/ls/sh）崩在
+             NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-*)，0xC0000022
+           - 无法写 Medium IL 的 %TEMP%（跨完整性级别写入被拒）
+         此时用 -p:RunnerOutDir=... 或 build.sh 的 out 参数指向别的 Medium IL 目录。 -->
+    <RunnerOutDir Condition="'$(RunnerOutDir)' == ''">$(MSBuildThisFileDirectory)dist</RunnerOutDir>
 
     <!-- ===== NativeAOT 极致优化：减小体积 + 加快启动 =====
          这些开关不改变程序语义。UseSystemResourceKeys 会把框架内部异常消息
@@ -43,5 +45,15 @@
 
     <!-- 本项目零反射，可安全禁用 -->
     <IlcDisableReflection>true</IlcDisableReflection>
+
+    <!-- ===== 编译期质量门禁 =====
+         把「警告」当错误处理，避免实验期的宽松编译把问题带进正式代码。
+         TreatWarningsAsErrors 只对确定性规则生效；NativeAOT 的裁剪/AOT 分析器
+         输出仍走 warning，这里一并升级，任何新增告警都会挡住构建。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>9999</WarningLevel>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 </Project>

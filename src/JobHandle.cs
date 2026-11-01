@@ -7,7 +7,10 @@ namespace DshAotRunner;
 /// <summary>Job Object 句柄。派生 SafeHandle 保证不会被 GC 提前回收。</summary>
 internal sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
 {
-    private SafeJobHandle() : base(true) { }
+    // CA1419：SafeHandle 的派生类型的无参构造函数必须与类型本身一样可见，
+    // 否则运行时无法通过反射创建继承者的实例（安全关键路径会失败）。
+    // 这里把构造函数开放为 public，实例仍只经 Create() 产生。
+    public SafeJobHandle() : base(true) { }
 
     public static SafeJobHandle Create()
     {
