@@ -76,6 +76,7 @@ if [ "$CHECK" = "1" ]; then
   node --check test/runner-client.js
   node --check test/ab-verify.js
   node --check test/leak-verify.js
+  node --check test/race-verify.js
   node --check bench/d1-ab-bench.js
 
   echo "==> 质量门禁全部通过"
@@ -127,6 +128,10 @@ if [ "$TEST" = "1" ]; then
   echo
   echo "==> S5 零泄漏 / 混沌回归（约 90s）"
   node --test test/leak-verify.js
+
+  echo
+  echo "==> S3 terminate 竞态回归（约 100s）"
+  node --test test/race-verify.js
 fi
 
 if [ "$BENCH" = "1" ]; then

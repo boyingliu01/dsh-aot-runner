@@ -9,7 +9,8 @@
     "clean": "rm -rf obj bin",
     "test": "node --test test/ab-verify.js",
     "test:leak": "node --test test/leak-verify.js",
-    "test:all": "npm test && npm run test:leak",
+    "test:race": "node --test test/race-verify.js",
+    "test:all": "npm test && npm run test:leak && npm run test:race",
     "bench": "node bench/d1-ab-bench.js"
   },
   "engines": {
