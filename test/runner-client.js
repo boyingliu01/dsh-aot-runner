@@ -8,7 +8,7 @@
  *
  * AOT runner 用 NDJSON over pipes 取代 Node IPC，语义对齐。
  */
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -115,6 +115,107 @@ function targetEnv(extra = {}) {
 }
 
 /**
+ * 模拟真实 host 的 control 环境契约。
+ *
+ * 真实链路（@deepseek-ai/dsh-subprocess-local 的 targetEnvironment /
+ * controlEnvironment）：**host** 在发起调用前就向 target 的环境里注入
+ * DSH_SUBPROCESS_CONTROL=pipe，随 start 请求的 env 一起送达 runner，
+ * runner 只做原样透传 —— runner 自己**不**注入这个标记。
+ *
+ * 早期本客户端没有模拟这一步，导致 A/B 里 target 永远看不到标记，
+ * 从而掩盖了 control 语义的真实差异。
+ *
+ * @param {object} env target 环境
+ * @param {boolean} control 是否启用 control channel
+ */
+function controlEnv(env, control) {
+  if (!control) return env;
+  return { ...env, DSH_SUBPROCESS_CONTROL: 'pipe' };
+}
+
+/** 启动 runner 但**不等待结果**，返回可控句柄 —— 供泄漏/竞态测试使用。 */
+function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), control = false }) {
+  const isAot = kind === 'aot';
+  const stdio = isAot
+    ? [0, 1, 2, 3, 4, 5, 6].map(() => 'pipe')
+    : ['ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 'pipe'];
+  if (control) stdio.push(isAot ? 'pipe' : 'overlapped');
+
+  const childEnv = isAot
+    ? (() => { const e = { ...process.env }; delete e.DSH_SUBPROCESS_RUNNER; return e; })()
+    : { ...process.env, DSH_SUBPROCESS_RUNNER: 'windows' };
+
+  const c = isAot
+    ? spawn(AOT_RUNNER, ['--', ...argv], { cwd, windowsHide: true, env: childEnv, stdio })
+    : spawn(NODE, [NODE_RUNNER, '--', ...argv], { cwd: process.cwd(), windowsHide: true, env: childEnv, stdio });
+
+  const state = { stdout: '', stderr: '', proto: '', controlData: '', result: null, pid: null };
+
+  const payload = { type: 'start', cwd, env: controlEnv(env, control) };
+  if (control) payload.control = 'pipe';
+
+  if (isAot) {
+    if (c.stdio[5]) c.stdio[5].on('data', (d) => { state.stdout += d.toString(); });
+    if (c.stdio[6]) c.stdio[6].on('data', (d) => { state.stderr += d.toString(); });
+    if (control && c.stdio[7]) c.stdio[7].on('data', (d) => { state.controlData += d.toString(); });
+    c.stdout.on('data', (d) => {
+      state.proto += d.toString();
+      let idx;
+      while ((idx = state.proto.indexOf('\n')) >= 0) {
+        const line = state.proto.slice(0, idx);
+        state.proto = state.proto.slice(idx + 1);
+        if (!line.trim()) continue;
+        try {
+          const m = JSON.parse(line);
+          if (m.type === 'target-exit' || m.type === 'error') state.result = m;
+        } catch { /* 半包，等下一片 */ }
+      }
+    });
+  } else {
+    c.on('message', (m) => {
+      if (m && (m.type === 'target-exit' || m.type === 'error')) state.result = m;
+    });
+    if (c.stdio[5]) c.stdio[5].on('data', (d) => { state.stdout += d.toString(); });
+    if (c.stdio[6]) c.stdio[6].on('data', (d) => { state.stderr += d.toString(); });
+    if (control && c.stdio[7]) c.stdio[7].on('data', (d) => { state.controlData += d.toString(); });
+  }
+
+  c.on('spawn', () => {
+    state.pid = c.pid;
+    // terminate 需要知道 target 已起来，这里留一小段让 start 先被消费
+    setTimeout(() => {
+      try {
+        if (isAot) c.stdin.write(JSON.stringify(payload) + '\n');
+        else c.send(payload);
+      } catch { /* runner 可能已退出 */ }
+    }, 30);
+  });
+
+  return {
+    child: c,
+    state,
+    /** 让 runner 向 target 发 terminate（走各自的协议通道） */
+    terminate(signal = 'SIGTERM') {
+      try {
+        if (isAot) c.stdin.write(JSON.stringify({ type: 'terminate', signal }) + '\n');
+        else c.send({ type: 'terminate', signal });
+      } catch { /* ignore */ }
+    },
+    /** 等 target 退出或超时 */
+    wait(ms = 15000) {
+      return new Promise((resolve) => {
+        const done = () => resolve(state);
+        if (state.result) return done();
+        c.on('exit', done);
+        setTimeout(done, ms);
+      });
+    },
+    /** 直接杀 runner 进程本身（混沌测试用） */
+    killRunner() { try { c.kill(); } catch { /* ignore */ } },
+  };
+}
+
+/**
  * 跑一次 node runner。
  * @returns {Promise<{ms, result, stdout, stderr, exitCode, error}>}
  */
@@ -122,7 +223,7 @@ function runNode({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false,
   return new Promise((resolve) => {
     const t0 = process.hrtime.bigint();
     let settled = false;
-    let stdout = '', stderr = '';
+    let stdout = '', stderr = '', controlData = '';
     const stdio = ['ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 'pipe'];
     if (control) stdio.push('overlapped');
 
@@ -132,7 +233,7 @@ function runNode({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false,
       cwd: process.cwd(), windowsHide: true, env: childEnv, stdio,
     });
 
-    const payload = { type: 'start', cwd, env };
+    const payload = { type: 'start', cwd, env: controlEnv(env, control) };
     if (control) payload.control = 'pipe';
 
     const fin = (err, result) => {
@@ -142,7 +243,7 @@ function runNode({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false,
       resolve({
         ms: Number(process.hrtime.bigint() - t0) / 1e6,
         result: result ?? null,
-        stdout, stderr,
+        stdout, stderr, controlData,
         exitCode: result?.type === 'target-exit' ? result.exitCode : null,
         error: err ?? (result?.type === 'error' ? result.error : null),
       });
@@ -151,6 +252,7 @@ function runNode({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false,
     c.on('spawn', () => { try { c.send(payload); } catch (e) { fin(String(e)); } });
     if (c.stdio[5]) c.stdio[5].on('data', (d) => { stdout += d.toString(); });
     if (c.stdio[6]) c.stdio[6].on('data', (d) => { stderr += d.toString(); });
+    if (control && c.stdio[7]) c.stdio[7].on('data', (d) => { controlData += d.toString(); });
     c.on('message', (m) => {
       if (m && (m.type === 'target-exit' || m.type === 'error')) fin(null, m);
     });
@@ -168,7 +270,7 @@ function runAot({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false, 
   return new Promise((resolve) => {
     const t0 = process.hrtime.bigint();
     let settled = false;
-    let stdout = '', stderr = '', proto = '';
+    let stdout = '', stderr = '', proto = '', controlData = '';
     const stdio = ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'];
     if (control) stdio.push('pipe');
 
@@ -179,7 +281,7 @@ function runAot({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false, 
       cwd, windowsHide: true, env: childEnv, stdio,
     });
 
-    const payload = { type: 'start', cwd, env };
+    const payload = { type: 'start', cwd, env: controlEnv(env, control) };
     if (control) payload.control = 'pipe';
 
     const fin = (err, result) => {
@@ -189,7 +291,7 @@ function runAot({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false, 
       resolve({
         ms: Number(process.hrtime.bigint() - t0) / 1e6,
         result: result ?? null,
-        stdout, stderr, proto,
+        stdout, stderr, proto, controlData,
         exitCode: result?.type === 'target-exit' ? result.exitCode : null,
         error: err ?? (result?.type === 'error' ? result.error : null),
       });
@@ -200,6 +302,7 @@ function runAot({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false, 
     });
     if (c.stdio[5]) c.stdio[5].on('data', (d) => { stdout += d.toString(); });
     if (c.stdio[6]) c.stdio[6].on('data', (d) => { stderr += d.toString(); });
+    if (control && c.stdio[7]) c.stdio[7].on('data', (d) => { controlData += d.toString(); });
     c.stdout.on('data', (d) => {
       proto += d.toString();
       let idx;
@@ -263,11 +366,51 @@ function listDescendantPids(rootPid) {
 
 /** 某个 pid 是否还活着 */
 function isAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  // 注意：不能用 process.kill(pid, 0) 判断 —— Windows 上若父进程仍持有被杀子进程的
+  // 句柄，进程已终止但句柄未回收，kill(pid,0) 仍会「成功」，把僵尸判成存活，
+  // 导致零泄漏测试出现随机的假阳性（Issue #3 实测）。
+  //
+  // 改用 Win32 进程查询：能查到条目 = 真的还在跑（Get-Process 会过滤掉已终止项）。
+  try {
+    const out = execFileSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command',
+        `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($null -ne $p) { 'ALIVE' } else { 'GONE' }`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 },
+    );
+    return out.trim() === 'ALIVE';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 批量版 isAlive —— 一次 PowerShell 查完一组 PID。
+ * 100 轮回归里逐 PID 起 PowerShell 会把测试拖到不可接受的长度。
+ * @returns {Set<number>} 仍然存活的 PID
+ */
+function alivePids(pids) {
+  const list = [...new Set(pids.filter((p) => Number.isFinite(p) && p > 0))];
+  if (list.length === 0) return new Set();
+  try {
+    const out = execFileSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command',
+        `Get-Process -Id ${list.join(',')} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20000 },
+    );
+    return new Set(
+      out.split(/\r?\n/).map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0),
+    );
+  } catch {
+    // 全部 PID 都不存在时 PowerShell 会以非零码退出且无输出
+    return new Set();
+  }
 }
 
 module.exports = {
   REPO_ROOT, NODE, NODE_RUNNER, AOT_RUNNER, CONTROL_FD,
   assertEnvironment, resolveNodeRunner, resolveAotRunner,
-  targetEnv, runNode, runAot, runFloor, stats, listDescendantPids, isAlive,
+  targetEnv, controlEnv, runNode, runAot, runFloor, stats, listDescendantPids, isAlive,
+  launchRunner, alivePids,
 };

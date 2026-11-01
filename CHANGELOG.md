@@ -55,8 +55,9 @@
   待办按 P0/P1/P2 重排。
 - 记录 **CI 决策**：暂不搭建 GitHub Actions，用本地质量门禁替代，
   该项从 v2.0.0 阻塞条件中划掉。
-- 记录 **`resolveWindowsExecutable` 搜索根缺口**（AOT 侧缺 applicationName 目录回退，
-  现有 A/B 用例覆盖不到）。
+- 修正 **`resolveWindowsExecutable` 搜索根缺口的误判**：复核 DSH 源码
+  （`runner-launch-*.js:1485`）确认其搜索根只有 cwd + PATH，AOT 实现本就一致；
+  早先观察到的差异是探测脚本传了 glob 模式的 cwd 导致的测量伪迹。
 
 ## [1.0.0] - 2026-10-31
 

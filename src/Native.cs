@@ -165,6 +165,11 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
 
+    /// <summary>查询句柄类型：FILE_TYPE_PIPE(3) / FILE_TYPE_CHAR(2) / FILE_TYPE_DISK(1)。
+    /// CRT 描述符表的 flags 字节需要它来区分管道与字符设备。</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern int GetFileType(IntPtr hFile);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetHandleInformation(IntPtr hObject, out uint lpdwFlags);
 

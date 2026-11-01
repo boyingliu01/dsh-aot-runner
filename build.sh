@@ -75,6 +75,7 @@ if [ "$CHECK" = "1" ]; then
   echo "==> 质量门禁：JS 语法"
   node --check test/runner-client.js
   node --check test/ab-verify.js
+  node --check test/leak-verify.js
   node --check bench/d1-ab-bench.js
 
   echo "==> 质量门禁全部通过"
@@ -122,6 +123,10 @@ if [ "$TEST" = "1" ]; then
   echo
   echo "==> S4 A/B 验证（node runner vs AOT runner）"
   node --test test/ab-verify.js
+
+  echo
+  echo "==> S5 零泄漏 / 混沌回归（约 90s）"
+  node --test test/leak-verify.js
 fi
 
 if [ "$BENCH" = "1" ]; then

@@ -1,4 +1,5 @@
 // 核心进程管理 —— 严格对齐 RUNNER-SPEC.md
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;   // 仅 JsonDocument（PeekType/ParseStart 内部用），禁用 JsonSerializer
@@ -41,32 +42,56 @@ internal sealed class JobRunner : IDisposable
         var stdin = Console.OpenStandardInput();
         var reader = new LineReader(stdin);
 
-        while (!_finished)
+        // 主循环必须能被 Finish() 唤醒。
+        // 阻塞在同步 ReadByte() 上时，Dispose 流并不能打断另一个线程的读，
+        // 而真实 host 又不会关闭 stdin 写端 —— 结果就是协议结果已发出、
+        // 进程却永远挂着（Issue #3 实测：每次 terminate 泄漏一个 runner）。
+        //
+        // 做法：读线程 + 有界等待。主线程只做「取一行 / 检查是否该退出」，
+        // 等待设了超时，于是 _finished 一旦置位就能在 ≤50ms 内退出。
+        var lines = new BlockingCollection<string?>(new ConcurrentQueue<string?>());
+        var readerThread = new Thread(() =>
         {
-            string? line;
             try
             {
-                line = reader.ReadLine();
+                while (true)
+                {
+                    var l = reader.ReadLine();
+                    lines.Add(l);
+                    if (l is null) break;           // EOF 之后不再产出
+                }
             }
-            catch (IOException ex) when (ex.Message.Contains("Broken") || ex.Message.Contains("pipe"))
+            catch (Exception)
             {
-                OnDisconnect();
-                break;
+                lines.Add(null);                     // 读失败等同于流结束
             }
+        })
+        { IsBackground = true, Name = "stdin-reader" };
+        readerThread.Start();
 
-            if (line is null)
+        try
+        {
+            while (!_finished)
             {
-                // stdin EOF = 父进程断开（RUNNER-SPEC §4.2）
-                OnDisconnect();
-                break;
-            }
+                if (!lines.TryTake(out var line, 50))
+                    continue;                        // 超时 → 回头看 _finished
 
-            if (line.Length == 0) continue;
-            Trace.Timed($"got message: {line}");
-            HandleMessage(line);
+                if (line is null)
+                {
+                    if (_finished) break;            // Finish 之后的 EOF，正常收尾
+                    OnDisconnect();
+                    break;
+                }
+
+                if (line.Length == 0) continue;
+                Trace.Timed($"got message: {line}");
+                HandleMessage(line);
+            }
         }
-
-        ReleaseOwnedJob();
+        finally
+        {
+            ReleaseOwnedJob();
+        }
         return 0;
     }
 
@@ -184,6 +209,10 @@ internal sealed class JobRunner : IDisposable
         }
 
         // ---- 2. 构建环境块（CREATE_UNICODE_ENVIRONMENT → UTF-16）----
+        // 注意：DSH_SUBPROCESS_CONTROL=pipe 由 **host** 注入（runner-launch 的
+        // targetEnvironment / controlEnvironment），随 start 请求的 env 一起送达，
+        // runner 只负责原样透传。runner 自己再注入一次会造成与 node 的分歧 ——
+        // 那时 target 会看到一个 host 并没有设置的标记。
         var envBlock = BuildEnvironmentBlock(req.Env);
 
         // ---- 3. 把 target 的 stdio 接到 host 传入的通道 ----
@@ -191,6 +220,7 @@ internal sealed class JobRunner : IDisposable
         //   stdio[4] → fd 4 (target stdin)
         //   stdio[5] → fd 5 (target stdout)
         //   stdio[6] → fd 6 (target stderr)
+        //   stdio[7] → fd 7 (control channel，仅 control:"pipe" 时存在)
         // Windows 上必须用 CRT 的 _get_osfhandle 取句柄 —— GetStdHandle(4/5/6)
         // 只会返回 INVALID_HANDLE_VALUE（实测 0xFFFFFFFF），因为它查的是标准
         // 句柄表的固定索引（-10/-11/-12），不是 CRT 的 fd 表。
@@ -203,7 +233,34 @@ internal sealed class JobRunner : IDisposable
         var hStdOut = IsValid(hOut) ? hOut : Native.GetStdHandle(Native.STD_OUTPUT_HANDLE);
         var hStdErr = IsValid(hErr) ? hErr : Native.GetStdHandle(Native.STD_ERROR_HANDLE);
 
-        // ---- 3b. 精确控制继承：只放行 target 需要的 3 个句柄 ----
+        // ---- 3a. control channel（Issue #2）----
+        // control:"pipe" 时 host 在 stdio[7] 传一个管道，target 会用
+        // openInheritedControlChannel() 以 fd 7 打开它。
+        //
+        // 必须做两件事，缺一 target 就用不了：
+        //   1. 在 target 环境块里注入 DSH_SUBPROCESS_CONTROL=pipe
+        //      （target 靠这个标记才知道「我继承了控制通道」）
+        //   2. 通过 STARTUPINFO.lpReserved2 下发 CRT 描述符表，
+        //      把 fd 7 映射到该句柄（只置继承标志不够，见 CrtDescriptorTable 注释）
+        var controlRequested = req.Control == "pipe";
+        var hControl = controlRequested ? Native.CrtGetOsFHandle(CrtDescriptorTable.ControlFileDescriptor) : IntPtr.Zero;
+        if (controlRequested && !IsValid(hControl))
+        {
+            // host 声明了 control 却没传可用的 fd 7：这是 host 侧契约违约，
+            // 不能静默降级成「无 control」，否则 target 会永远等一条不存在的通道。
+            PublishResult(new ErrorResult
+            {
+                Error = new SerializedError
+                {
+                    Name = "Error",
+                    Message = "subprocess control channel was not inherited",
+                    Code = "EPROTOCOL",
+                },
+            });
+            return;
+        }
+
+        // ---- 3b. 精确控制继承：只放行 target 需要的句柄 ----
         // CreateProcessW 的 bInheritHandles=true 会继承本进程所有「可继承」句柄。
         // runner 自己从 host 继承来的协议管道（fd0/fd1/fd2）默认就是可继承的，
         // 若不处理，target 会连 runner 的协议通道一起继承走。
@@ -213,10 +270,13 @@ internal sealed class JobRunner : IDisposable
         //   NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022
         // 实测 bash 因此 100% 启动失败（exit=-1073741502）。
         //
-        // 做法：把 target 要用的 3 个句柄显式置为 HANDLE_FLAG_INHERIT，
+        // 做法：把 target 要用的句柄显式置为 HANDLE_FLAG_INHERIT，
         // CreateProcessW 返回后在 finally 里原样恢复。
-        var inheritToggled = new List<(IntPtr Handle, bool WasInheritable)>(3);
-        foreach (var h in new[] { hStdIn, hStdOut, hStdErr })
+        var targetHandles = controlRequested
+            ? new[] { hStdIn, hStdOut, hStdErr, hControl }
+            : new[] { hStdIn, hStdOut, hStdErr };
+        var inheritToggled = new List<(IntPtr Handle, bool WasInheritable)>(targetHandles.Length);
+        foreach (var h in targetHandles)
         {
             if (!IsValid(h)) continue;
             if (Native.GetHandleInformation(h, out var flags))
@@ -226,6 +286,15 @@ internal sealed class JobRunner : IDisposable
                 if (!wasInheritable)
                     Native.SetHandleInformation(h, Native.HANDLE_FLAG_INHERIT, Native.HANDLE_FLAG_INHERIT);
             }
+        }
+
+        // CRT 描述符表：只有 control 请求时才需要（其余情况走默认标准句柄表）
+        var descriptorTable = CrtDescriptorTable.Encode(hStdIn, hStdOut, hStdErr, hControl);
+        var descriptorPtr = IntPtr.Zero;
+        if (descriptorTable is not null)
+        {
+            descriptorPtr = Marshal.AllocHGlobal(descriptorTable.Length);
+            Marshal.Copy(descriptorTable, 0, descriptorPtr, descriptorTable.Length);
         }
 
         // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
@@ -243,6 +312,15 @@ internal sealed class JobRunner : IDisposable
             hStdOutput = hStdOut,
             hStdError = hStdErr,
         };
+
+        // control 请求：把 CRT 描述符表挂到 STARTUPINFO 上。
+        // cbReserved2 是字节数，lpReserved2 指向那块内存；
+        // CreateProcessW 会在子进程启动期据此重建 fd 表。
+        if (descriptorPtr != IntPtr.Zero)
+        {
+            si.cbReserved2 = (short)descriptorTable!.Length;
+            si.lpReserved2 = descriptorPtr;
+        }
 
         var envPtr = Marshal.AllocHGlobal(envBlock.Length);
         try
@@ -298,6 +376,9 @@ internal sealed class JobRunner : IDisposable
                     }
                 }
                 Trace.Timed("ResumeThread ok");
+                // 注：DSH 的 runner.js 会在 spawn 后 closeSync(4/5/6/7) 关闭自己的副本。
+                // AOT 版暂不照做 —— 现有 24 项 A/B 在不关的情况下已与 node 行为一致，
+                // 贸然改动会影响已稳定的输出通道语义。见 Issue #2 的后续评估。
             }
             finally
             {
@@ -313,6 +394,7 @@ internal sealed class JobRunner : IDisposable
         finally
         {
             Marshal.FreeHGlobal(envPtr);
+            if (descriptorPtr != IntPtr.Zero) Marshal.FreeHGlobal(descriptorPtr);
         }
     }
 
@@ -717,6 +799,9 @@ internal sealed class JobRunner : IDisposable
             _finished = true;
         }
         ReleaseOwnedJob();
+
+        // 主循环在 lines.TryTake(50ms) 上等读线程，_finished 置位后 ≤50ms 内自行退出。
+        // 不再需要在这里主动断流 —— 见 Run() 中的说明。
     }
 
     /// <summary>

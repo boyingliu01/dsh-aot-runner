@@ -19,6 +19,22 @@ assertEnvironment();
 console.log(`node runner: ${NODE_RUNNER}`);
 console.log(`AOT runner : ${AOT_RUNNER}\n`);
 
+/** target 侧探针：fd 7 能否成功 fstat（= CRT 描述符表是否正确下发） */
+const CFG_FD7_PROBE = [
+  'import os',
+  'try:',
+  '    os.fstat(7)',
+  '    print("FD7_VALID")',
+  'except OSError:',
+  '    print("FD7_INVALID")',
+].join('\n');
+
+/** target 侧探针：host 注入的 control 标记是否透传到位 */
+const CFG_MARKER_PROBE = [
+  'import os',
+  'print("MARKER=" + os.environ.get("DSH_SUBPROCESS_CONTROL", "MISSING"))',
+].join('\n');
+
 /** 用例定义 */
 const CASES = [
   // ---- cmd ----
@@ -58,19 +74,49 @@ const CASES = [
 
   // ---- 大输出 ----
   { name: 'cmd/bigout',      argv: ['cmd.exe', '/c', 'for /L %i in (1,1,500) do @echo LINE%i'], cwd: 'C:/Windows' },
+
+  // ---- control channel（Issue #2）----
+  // 真实契约：host 在 start 请求里带 control:"pipe"，并在 target 环境里注入
+  // DSH_SUBPROCESS_CONTROL=pipe；runner 必须把 fd 7 透传给 target。
+  // 断言刻意落在「target 能否真的用到 fd 7」，而不是「有没有报错」——
+  // 后者在 fd 7 无效时同样会通过。
+  {
+    name: 'control/fd7-open',
+    argv: ['python', '-c', CFG_FD7_PROBE],
+    cwd: 'C:/Windows',
+    control: true,
+    // fd 7 是否可被 target 打开（os.fstat 成功 = CRT 描述符表已正确下发）
+    expectStdout: (out) => out.includes('FD7_VALID'),
+  },
+  {
+    name: 'control/env-marker',
+    argv: ['python', '-c', CFG_MARKER_PROBE],
+    cwd: 'C:/Windows',
+    control: true,
+    // host 注入的标记必须原样透传给 target
+    expectStdout: (out) => out.trim() === 'MARKER=pipe',
+  },
+  {
+    name: 'control/no-control-no-fd7',
+    argv: ['python', '-c', CFG_FD7_PROBE],
+    cwd: 'C:/Windows',
+    control: false,
+    // 反向断言：不带 control 时 fd 7 必须是无效的（否则说明我们滥发了句柄）
+    expectStdout: (out) => out.includes('FD7_INVALID'),
+  },
 ];
 
 async function pair(t, c) {
-  const [n, a] = await Promise.all([
-    runNode({ argv: c.argv, cwd: c.cwd, env: c.env }),
-    runAot({ argv: c.argv, cwd: c.cwd, env: c.env }),
-  ]);
+  const opts = { argv: c.argv, cwd: c.cwd, env: c.env, control: c.control === true };
+  const [n, a] = await Promise.all([runNode(opts), runAot(opts)]);
 
   const report = {
     stdoutEq: n.stdout === a.stdout,
     stderrEq: n.stderr === a.stderr,
     codeEq: n.exitCode === a.exitCode,
     errorEq: JSON.stringify(n.error) === JSON.stringify(a.error),
+    // control 用例额外比对 target 经 fd 7 回传的字节
+    controlEq: (n.controlData ?? '') === (a.controlData ?? ''),
   };
   const allEq = Object.values(report).every(Boolean);
 
@@ -80,6 +126,7 @@ async function pair(t, c) {
     if (!report.stderrEq) console.log(`   stderr node=${JSON.stringify(n.stderr.slice(0, 200))}\n          aot =${JSON.stringify(a.stderr.slice(0, 200))}`);
     if (!report.codeEq) console.log(`   exit   node=${n.exitCode} aot=${a.exitCode}`);
     if (!report.errorEq) console.log(`   error  node=${JSON.stringify(n.error)} aot=${JSON.stringify(a.error)}`);
+    if (!report.controlEq) console.log(`   control node=${JSON.stringify(n.controlData)} aot=${JSON.stringify(a.controlData)}`);
   } else {
     console.log(`✅ ${c.name.padEnd(18)} stdout=${JSON.stringify(n.stdout.slice(0, 30)).padEnd(34)} code=${n.exitCode}`);
   }
@@ -88,6 +135,14 @@ async function pair(t, c) {
   assert.ok(report.stderrEq, `${c.name}: stderr 不一致`);
   assert.ok(report.codeEq, `${c.name}: exitCode 不一致`);
   assert.ok(report.errorEq, `${c.name}: error 对象不一致`);
+  assert.ok(report.controlEq, `${c.name}: control 通道数据不一致`);
+
+  // 期望断言：不能只靠「两边一致」——两边同时错也会通过。
+  // 这是防止 A/B 比对变成「一致性幻觉」的关键一层。
+  if (c.expectStdout) {
+    assert.ok(c.expectStdout(n.stdout), `${c.name}: node 侧 stdout 未满足期望，实际 ${JSON.stringify(n.stdout)}`);
+    assert.ok(c.expectStdout(a.stdout), `${c.name}: AOT 侧 stdout 未满足期望，实际 ${JSON.stringify(a.stdout)}`);
+  }
 }
 
 for (const c of CASES) {

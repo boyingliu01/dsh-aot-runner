@@ -8,6 +8,7 @@ set -e
 
 echo "[pre-commit] JS 语法检查"
 node --check test/ab-verify.js
+node --check test/leak-verify.js
 node --check test/runner-client.js
 node --check bench/d1-ab-bench.js
 
