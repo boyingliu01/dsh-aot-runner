@@ -149,7 +149,11 @@ function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), contr
     ? spawn(AOT_RUNNER, ['--', ...argv], { cwd, windowsHide: true, env: childEnv, stdio })
     : spawn(NODE, [NODE_RUNNER, '--', ...argv], { cwd: process.cwd(), windowsHide: true, env: childEnv, stdio });
 
-  const state = { stdout: '', stderr: '', proto: '', controlData: '', result: null, pid: null };
+  // proto 是解析缓冲区（会被消费），protoRaw 记录所有完整原始行 ——
+  // 后者用于「有没有重复投递终态结果」这类断言。混用会导致该断言永远成立。
+  const state = {
+    stdout: '', stderr: '', proto: '', protoRaw: [], controlData: '', result: null, pid: null,
+  };
 
   const payload = { type: 'start', cwd, env: controlEnv(env, control) };
   if (control) payload.control = 'pipe';
@@ -165,6 +169,7 @@ function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), contr
         const line = state.proto.slice(0, idx);
         state.proto = state.proto.slice(idx + 1);
         if (!line.trim()) continue;
+        state.protoRaw.push(line);
         try {
           const m = JSON.parse(line);
           if (m.type === 'target-exit' || m.type === 'error') state.result = m;
