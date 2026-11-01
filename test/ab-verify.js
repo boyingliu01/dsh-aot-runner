@@ -70,7 +70,34 @@ const CASES = [
   { name: 'git/version',     argv: ['git', '--version'],                          cwd: 'C:/Windows' },
 
   // ---- 边界：不存在的命令 ----
-  { name: 'error/enoent',    argv: ['definitely-not-a-real-command-xyz'],          cwd: 'C:/Windows' },
+  // expectErrorShape 做**结构化**断言，而不只是 JSON.stringify 比字符串 ——
+  // 后者分不清「字段缺失」与「字段为 null」，这正是 Issue #9 记录的掩盖效应。
+  {
+    name: 'error/enoent',
+    argv: ['definitely-not-a-real-command-xyz'],
+    cwd: 'C:/Windows',
+    expectErrorShape: {
+      name: 'Error',
+      messageIncludes: 'ENOENT',
+      code: 'ENOENT',
+      syscall: 'spawn definitely-not-a-real-command-xyz',
+      path: 'definitely-not-a-real-command-xyz',
+    },
+  },
+  {
+    // npm 只有 npm.cmd，而按 DSH 的解析规则候选扩展名只有 .com/.exe，
+    // 因此必须解析失败。这条同时验证「AOT 不得擅自补 .cmd 让它跑起来」。
+    name: 'error/npm-not-resolvable',
+    argv: ['npm', 'does-not-matter'],
+    cwd: 'C:/Windows',
+    expectErrorShape: {
+      name: 'Error',
+      messageIncludes: 'ENOENT',
+      code: 'ENOENT',
+      syscall: 'spawn npm',
+      path: 'npm',
+    },
+  },
 
   // ---- 大输出 ----
   { name: 'cmd/bigout',      argv: ['cmd.exe', '/c', 'for /L %i in (1,1,500) do @echo LINE%i'], cwd: 'C:/Windows' },
@@ -142,6 +169,70 @@ async function pair(t, c) {
   if (c.expectStdout) {
     assert.ok(c.expectStdout(n.stdout), `${c.name}: node 侧 stdout 未满足期望，实际 ${JSON.stringify(n.stdout)}`);
     assert.ok(c.expectStdout(a.stdout), `${c.name}: AOT 侧 stdout 未满足期望，实际 ${JSON.stringify(a.stdout)}`);
+  }
+
+  if (c.expectErrorShape) {
+    checkErrorShape(c.name, 'node', n.error, c.expectErrorShape);
+    checkErrorShape(c.name, 'aot', a.error, c.expectErrorShape);
+  }
+}
+
+/**
+ * 对一个 error 对象做**结构化**校验。
+ *
+ * 为什么需要它：现有 A/B 用 JSON.stringify 比对两侧错误，只能证明「两边一样」，
+ * 不能证明「形状正确」。`{"code":null}` 与 `{"code":"ENOENT"}` 在字符串层面
+ * 一眼可分，但 `{"code":null}` 与**缺字段**在语义上天差地别 ——
+ * host 的 isSerializedRunnerError 只接受 undefined 或 string，
+ * null 会让整条错误被丢弃（见 CHANGELOG 里 bf645c6 修复的这一条）。
+ *
+ * @param {string} caseName 用例名，用于报错
+ * @param {string} side 'node' | 'aot'
+ * @param {object|null} err 实际错误对象
+ * @param {object} shape 期望形状
+ */
+function checkErrorShape(caseName, side, err, shape) {
+  assert.ok(err && typeof err === 'object', `${caseName}/${side}: 应返回 error 对象，实际 ${JSON.stringify(err)}`);
+
+  for (const [key, expected] of Object.entries(shape)) {
+    if (key === 'messageIncludes') {
+      assert.ok(
+        typeof err.message === 'string' && err.message.includes(expected),
+        `${caseName}/${side}: message 应包含 ${JSON.stringify(expected)}，实际 ${JSON.stringify(err.message)}`,
+      );
+      continue;
+    }
+    assert.strictEqual(err[key], expected, `${caseName}/${side}: error.${key} 期望 ${JSON.stringify(expected)}，实际 ${JSON.stringify(err[key])}`);
+  }
+
+  // 任何字段都不允许显式为 null —— null 会被 host 侧视为非法并丢弃整条结果
+  for (const [key, value] of Object.entries(err)) {
+    assert.notStrictEqual(value, null, `${caseName}/${side}: error.${key} 不得为 null（host 侧会判定整条错误非法）`);
+  }
+
+  // 字段集必须与期望集合一致。
+  // 期望字段集 = shape 里的普通键（messageIncludes 是断言指令，不是字段名）
+  //            + message（只要出现 messageIncludes 就必然有 message 字段）
+  const expectedKeys = Object.keys(shape).filter((k) => k !== 'messageIncludes');
+  if (shape.messageIncludes !== undefined) expectedKeys.push('message');
+  expectedKeys.sort();
+  const actualKeys = Object.keys(err).sort();
+  assert.deepStrictEqual(
+    actualKeys,
+    expectedKeys,
+    `${caseName}/${side}: 错误对象字段集不符，期望 ${JSON.stringify(expectedKeys)}，实际 ${JSON.stringify(actualKeys)}`,
+  );
+
+  // 显式存在性检查：deepStrictEqual 的字段集比对已经覆盖了这一点，
+  // 但这里再独立断言一次「必需字段的值必须是有效字符串」，因为
+  // 真正的缺陷形态是 ProtocolJson 省略 null 字段 → 字段直接消失。
+  // 上面的字段集断言会同时抓到这两种表现（缺失 / null 被省略），
+  // 这条则把意图写死，避免将来有人放宽字段集比对时把保护一起改没。
+  for (const key of ['name', 'code']) {
+    assert.ok(
+      typeof err[key] === 'string' && err[key].length > 0,
+      `${caseName}/${side}: error.${key} 必须是非空字符串，实际 ${JSON.stringify(err[key])}`,
+    );
   }
 }
 
