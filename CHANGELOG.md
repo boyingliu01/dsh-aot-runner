@@ -3,6 +3,61 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+正式开发环境基建。不改变对外行为 —— 24 项 A/B 验证保持 24/24 通过，
+产物体积从 1,212,928 降到 1,207,296 字节。
+
+### 新增
+
+- **本地质量门禁**（`./build.sh --check`）：C# 格式 + 0 警告静态检查 + JS 语法，
+  三道检查任一失败即非零退出。已做正反例自校验（注入违规能拦下，恢复后通过）。
+- **`.editorconfig` / `.csharp-formatting.json`**：C# 格式规则，`dotnet format` 可一键修复。
+- **`scripts/check-integrity.sh`**：Low IL 目录自检，`build.sh` 在构建前自动调用，
+  命中 Low Integrity 直接中止而不是产出一个跑不起来的 exe。
+- **`src/Trace.cs`**：唯一的诊断日志写入口。此前 `Program.cs` 与 `JobRunner.cs`
+  各有一套 `Dbg`，一处硬编码文件名且不认 `DSH_AOT_DEBUG_FILE`。
+- **`docs/开发环境.md`**：工具链版本、验证步骤、runner 路径解析规则、故障排查表。
+
+### 变更
+
+- **产物目录** 从 `%TEMP%/dsh-aot-runner-dist` 改为仓库内 `dist/`，可追溯。
+  新增 `./build.sh --out` 指定目录。
+- **测试不再硬编码机器路径**：`test/runner-client.js` 与 `bench/d1-ab-bench.js`
+  改为多级查找（`AOT_RUNNER` / `DSH_RUNNER` → 仓库 `node_modules` → `DSH_HOME` /
+  `%USERPROFILE%/.workbuddy/...`），找不到时给出可操作报错。
+- **静态检查升级为硬约束**：`TreatWarningsAsErrors=true`，`AnalysisLevel=latest-recommended`。
+- `JobRunner` 实现 `IDisposable`，句柄清理挂到语言级释放约定上。
+
+### 修复
+
+引入严格 analyzer 后一次性暴露并修复的真实缺陷：
+
+- **`ResumeThread` 返回值被忽略**（CA1806）：失败时线程永远挂起，target 静默不执行，
+  而 runner 在等一个永远不会出现的退出码，外部表现为「调用卡住」。
+- **`resolveAotRunner` 静默回退到过期产物**：当 `dist/` 未构建时，测试会拿
+  `%TEMP%` 里的**旧二进制**做 A/B，结论全绿却毫无意义。
+- **`EmitProtocolError` 输出 `"code":null`**：与 `ProtocolJson` 承诺的「null 字段不输出」
+  不一致；host 侧 `isSerializedRunnerError` 会判定为非法并丢弃整条错误结果。
+- **`DSH_AOT_NOJOB=1` 实验开关能让 Job 隔离失效**：实测 terminate 后 target 进程树泄漏
+  （`PING.EXE` 残留）且不回报结果。已删除，`AssignProcessToJobObject` 改为无条件执行。
+- **`SafeJobHandle` 私有构造函数**（CA1419）：SafeHandle 派生类型的无参构造函数
+  必须与类型同可见，否则运行时无法通过反射创建实例。
+
+### 移除
+
+- 实验开关 `DSH_AOT_NOJOB`、`DSH_AOT_SUPPRESS` 及其残留分支。
+- `Program.cs` 中重复的 `Dbg` 实现与死代码 `AppendJsonString`。
+
+### 文档
+
+- README / ROADMAP 与线上 Issue 对齐：修正 Issue 编号错位（熔断器是 #6 不是 #1）、
+  待办按 P0/P1/P2 重排。
+- 记录 **CI 决策**：暂不搭建 GitHub Actions，用本地质量门禁替代，
+  该项从 v2.0.0 阻塞条件中划掉。
+- 记录 **`resolveWindowsExecutable` 搜索根缺口**（AOT 侧缺 applicationName 目录回退，
+  现有 A/B 用例覆盖不到）。
+
 ## [1.0.0] - 2026-10-31
 
 首个可用版本。DSH 子进程 runner 的 NativeAOT 实现，S4 A/B 验证 24/24 通过。

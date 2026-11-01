@@ -24,6 +24,12 @@ internal static class Native
     public const int ERROR_BROKEN_PIPE = 109;
     public const int ERROR_PIPE_NOT_CONNECTED = 233;
 
+    /// <summary>ERROR_NOT_SUSPENDED —— 线程本来就处于运行态，不是 ResumeThread 失败。</summary>
+    public const int ERROR_NOT_SUSPENDED = 267;
+
+    /// <summary>ResumeThread 的失败返回值（同时也是「调用前挂起计数」的哨兵值）。</summary>
+    public const uint RESUME_THREAD_FAILED = 0xFFFFFFFF;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct SECURITY_ATTRIBUTES
     {

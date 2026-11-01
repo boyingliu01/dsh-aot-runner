@@ -11,14 +11,99 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 
-const WS = 'C:/Users/think/.workbuddy/binaries/node/workspace';
+const REPO_ROOT = path.join(__dirname, '..');
+
+/**
+ * 定位 node runner（`@deepseek-ai/dsh-subprocess-local/lib/runner.js`）。
+ *
+ * 这是 A/B 对照的「基线」一侧，必须是本机真实安装的 DSH 内部实现。
+ * 查找顺序（先显式、后推断）：
+ *   1. DSH_RUNNER            显式覆盖，最高优先
+ *   2. NODE_RUNNER           兼容旧脚本的别名
+ *   3. 仓库内 node_modules    (若本项目将来把 DSH 装成 devDependency)
+ *   4. 当前 DSH 安装位置推断   (从 dsh 包自身所在目录反查)
+ *   5. 常见 DSH workspace 位置 (%USERPROFILE%\.workbuddy\binaries\node\workspace)
+ *
+ * 全部找不到时返回 null，由 assertNodeRunnerAvailable() 给出可操作报错，
+ * 而不是在测试中途以 TypeError 崩溃。
+ */
+function resolveNodeRunner() {
+  const candidates = [];
+  if (process.env.DSH_RUNNER) candidates.push(process.env.DSH_RUNNER);
+  if (process.env.NODE_RUNNER) candidates.push(process.env.NODE_RUNNER);
+  candidates.push(path.join(REPO_ROOT, 'node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js'));
+
+  // 从当前进程的可执行文件与 DSH_HOME 推断 workspace 根
+  const workspaceRoots = [];
+  if (process.env.DSH_HOME) workspaceRoots.push(process.env.DSH_HOME);
+  if (process.env.USERPROFILE) {
+    workspaceRoots.push(path.join(process.env.USERPROFILE, '.workbuddy/binaries/node/workspace'));
+  }
+  for (const root of workspaceRoots) {
+    candidates.push(path.join(root, 'node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js'));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch { /* 忽略不可访问的候选 */ }
+  }
+  return null;
+}
+
+/**
+ * 定位 AOT runner。
+ *
+ * ⚠️ 只认两种明确来源，**不做 %TEMP% 之类的兜底回退**：
+ *   1. AOT_RUNNER 环境变量（build.sh 会自动导出）
+ *   2. 仓库内 dist/dsh-aot-runner.exe（build.sh 的默认产物目录）
+ *
+ * 早期版本会回退到 %TEMP%/dsh-aot-runner-dist，结果是：dist/ 里没构建时
+ * 测试静默拿了一个**过期的旧二进制**去做 A/B，结论看着全绿却毫无意义。
+ * 这种「宁可用错的也不报错」的兜底必须去掉。
+ */
+function resolveAotRunner() {
+  const candidates = [];
+  if (process.env.AOT_RUNNER) candidates.push(process.env.AOT_RUNNER);
+  candidates.push(path.join(REPO_ROOT, 'dist/dsh-aot-runner.exe'));
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch { /* 忽略不可访问的候选 */ }
+  }
+  return null;
+}
+
 const NODE = process.execPath;
-const NODE_RUNNER = path.join(WS, 'node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js');
-const AOT_RUNNER = process.env.AOT_RUNNER
-  || path.join(os.tmpdir(), 'dsh-aot-runner-dist', 'dsh-aot-runner.exe');
+const NODE_RUNNER = resolveNodeRunner();
+const AOT_RUNNER = resolveAotRunner();
 const CONTROL_FD = 7;
+
+/**
+ * 断言运行环境齐备，否则抛出**可操作**的错误。
+ * 测试脚本在 require 本模块时就调用它，让「环境缺失」与「行为不一致」区分开。
+ */
+function assertEnvironment({ needAot = true } = {}) {
+  const problems = [];
+  if (NODE_RUNNER === null) {
+    problems.push(
+      '找不到 node runner（@deepseek-ai/dsh-subprocess-local/lib/runner.js）。\n'
+      + '  A/B 验证需要它作为基线。可用 DSH_RUNNER=<绝对路径> 指定。',
+    );
+  }
+  if (needAot && AOT_RUNNER === null) {
+    problems.push(
+      '找不到 AOT runner（dsh-aot-runner.exe）。\n'
+      + '  先跑 ./build.sh，或用 AOT_RUNNER=<绝对路径> 指定。',
+    );
+  }
+  if (problems.length > 0) {
+    throw new Error(`测试环境未就绪：\n\n${problems.join('\n\n')}\n`);
+  }
+}
+
 
 /** 构造 target 环境（模拟 host 传给 runner 的 env） */
 function targetEnv(extra = {}) {
@@ -182,6 +267,7 @@ function isAlive(pid) {
 }
 
 module.exports = {
-  NODE, NODE_RUNNER, AOT_RUNNER, CONTROL_FD,
+  REPO_ROOT, NODE, NODE_RUNNER, AOT_RUNNER, CONTROL_FD,
+  assertEnvironment, resolveNodeRunner, resolveAotRunner,
   targetEnv, runNode, runAot, runFloor, stats, listDescendantPids, isAlive,
 };

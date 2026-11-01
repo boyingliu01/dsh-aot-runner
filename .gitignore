@@ -1,4 +1,5 @@
 # 构建产物
+# dist/ 是 build.sh 的默认正式产物目录（见 DshAotRunner.csproj「产物目录」注释）
 bin/
 obj/
 dist/
@@ -9,6 +10,11 @@ publish/
 *.dll
 *.pdb
 *.obj
+*.lib
+*.ilk
+*.exp
+*.map.json
+*.deps.json
 
 # .NET
 *.user

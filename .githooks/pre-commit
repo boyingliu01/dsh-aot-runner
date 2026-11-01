@@ -2,15 +2,23 @@
 # 本仓库的回归闸门是 `node --test test/ab-verify.js`（node:test），
 # 不是 xp-gate 的 vitest 流程，因此不继承全局 hook。
 #
-# 但复杂度/重复度这类与语言无关的检查仍然有价值：如果本地存在 xp-gate
-# 的边界阈值检查，就跑一遍。
+# 这里只跑「快、不必构建」的检查；完整回归（含 24 项 A/B）请跑
+# `./build.sh --test` 或 `npm test`。
 set -e
-if [ -f package.json ]; then
-  if command -v node >/dev/null 2>&1; then
-    echo "[pre-commit] 语法检查"
-    node --check test/ab-verify.js
-    node --check test/runner-client.js
-    node --check bench/d1-ab-bench.js
+
+echo "[pre-commit] JS 语法检查"
+node --check test/ab-verify.js
+node --check test/runner-client.js
+node --check bench/d1-ab-bench.js
+
+if command -v dotnet >/dev/null 2>&1; then
+  echo "[pre-commit] C# 格式检查"
+  if ! dotnet format --verify-no-changes --verbosity quiet >/dev/null 2>&1; then
+    echo "[pre-commit] 格式不合规，运行 'dotnet format' 修复后重新提交" >&2
+    exit 1
   fi
+else
+  echo "[pre-commit] 跳过 C# 检查（未找到 dotnet）"
 fi
-echo "[pre-commit] OK（完整回归请跑 npm test）"
+
+echo "[pre-commit] OK（完整回归请跑 ./build.sh --test）"

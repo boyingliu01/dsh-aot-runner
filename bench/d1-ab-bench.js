@@ -15,16 +15,30 @@
  */
 const { spawn } = require('child_process');
 const path = require('path');
-const os = require('os');
 
 // ---------------- 配置 ----------------
+// runner 路径解析复用 test/runner-client.js，避免同一套查找逻辑在两处漂移。
+const { resolveNodeRunner, resolveAotRunner } = require('../test/runner-client.js');
+
 const NODE = process.execPath;
-const WS = 'C:/Users/think/.workbuddy/binaries/node/workspace';
-const NODE_RUNNER = path.join(WS, 'node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js');
-const AOT_RUNNER = process.argv[2]
-  || process.env.AOT_RUNNER
-  || path.join(os.tmpdir(), 'dsh-aot-runner-dist', 'dsh-aot-runner.exe');
-const FLOOR = 'C:/Windows/System32/hostname.exe';
+const NODE_RUNNER = process.argv[2] && process.argv[2].endsWith('runner.js')
+  ? process.argv[2]
+  : resolveNodeRunner();
+const AOT_RUNNER = process.argv[2] && process.argv[2].endsWith('.exe')
+  ? process.argv[2]
+  : resolveAotRunner();
+const FLOOR = path.join(process.env.SystemRoot || 'C:/Windows', 'System32/hostname.exe');
+
+if (NODE_RUNNER === null) {
+  console.error('找不到 node runner（@deepseek-ai/dsh-subprocess-local/lib/runner.js）。');
+  console.error('用 DSH_RUNNER=<绝对路径> 指定，或把 DSH 装到可推断的位置。');
+  process.exit(1);
+}
+if (AOT_RUNNER === null) {
+  console.error('找不到 AOT runner（dsh-aot-runner.exe）。');
+  console.error('先跑 ./build.sh，或用 AOT_RUNNER=<绝对路径> 指定。');
+  process.exit(1);
+}
 
 const N = parseInt(process.env.N || '30', 10);
 const TARGET = (process.env.TARGET || 'hostname').split(' ');
