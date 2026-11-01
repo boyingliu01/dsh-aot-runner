@@ -118,6 +118,16 @@ fi
 
 SIZE=$(stat -c %s "$EXE" 2>/dev/null || stat -f %z "$EXE")
 echo "==> 构建成功: $(basename "$EXE") 体积 $SIZE 字节"
+
+# 依赖检查：确认没有 VC++ / .NET 运行时依赖（Issue #5）。
+# 放在构建后立即执行 —— 这决定了产物能不能直接分发给别人，
+# 一旦回归应当立刻暴露，而不是等到发布时才发现。
+echo
+./scripts/check-deps.sh "$EXE" || {
+  echo "依赖检查未通过，产物不可分发。" >&2
+  exit 1
+}
+
 export AOT_RUNNER="$EXE"
 
 if [ "$TEST" = "1" ]; then
