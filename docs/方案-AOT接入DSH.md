@@ -58,10 +58,39 @@ host 的 `send()` 报 `ERR_IPC_CHANNEL_CLOSED`。**AOT 确实无法被真实 hos
 ### 2.1 IPC 帧格式
 
 ```
-[8 字节 序号(LE，恒为 1)][8 字节 payload 长度(LE)][JSON payload + \n]
+[8 字节 type(LE，恒为 1)][8 字节 payload 长度(LE)][JSON payload + \n]
 ```
 
+**第一个字段是 `type` 不是序号**：Windows 上 Node 走 uv_pipe + 阻塞同步 I/O，
+没有 sequence number。`1 = NODE_HANDLE_NORMAL`（普通 JSON），负值是内部句柄帧。
 实测三帧一致：len=36/40/239。
+
+**必须防御**：读到 `type != 1` 时**报 EPROTOCOL，不要按 JSON 解析** —— 负值帧的
+载荷是内部命令而非 JSON。
+
+### 2.1b 读取语义（实测，三个必须处理的行为）
+
+| 行为 | 实测结果 | 影响 |
+|---|---|---|
+| 一次 `ReadFile` 返回多帧 | 第 2 次读到 3145839 字节 = **2 帧** | 必须做缓冲 + 循环切帧，不能假设一次一帧 |
+| 半帧 | 大消息可能跨多次读 | 必须累积到完整帧再解析 |
+| 3MiB 消息 | `len=3145767` **一帧完整到达**，未见 1MiB 分片 | 不必按分片重组，但长度上限仍要设 |
+
+### 2.1c **EOF 判定（P0，最容易写错）**
+
+`disconnect()` 之后 `ReadFile` 的实测返回：
+
+```
+EOF_DETECTED ok=False got=0 err=109     ← ERROR_BROKEN_PIPE
+```
+
+**不是** `ok=True, got=0`。若按「读到 0 字节即 EOF」实现，
+**detach 后 runner 永不退出** —— 这正是 Issue #3 修过的坑换个形式复发。
+
+```csharp
+// 正确的 EOF 判定
+var eof = (got == 0) || (!ok && err is 109 or 232);   // 109=BROKEN_PIPE, 232=NO_DATA
+```
 
 ### 2.2 C# 能实现 IPC —— **已用真实 C# 程序验证**
 
@@ -70,7 +99,7 @@ host 的 `send()` 报 `ERR_IPC_CHANNEL_CLOSED`。**AOT 确实无法被真实 hos
 ```csharp
 IntPtr h = _get_osfhandle(3);              // 取到有效句柄
 ReadFile(h, buf, ...);                      // 读到 host 的 start 帧
-// 解析：[0..8)=序号 [8..16)=长度 [16..)=JSON
+// 解析：[0..8)=type [8..16)=长度 [16..)=JSON
 WriteFile(h, frame, ...);                   // 回写结果
 ```
 
@@ -82,18 +111,40 @@ WriteFile(h, frame, ...);                   // 回写结果
 
 **C# 侧完整闭环，不再是 Python 推断。**
 
-### 2.3 注入点
+### 2.3 注入点 —— **已实测验证生效**
 
-`LocalSubprocessRuntime.internals` 是公开可写字段，5 处消费 `internals.runnerInvocation`：
+`LocalSubprocessRuntime.internals` 是公开可写字段，在 `spawn()` 内**每次调用时**展开：
 
 ```js
-// lib/index.js:1277
-internals = {};
-// lib/index.js:1361
-const internals = { ...this.internals, ... };
+// lib/index.js:1277    internals = {};
+// lib/index.js:1361    const internals = { ...this.internals, onSpillFailure: ... };
+// lib/index.js:1368    → launchWindowsJob(spec, env)（internals 在闭包里可见）
+// lib/index.js:589     const invocation = internals.runnerInvocation ?? spawnRunnerInvocation();
 ```
 
-子类设置 `this.internals.runnerInvocation = [exePath]` 即可接管。**无需改 DSH 源码。**
+**实测**（构造真实 `LocalSubprocessRuntime`，注入后调用 `selectContainmentMode`）：
+
+```
+构造成功，internals 当前值 keys = []
+internals 可写? true
+注入后 = [ 'D:/projects/dsh-aot-runner/dist/dsh-aot-runner.exe' ]
+selectContainmentMode("ordinary") = windows-job
+```
+
+`windows-job` 意味着走 `launchWindowsJob`，而它读的正是 `internals.runnerInvocation`
+→ **注入生效，AOT 会被选中**。
+
+#### 一个容易误判的点（本方案评审中曾判错）
+
+`probeWindowsJob()` 在 `index.js:1394` 被**无参调用**，因此内部用默认的 node runner 探测。
+但这**不影响注入**：`probeWindowsJob` 只决定**走哪条路径**（`windows-job` vs
+`fallback` 直连），`launchWindowsJob` 才决定**用哪个 runner**。两者是不同的问题。
+
+只要 Job 能力探测通过（正常 Windows 环境必然通过），路径就是 `windows-job`，
+随后实际 spawn 使用的是注入的路径。
+
+> 真正的风险不在注入点，而在 `internals` 是标注为 "Test hook" 的字段 ——
+> DSH 升级可能移除它。缓解：熔断器天然提供降级，见阶段 B。
 
 ---
 
@@ -106,16 +157,22 @@ const internals = { ...this.internals, ... };
 ```csharp
 internal sealed class IpcChannel
 {
-    // fd 3 的句柄封装，帧格式严格按 2.1
-    public string? ReadMessage();   // 阻塞读完整帧，EOF 返回 null
-    public void Send(string json);  // 写入完整帧
+    // fd 3 的句柄封装。内部维护读缓冲，按帧切分。
+    public string? ReadMessage();   // 完整帧返回 JSON；EOF 返回 null
+    public void Send(string json);  // 写入完整帧（type 恒 1）
 }
 ```
 
-要点：
-- 用 `_get_osfhandle(3)` 取句柄 + `ReadFile`/`WriteFile`（已验证可行）
-- 长度字段设上限（如 64MB）防御畸形输入
-- 序号字段恒写 1，读取时忽略
+**实现要点（每条都对应一个实测出来的行为）**：
+
+| 要点 | 依据 |
+|---|---|
+| 用 `_get_osfhandle(3)` + `ReadFile`/`WriteFile` | 已验证可行（2.2） |
+| **内部缓冲 + 循环切帧**，一次读可能含多帧 | 实测一次读到 2 帧（2.1b） |
+| **半帧累积**，不完整就继续读 | 大消息可能跨多次读（2.1b） |
+| **EOF = `got==0` 或 `!ok && err∈{109,232}`** | P0，见 2.1c |
+| 写入 type 恒 1；**读取时 `type != 1` 报 EPROTOCOL** | 负值是内部帧，不是 JSON（2.1） |
+| 长度上限 **8MB** + 「声明长度 > 实际可读量」防御 | 实测 3MiB 单帧正常，8MB 足够且能防畸形帧 |
 
 **A-2 改造主循环**
 
@@ -125,7 +182,19 @@ internal sealed class IpcChannel
 | `WriteLine(json)` | `IpcChannel.Send(json)` |
 | `_finished` 判断退出 | + EOF（disconnect）也退出 |
 
-**保留** Issue #3 修复的读线程 + 有界等待机制，只换底层读取源。
+**必须完全绕开 `Console.*`**：真实布局下 fd 0 是 `NUL` 设备，`Console.OpenStandardInput()`
+读到的不是 fd 3，而是 NUL 的 EOF —— 这正是不改就必然失败的原因。
+
+**保留** Issue #3 修复的读线程 + 有界等待机制，只换底层读取源：
+
+- 读线程必须 `IsBackground = true`（否则阻塞读会拖住进程退出）
+- 主线程 `TryTake(out _, 50)` 有界等待不变
+- 这个结构天然覆盖「`ReadFile` 在 Windows 管道上会真阻塞」的情况
+
+**A-2c 写完后关闭 fd 3**：投递终态结果后关闭句柄，让 host 侧的
+`ipcDisconnected` 能正确置位。**且进程必须以 exitCode 0 退出** ——
+host 的 `settleRange()` 只在 `exitCode===0 && signal===null` 时才认正常收尾，
+非 0 会走 `failInfrastructure`。
 
 **A-2b 必须一并改掉的连带点（调研中发现）**
 
@@ -153,6 +222,27 @@ c.on('message', m => ...);
 
 这是**唯一能证明「host 视角下行为一致」的改法**。现状是 AOT 用 `stdin.write`、node 用 `send`，
 两条路各跑各的，所以过去 40 个用例全绿也说明不了能被 host 用起来。
+
+**A-3b 必须新增的三条回归（针对本次实测发现的坑）**
+
+| 回归 | 验证什么 |
+|---|---|
+| `disconnect()` 后 500ms 内进程退出 | EOF 判定正确（109 也算 EOF），防 detach 后挂死 |
+| 一次 `ReadFile` 返回多帧 / 半帧 | 缓冲切帧正确，不丢帧不粘帧 |
+| 大 env（3MiB 级）请求 | 长度解析与上限防御 |
+
+**A-3c NUL 句柄隐患（反直觉，必须加断言）**
+
+真实布局下 fd 0/1/2 是 `\\?\NUL` 字符设备 —— **有效句柄、写入成功、内容丢弃**。
+这意味着 `CrtDescriptorTable.Encode()` 若把它们当默认值填进 target 的 CRT 槽位，
+target 的 stdout 会**静默指向 NUL**：调用方拿到空输出却没有任何报错。
+
+A-3 改造时必须：
+1. `Encode` 只接受**来源确定**的句柄，不允许把 NUL 当默认值传下去
+2. `SpawnTarget` 里检查 `GetFileType(hOut) == FILE_TYPE_PIPE`；
+   不是管道（即 `inherit` 模式）就**不填 CRT 表**，让 target 继承标准句柄
+
+否则 target 输出要么丢失、要么污染 host 终端，两种情况都不报错。
 
 **A-4 保留 NDJSON 调试模式**
 
@@ -242,14 +332,16 @@ NORMAL ──连续失败 3 次──> SUSPECT ──再失败 1 次──> FALL
 
 | 项 | 为什么重要 |
 |---|---|
-| fd 3 句柄在 runner 内的隐藏属性 | 实测 `_get_osfhandle(3)` 有效，但未测「runner 关闭自己的副本后 host 是否感知」 |
-| Node 版本间帧格式稳定性 | 只在本机 Node v24.22.1 验证过 |
+| Node 版本间帧格式稳定性 | 只在本机 Node v24.22.1 + DSH 0.2.0-rc.2 验证过 |
+| `inherit` 模式下的 fd 5/6 | 真实 `runnerStdio` 里 stdout 可能是 `inherit`（不是 pipe），此时不能填 CRT 表 |
 
-**已排除的疑点**：`ReadFile` 在 Windows 管道上的阻塞语义 ——
-现有「读线程 + 有界等待」机制（Issue #3 的修复）正好覆盖此场景：
-读线程在后台阻塞（`IsBackground = true`），主线程用
-`TryTake(out _, 50)` 有界等待，`_finished` 置位后 ≤50ms 退出。
-换传输层不影响这套结构，风险已消除。
+**已排除的疑点**：
+
+| 疑点 | 结论 |
+|---|---|
+| `ReadFile` 在 Windows 管道上的阻塞 | 现有「读线程 + 有界等待」正好覆盖：后台线程阻塞、主线程 50ms 轮询 |
+| fd 0/1/2 变成 `ignore` 会不会崩 | 不会。它们是 `\\?\NUL` 字符设备，句柄有效、写入成功、内容丢弃。`Trace` 写文件本就无关 |
+| 背压阻塞 | host 侧 `bindManagedProcess` 有 `data` 监听排空，runner 无需处理；但文档需写明这是 host 契约 |
 
 ---
 
@@ -262,6 +354,10 @@ NORMAL ──连续失败 3 次──> SUSPECT ──再失败 1 次──> FALL
 - [ ] control pipe（fd 7）仍工作
 - [ ] A/B 两侧走同一协议路径
 - [ ] `internals.runnerInvocation` 注入后真实 host 路径跑通
+- [ ] **`disconnect()` 后 500ms 内退出**（EOF=109 判定）
+- [ ] **一次读多帧 / 半帧**解析正确
+- [ ] **大 env（3MiB 级）**正常
+- [ ] **无 NUL 句柄泄漏进 CRT 表**（断言）
 - [ ] 现有 40 个用例全部通过
 
 **阶段 B**
