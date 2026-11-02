@@ -126,6 +126,66 @@ host 侧 `send()` 抛 `ERR_IPC_CHANNEL_CLOSED`。
 | terminate 竞态 | 5/5 |
 | 质量门禁 | 全绿 |
 
+### Issue #11 阶段 B：插件接入 + 熔断器
+
+不修改 DSH 源码，通过 `LocalSubprocessRuntime.internals.runnerInvocation`
+这个既有接缝把 runner 换成 AOT exe。
+
+#### 新增 `plugin/`（`@boyingliu01/dsh-aot-runner@0.1.0`）
+
+- **`lib/index.js`** — cordis 插件主体
+  - `resolveRunnerPath()`：config → env → 包内 `bin/`。
+    **显式配置不静默回退** —— 写了路径就是想用那个 exe，
+    静默换成另一个会在排查时严重误导
+  - `findRuntime()`：兼容 `ctx.subprocess` 与 `ctx.reflect.get('subprocess')`
+  - 包装 `runtime.spawn`，把 `handle.done` 的 reject 接到熔断器
+  - `ctx.effect` 注册卸载还原
+- **`lib/circuit-breaker.js`** — 只数连续失败，成功一次即清零。
+  刻意不做滑动窗口/半开计时：熔断逻辑本身出 bug 比没有熔断更危险。
+  熔断后不自动恢复（若原因是 exe 被隔离，反复试探只会让每次调用慢一拍）
+- **`cordis.patch.yml`** / `package.json` / `README.md`
+- `build.sh` 构建后自动同步产物到 `plugin/bin/`（该目录被 `.gitignore` 排除）
+
+#### 测试
+
+- `plugin/test/index.test.js`（7 条）：注入 / 缺 exe 不动 runtime /
+  `enabled=false` / 熔断降级 / target 非零退出不误判 / 卸载还原 /
+  成功清零（偶发失败不累积）
+- `test/e2e-plugin-verify.js`（2 条）：插件 + **真实 `LocalSubprocessRuntime`**
+  跑通；runner 缺失时插件不生效且会话仍可用
+
+#### 修复
+
+`runtime.spawn` 还原时曾把 `bind` 后的函数赋回去，导致还原后
+`runtime.spawn` 不再是原型方法（引用不等、多次 apply 会层层包装）。
+改为分别保存原方法引用与绑定版本。
+
+#### 自校验
+
+- 注入「成功不清零」→ 新增的交替失败用例抓到 ✔
+- 注入「永不熔断」→ 熔断用例抓到 ✔
+
+#### 诚实记录的测试缺口
+
+熔断的 **e2e** 验证被移除。用「存在但非 PE 的 exe」构造 runner 失败时，
+`node x.cjs` 下 `handle.done` 正常 reject，`node --test` 下却 resolve 成
+`{exitCode: 0}` —— 三条独立最小复现都指向 node:test 环境差异，原因未查明。
+**测不出差异的测试比没有测试更糟**（假绿灯），因此熔断改在单元层用假
+runtime 验证（结果确定），e2e 层只保留「降级后会话仍可用」。
+
+#### 全套件结果
+
+| 套件 | 结果 |
+|---|---|
+| IPC 协议回归 | 6/6 |
+| 真实 host 路径 | 1/1 |
+| 插件单元 | 7/7 |
+| 插件端到端 | 2/2 |
+| A/B 一致性 | 28/28 |
+| 零泄漏 / 混沌 | 7/7 |
+| terminate 竞态 | 5/5 |
+| **合计** | **56/56** |
+
 ## [1.0.0] - 2026-10-31
 
 首个可用版本。DSH 子进程 runner 的 NativeAOT 实现，S4 A/B 验证 24/24 通过。

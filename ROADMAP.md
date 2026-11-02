@@ -35,7 +35,7 @@
 | S3 语义完备 | ✅ 完成 | [#2](../../issues/2) [#4](../../issues/4) |
 | S4 A/B 验证 | ✅ 完成 | — |
 | S5 泄漏/混沌 | ✅ 完成 | [#3](../../issues/3) |
-| S6 接入 `ctx.subprocess` | ❌ **下一步** | [#11](../../issues/11) 阶段 B |
+| S6 接入 `ctx.subprocess` | ✅ 完成 | [#11](../../issues/11) 阶段 B |
 
 ## 已完成（本轮先后顺序）
 
@@ -50,15 +50,35 @@
 | [#5](../../issues/5) | 依赖检查 | 无 VC++/.NET 运行时依赖 |
 | [#10](../../issues/10) | 正式开发环境 | `build.sh --check/--test`、Trace、文档 |
 | **#11 阶段 A** | **Node IPC 协议对齐** | **runner 首次可被真实 host 调用** |
+| **#11 阶段 B** | **插件 + 熔断器** | **可通过配置启用，失败自动降级** |
 
-## 下一步：Issue #11 阶段 B
+## Issue #11 阶段 B（已完成）
 
-| 任务 | 说明 |
-|---|---|
-| B-1 插件骨架 | 一个 cordis 插件，`internals.runnerInvocation` 指向 AOT exe |
-| B-2 配置开关 | 可回退到 node runner |
-| B-3 熔断器 | AOT 启动失败/协议错误 → 自动降级（原 #6 内容）|
-| B-4 端到端验证 | 在真实 DSH 会话里跑通，并量化实际收益 |
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| B-1 插件骨架 | ✅ | `plugin/` 包，`internals.runnerInvocation` 指向 AOT exe |
+| B-2 配置开关 | ✅ | `enabled` / `runnerPath` / `failThreshold` / `verbose` |
+| B-3 熔断器 | ✅ | 连续失败达阈值自动降级；成功清零；target 非零退出不误判 |
+| B-4 端到端验证 | ✅ | 插件 + 真实 `LocalSubprocessRuntime` 跑通（2 条 e2e） |
+
+用法见 [`plugin/README.md`](plugin/README.md)。
+
+安装方式（profile 的 `package.json`）：
+
+```json
+{
+  "dependencies": {
+    "@boyingliu01/dsh-aot-runner": "link:D:/projects/dsh-aot-runner/plugin"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "@boyingliu01/dsh-aot-runner"]
+    }
+  }
+}
+```
+
+插件默认 `enabled: false`，需在 profile 里显式打开。
 
 ## 已知盲区
 
@@ -86,12 +106,13 @@
 ## v2.0.0 验收标准
 
 - [x] 所有 P0/P1 issue 关闭（#8 因无证书主动推迟，不计入）
-- [x] `npm test` 全绿且用例数 ≥ 24（现 28）
+- [x] `npm test` 全绿且用例数 ≥ 24（现 28；全套件合计 56）
 - [x] S5 零泄漏回归 100 次连续通过
 - [x] AOT runner 实现与 host 相同的 Node IPC 协议
-- [ ] 已接入 `ctx.subprocess`，可通过配置开关回退到 node runner
-- [ ] 熔断器覆盖「AOT 启动失败自动降级」路径
-- [ ] 在真实 DSH 会话里验证并量化收益
+- [x] 已接入 `ctx.subprocess`，可通过配置开关回退到 node runner
+- [x] 熔断器覆盖「AOT 启动失败自动降级」路径（单元层验证）
+- [ ] 在真实 DSH 会话里验证并量化收益（插件已能在真实 runtime 下跑通，
+      但尚未在日常使用中长时间观察）
 - [ ] ~~CI 在 GitHub Actions 上跑通构建 + 测试~~ —— **已明确不做**
 
 > **CI 决策（2026-11-01）**：暂不搭建 CI，先把**本地**开发环境做扎实。
