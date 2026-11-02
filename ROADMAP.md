@@ -97,6 +97,27 @@
 
 插件默认 `enabled: false`，需在 profile 里显式打开。
 
+### 当前安装状态（2026-11-02）
+
+已装到本机 `web` profile 并启用：
+
+```yaml
+# ~/.dsh/profiles/web/cordis.patch.yml
+- id: aot-runner
+  config:
+    enabled: true
+    failThreshold: 3
+    verbose: true
+```
+
+> **注意**：覆盖已有条目只需写 `id` + 要改的字段。
+> 用 `insert:` 会让同一个 id 出现两条 —— **DSH 不报错但配置不生效**（静默失败）。
+> 改完用 `dsh --profile web --dump-config | grep -A5 aot-runner` 验证，
+> 期望看到 `patched by` 字样。
+
+回退：把 `enabled` 改回 `false`，新会话即走 node runner。
+熔断器会在连续 `failThreshold` 次 runner 失败时自动降级。
+
 ## 已知盲区
 
 **切帧丢数据类缺陷测不出来。** 见
