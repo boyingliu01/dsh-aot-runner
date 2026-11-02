@@ -44,6 +44,34 @@ const N = parseInt(process.env.N || '30', 10);
 const TARGET = (process.env.TARGET || 'hostname').split(' ');
 const CWD = process.env.CWD || 'C:/Windows';
 
+// ---------------- 环境快照 ----------------
+// 基准数字受系统负载影响很大。实测同一台机器连跑三次，收益比例可以是
+// 40.5% / 64.0% / 65.6% —— 不记录环境就无法判断某一轮可不可信。
+const { execFileSync } = require('child_process');
+
+/** 取当前 CPU 负载百分比与可用物理内存（GB）。取不到时返回 null，不编造。 */
+function snapshotEnv() {
+  const ps = (cmd) => {
+    try {
+      const out = execFileSync('powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', cmd],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true });
+      return parseFloat(out.trim());
+    } catch { return null; }
+  };
+  return {
+    cpu: ps('[math]::Round((Get-CimInstance Win32_Processor).LoadPercentage)'),
+    memGb: ps('[math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1MB,1)'),
+  };
+}
+
+/** 把环境快照格式化成一行；缺项显示 n/a 而不是 0。 */
+function fmtEnv(e) {
+  const cpu = e.cpu === null ? 'n/a' : `${e.cpu}%`;
+  const mem = e.memGb === null ? 'n/a' : `${e.memGb}GB`;
+  return `CPU ${cpu} / 可用内存 ${mem}`;
+}
+
 // ---------------- node runner 调用 ----------------
 function runNodeRunner() {
   return new Promise((resolve) => {
@@ -150,9 +178,34 @@ function runFloor() {
 function stats(a) {
   const s = a.slice().sort((x, y) => x - y);
   const p = (q) => s[Math.min(s.length - 1, Math.floor(s.length * q))];
-  return { n: s.length, min: s[0], p50: p(0.5), p95: p(0.95), max: s[s.length - 1] };
+  return {
+    n: s.length,
+    min: s[0],
+    p50: p(0.5),
+    p95: p(0.95),
+    p99: p(0.99),
+    max: s[s.length - 1],
+  };
 }
+
+/**
+ * 相对离散度：四分位距 / 中位数。
+ *
+ * 用 IQR 而不是标准差 —— 启动耗时的分布有长尾，标准差会被几个
+ * 异常慢的样本拉爆，反而看不出"主体数据稳不稳"。
+ */
+function dispersion(a) {
+  if (a.length < 4) return null;
+  const s = a.slice().sort((x, y) => x - y);
+  const q = (p) => s[Math.min(s.length - 1, Math.floor(s.length * p))];
+  const median = q(0.5);
+  if (!median) return null;
+  return ((q(0.75) - q(0.25)) / median) * 100;
+}
+
+const fmtDisp = (d) => (d === null ? '  n/a' : `${d.toFixed(1)}%`.padStart(6));
 const fm = (x) => x.toFixed(0).padStart(5);
+
 
 /** 打印基准的配置头部。 */
 function printHeader() {
@@ -174,6 +227,7 @@ async function collectSamples() {
     floors: [], nodes: [], aots: [],
     nodeFail: 0, aotFail: 0,
     sampleNode: null, sampleAot: null,
+    envStart: snapshotEnv(), envEnd: null,
   };
 
   for (let i = 0; i < N; i++) {
@@ -183,6 +237,8 @@ async function collectSamples() {
     await new Promise((r) => setTimeout(r, 25));
     if ((i + 1) % 10 === 0) process.stdout.write(`  已完成 ${i + 1}/${N}\n`);
   }
+
+  acc.envEnd = snapshotEnv();
   return acc;
 }
 
@@ -207,17 +263,40 @@ async function sampleOnce(acc, which) {
 }
 
 /** 输出统计结果与收益结论。 */
+/**
+ * 可信度判定。
+ *
+ * 只给数字不给判据，读者无从判断该不该当真。这里把判据写死成三个等级，
+ * 让调用方（我 / CI / 未来的自己）没法事后挑一个好看的解读。
+ */
+function verdict(dispNode, dispAot, acc) {
+  if (acc.nodeFail > 0 || acc.aotFail > 0) {
+    return { level: 'UNRELIABLE', reason: '存在失败样本，测得的行为不完整' };
+  }
+  const worst = Math.max(dispNode ?? 999, dispAot ?? 999);
+  if (worst > 10) return { level: 'UNRELIABLE', reason: `离散度 ${worst.toFixed(1)}% > 10%，系统干扰过大` };
+  if (worst > 5) return { level: 'FAIR', reason: `离散度 ${worst.toFixed(1)}% 在 5~10%，结果仅供参考` };
+  return { level: 'GOOD', reason: `离散度 ${worst.toFixed(1)}% < 5%，数据可信` };
+}
+
+/** 输出统计结果与收益结论。 */
 function report(acc) {
   const sf = stats(acc.floors);
   const sn = stats(acc.nodes);
   const sa = stats(acc.aots);
+  const dNode = dispersion(acc.nodes);
+  const dAot = dispersion(acc.aots);
 
   console.log('\n' + '='.repeat(78));
   console.log('结果（p50 为主指标）');
   console.log('='.repeat(78));
-  console.log(`原生地板 hostname.exe  : min=${fm(sf.min)}ms  p50=${fm(sf.p50)}ms  p95=${fm(sf.p95)}ms`);
-  console.log(`node runner (现状)     : min=${fm(sn.min)}ms  p50=${fm(sn.p50)}ms  p95=${fm(sn.p95)}ms  (n=${sn.n}, 失败=${acc.nodeFail})`);
-  console.log(`AOT runner (待接入)    : min=${fm(sa.min)}ms  p50=${fm(sa.p50)}ms  p95=${fm(sa.p95)}ms  (n=${sa.n}, 失败=${acc.aotFail})`);
+  console.log('                        min     p50     p95     p99     max    离散度');
+  const row = (label, s, d) => console.log(
+    `${label.padEnd(22)}:${fm(s.min)}ms${fm(s.p50)}ms${fm(s.p95)}ms${fm(s.p99)}ms${fm(s.max)}ms  ${fmtDisp(d)}`);
+  row('原生地板 hostname.exe', sf, dispersion(acc.floors));
+  row(`node runner (n=${sn.n})`, sn, dNode);
+  row(`AOT runner  (n=${sa.n})`, sa, dAot);
+  console.log(`  失败样本: node=${acc.nodeFail}  AOT=${acc.aotFail}`);
   console.log('-'.repeat(78));
 
   const nodeOverhead = sn.p50 - sf.p50;
@@ -226,11 +305,40 @@ function report(acc) {
   console.log(`AOT runner 跳开销      : ${fm(aotOverhead)}ms  (= AOT p50 - 地板 p50)`);
   console.log(`净收益（每次调用）     : ${fm(nodeOverhead - aotOverhead)}ms`);
   console.log(`收益比例               : ${((1 - aotOverhead / nodeOverhead) * 100).toFixed(1)}% 的 runner 开销被消除`);
+  console.log('-'.repeat(78));
+
+  // 极端值单独看：平均值好不代表体感好，偶发的一次 800ms 比平均快 200ms 更伤人
+  console.log(`极端值对比（tail latency）：`);
+  console.log(`  p99 : node ${fm(sn.p99)}ms → AOT ${fm(sa.p99)}ms  (${sn.p99 > sa.p99 ? '改善' : '⚠ 退化'} ${Math.abs(sn.p99 - sa.p99).toFixed(0)}ms)`);
+  console.log(`  max : node ${fm(sn.max)}ms → AOT ${fm(sa.max)}ms  (${sn.max > sa.max ? '改善' : '⚠ 退化'} ${Math.abs(sn.max - sa.max).toFixed(0)}ms)`);
+  console.log('-'.repeat(78));
+
+  console.log(`环境: 开始 ${fmtEnv(acc.envStart)}`);
+  console.log(`      结束 ${acc.envEnd ? fmtEnv(acc.envEnd) : 'n/a'}`);
+  const v = verdict(dNode, dAot, acc);
+  console.log(`可信度: ${v.level} —— ${v.reason}`);
   console.log('='.repeat(78));
 
   console.log('\n输出抽样（验证两者行为一致）：');
   console.log(`  node : stdout=${JSON.stringify((acc.sampleNode?.stdout || '').slice(0, 60))} tag=${acc.sampleNode?.tag}`);
   console.log(`  AOT  : stdout=${JSON.stringify((acc.sampleAot?.stdout || '').slice(0, 60))} tag=${acc.sampleAot?.tag}`);
+
+  // 机器可读的一行，便于多轮汇总
+  console.log(`\nSUMMARY ${JSON.stringify({
+    n: N,
+    nodeP50: Math.round(sn.p50),
+    aotP50: Math.round(sa.p50),
+    floorP50: Math.round(sf.p50),
+    gainPct: Number(((1 - aotOverhead / nodeOverhead) * 100).toFixed(1)),
+    dispNode: dNode === null ? null : Number(dNode.toFixed(1)),
+    dispAot: dAot === null ? null : Number(dAot.toFixed(1)),
+    nodeP99: Math.round(sn.p99),
+    aotP99: Math.round(sa.p99),
+    fails: acc.nodeFail + acc.aotFail,
+    verdict: v.level,
+    cpu: acc.envStart.cpu,
+    memGb: acc.envStart.memGb,
+  })}`);
 }
 
 (async () => {
