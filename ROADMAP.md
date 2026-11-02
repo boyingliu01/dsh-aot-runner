@@ -118,6 +118,31 @@
 回退：把 `enabled` 改回 `false`，新会话即走 node runner。
 熔断器会在连续 `failThreshold` 次 runner 失败时自动降级。
 
+### ⚠️ 当前依赖一个上游补丁（2026-11-02）
+
+**插件在 DSH 0.2.0-rc.2 原版下不生效** —— 原因在 DSH 自身，不在插件：
+
+`LocalSubprocessRuntime.spawn()`（`lib/index.js:1368`）调用
+`launchWindowsJob(spec, env)` / `launchLinuxScope(spec, env)` 时**漏传第三个参数
+`internals`**，导致 `launch*` 内部 `internals` 恒为 `{}`，
+`internals.runnerInvocation` 被完全忽略。
+
+已提交上游：
+[deepseek-ai/deepseek-harness#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)
+
+**本地临时补丁**（1 行，语义等价于上游修好后的样子）：
+
+```diff
+-  ... ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env), binding);
++  ... ? launchLinuxScope(spec, env, internals) : launchWindowsJob(spec, env, internals), binding);
+```
+
+文件：`C:\Users\think\.workbuddy\binaries\node\workspace\node_modules\@deepseek-ai\dsh-subprocess-local\lib\index.js`
+
+- 原始备份：`/tmp/dsh-subprocess-local-index.js.bak`
+- **DSH 升级或重装依赖会被覆盖**，届时需重新判断上游是否已修
+- 检查是否仍生效：看子进程命令行里是 `runner.js` 还是 `dsh-aot-runner.exe`
+
 ## 已知盲区
 
 **切帧丢数据类缺陷测不出来。** 见
