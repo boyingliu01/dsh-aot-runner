@@ -84,6 +84,10 @@ if [ "$CHECK" = "1" ]; then
   node --check plugin/lib/circuit-breaker.js
   node --check plugin/test/index.test.js
   node --check bench/d1-ab-bench.js
+  node --check vendor/patch-dsh.mjs
+
+  echo "==> 质量门禁：上游补丁留档"
+  node vendor/patch-dsh.mjs verify
 
   echo "==> 质量门禁全部通过"
   [ "$CLEAN$TEST$BENCH" = "000" ] && exit 0

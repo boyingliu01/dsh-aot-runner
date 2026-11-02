@@ -139,9 +139,19 @@
 
 文件：`C:\Users\think\.workbuddy\binaries\node\workspace\node_modules\@deepseek-ai\dsh-subprocess-local\lib\index.js`
 
-- 原始备份：`/tmp/dsh-subprocess-local-index.js.bak`
-- **DSH 升级或重装依赖会被覆盖**，届时需重新判断上游是否已修
+**工具的原始备份与补丁工具都在 [`vendor/`](vendor/README.md)**（不依赖 `/tmp`，`/tmp` 被清理也不怕）：
+
+```bash
+node vendor/patch-dsh.mjs status   # 查看状态（已打补丁 / 原始 / 未识别）
+node vendor/patch-dsh.mjs apply    # 打补丁
+node vendor/patch-dsh.mjs revert   # 还原（md5 精确回到原始）
+node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
+```
+
+- **DSH 升级或重装依赖会被覆盖**，届时跑 `status` 重新判断
+- 若 `status` 显示「未识别的代码形状」，先看上游是否已修复，**别急着 apply**
 - 检查是否仍生效：看子进程命令行里是 `runner.js` 还是 `dsh-aot-runner.exe`
+- 上游修复后：**删掉整个 `vendor/` 目录**
 
 ## 已知盲区
 
