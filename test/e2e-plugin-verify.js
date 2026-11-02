@@ -15,10 +15,38 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { pathToFileURL } = require('node:url');
-const { resolve } = require('node:path');
+const { resolve, dirname } = require('node:path');
+const { existsSync } = require('node:fs');
+const { resolveNodeRunner } = require('./runner-client');
 
-const AOT = 'D:/projects/dsh-aot-runner/dist/dsh-aot-runner.exe';
+const AOT = resolve(__dirname, '..', 'dist', 'dsh-aot-runner.exe');
 const PLUGIN_INDEX = resolve(__dirname, '..', 'plugin', 'lib', 'index.js');
+
+/**
+ * 定位 @deepseek-ai/dsh-subprocess-local 包目录。
+ *
+ * 不能硬编码本机路径 —— 那会让测试只能在作者机器上跑，
+ * 别人克隆仓库后必然失败。复用 runner-client 已有的多候选解析
+ * （DSH_HOME / USERPROFILE / 仓库 node_modules），再从 runner.js 回溯包根。
+ *
+ * @returns {string} 包目录的绝对路径
+ * @throws {Error} 找不到时给出可操作的提示
+ */
+function resolveSubprocessLocalDir() {
+  const runnerPath = resolveNodeRunner();
+  if (runnerPath === null) {
+    throw new Error(
+      '找不到 @deepseek-ai/dsh-subprocess-local。'
+      + '请确认已安装 DSH，或设置环境变量 DSH_HOME 指向 DSH 安装目录。',
+    );
+  }
+  // runner.js 位于 <pkg>/lib/runner.js，回溯两级到 <pkg>
+  const pkgDir = resolve(dirname(runnerPath), '..');
+  if (!existsSync(resolve(pkgDir, 'package.json'))) {
+    throw new Error(`从 ${runnerPath} 回溯到的包目录无效：${pkgDir}`);
+  }
+  return pkgDir;
+}
 
 /** 构造能被 LocalSubprocessRuntime 接受的最小 cordis ctx */
 function makeCtx() {
@@ -56,15 +84,22 @@ const ENV = {
 };
 
 test('端到端：插件注入后真实 runtime 走 AOT runner', async () => {
-  const { LocalSubprocessRuntime } = require(
-    'C:/Users/think/.workbuddy/binaries/node/workspace/node_modules/@deepseek-ai/dsh-subprocess-local',
-  );
+  const { LocalSubprocessRuntime } = require(resolveSubprocessLocalDir());
 
   const { ctx, logs } = makeCtx();
   const rt = new LocalSubprocessRuntime(ctx);
 
   // 关键：ctx 上挂 subprocess，插件才能找到 runtime
   ctx.subprocess = rt;
+
+  // 装观测点：记录 launcher 实际启动了什么命令。
+  // 见下方断言处对「为什么必须有这一步」的说明。
+  const observed = [];
+  const childProcess = require('node:child_process');
+  rt.internals.spawn = (command, args, options) => {
+    observed.push(String(command));
+    return childProcess.spawn(command, args, options);
+  };
 
   // 用插件注入（而不是手工改 internals）
   const plugin = await import(pathToFileURL(PLUGIN_INDEX).href);
@@ -95,12 +130,24 @@ test('端到端：插件注入后真实 runtime 走 AOT runner', async () => {
 
   await handle.waitForExit();
   try { handle.terminate(); } catch { /* ignore */ }
+
+  // 3) 决定性断言：launcher 真的用了 AOT，而不是静默回退
+  //
+  // 早先本测试只断言「internals.runnerInvocation === [AOT]」，
+  // 但那只证明「字段被赋了值」，不证明「有人读它」。
+  // DSH 0.2.0-rc.2 正好在 spawn() 里丢掉了 internals 参数，
+  // 于是字段赋了没人用，测试依然全绿 —— 装配到真实 DSH 才发现无效。
+  //
+  // 现在直接看 launcher 启动了哪个可执行文件：这才是「生效」的定义。
+  assert.ok(observed.length > 0,
+    'launcher 未调用 internals.spawn：当前 DSH 版本可能丢弃了 internals 参数'
+    + '（见 vendor/README.md 与上游 discussion #11893）');
+  assert.strictEqual(observed[0], AOT,
+    `launcher 应启动 AOT runner，实际启动了 ${JSON.stringify(observed[0])}`);
 });
 
 test('端到端：runner 缺失时插件不生效，runtime 仍可用（node runner 兜底）', async () => {
-  const { LocalSubprocessRuntime } = require(
-    'C:/Users/think/.workbuddy/binaries/node/workspace/node_modules/@deepseek-ai/dsh-subprocess-local',
-  );
+  const { LocalSubprocessRuntime } = require(resolveSubprocessLocalDir());
 
   const { ctx, logs } = makeCtx();
   const rt = new LocalSubprocessRuntime(ctx);

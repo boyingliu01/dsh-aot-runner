@@ -186,7 +186,7 @@ var hErr = Native.CrtGetOsFHandle(6);
 
 | 用例 | FD5 (stdout) | FD6 (stderr) | 退出码 | 协议纯净 |
 |---|---|---|---|---|
-| hostname | `伯英的X1C` | — | 0 | ✓ |
+| hostname | `<hostname>` | — | 0 | ✓ |
 | cmd echo | `HELLO` | — | 0 | ✓ |
 | cmd stderr | — | `ERRTEXT` | 0 | ✓ |
 | node --version | `v24.22.1` | — | 0 | ✓ |

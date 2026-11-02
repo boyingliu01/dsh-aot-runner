@@ -30,8 +30,9 @@
  *
  * 见 `./circuit-breaker.js`。
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { CircuitBreaker } from './circuit-breaker.js';
 
 export const name = 'dsh-aot-runner';
@@ -96,6 +97,80 @@ export function resolveRunnerPath(configured) {
  * @param {any} ctx
  * @returns {any | null}
  */
+/**
+ * 检测当前 DSH 版本的 subprocess-local 是否会丢弃 `internals` 参数。
+ *
+ * 背景：`LocalSubprocessRuntime.spawn()` 构造好 `internals` 后，调用
+ * `launchWindowsJob(spec, env)` / `launchLinuxScope(spec, env)` 时可能漏传
+ * 第三个参数。一旦漏传，`launch*` 内部的 `internals` 恒为 `{}`，
+ * 所有基于 `internals` 的注入（包括本插件的 runnerInvocation）全部失效。
+ *
+ * 这是上游 discussion #11893 记录的问题。
+ *
+ * 为什么用静态检测而不是运行时观测：bug 会让观测点本身失效
+ * （`internals.spawn` 同样被丢弃），运行时看不到任何异常。
+ * 只有读源码才能确定。
+ *
+ * @returns {'ok' | 'buggy' | 'unknown'} 检测结论
+ */
+export function checkDshInternalsBug() {
+  const files = findDshSourceFiles();
+  for (const file of files) {
+    let source;
+    try {
+      source = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+
+    // 已修复的特征：调用点显式传了三参
+    const fixed = /launch(WindowsJob|LinuxScope)\(spec,\s*env,\s*internals\)/.test(source);
+    // 缺陷特征：调用点只传两参
+    const buggy = /launch(WindowsJob|LinuxScope)\(spec,\s*env\)/.test(source);
+
+    if (fixed) return 'ok';
+    if (buggy) return 'buggy';
+    // 找到文件但两个特征都不匹配 —— 形状变了，不敢断言
+    return 'unknown';
+  }
+
+  return 'unknown';
+}
+
+/**
+ * 找出 DSH subprocess-local 的源码文件候选。
+ *
+ * 插件本身只声明 peerDependency，从插件目录 resolve 不到；
+ * 改为从几条可靠线索推断：模块解析（若宿主可见）、
+ * DSH 安装目录的常见布局、以及已加载模块的路径。
+ *
+ * @returns {string[]} 可能的 index.js 绝对路径
+ */
+function findDshSourceFiles() {
+  const candidates = [];
+  const push = (p) => { if (p) candidates.push(p); };
+
+  // 线索 1：模块解析（宿主进程里通常可解析）
+  try {
+    const entry = import.meta.resolve('@deepseek-ai/dsh-subprocess-local');
+    const dir = fileURLToPath(new URL('.', entry));
+    push(resolve(dir, 'index.js'));
+    push(resolve(dir, '..', 'lib', 'index.js'));
+  } catch { /* 解析不到，走后面的线索 */ }
+
+  // 线索 2：从 DSH_HOME / USERPROFILE 推断 workspace 布局
+  const roots = [];
+  if (process.env.DSH_HOME) roots.push(process.env.DSH_HOME);
+  if (process.env.USERPROFILE) {
+    roots.push(resolve(process.env.USERPROFILE, '.workbuddy', 'binaries', 'node', 'workspace'));
+  }
+  for (const root of roots) {
+    push(resolve(root, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js'));
+  }
+
+  return candidates;
+}
+
 export function findRuntime(ctx) {
   const direct = ctx?.subprocess;
   if (direct && typeof direct.spawn === 'function') return direct;
@@ -220,6 +295,37 @@ export function apply(ctx, config = {}) {
 
     return handle;
   };
+
+  // ---- 6.5 自检：确认注入真的会被 DSH 消费 ----
+  //
+  // 为什么需要这一步：注入 `internals.runnerInvocation` 只有在 DSH 把它
+  // 传给 launchWindowsJob/launchLinuxScope 时才有效。DSH 0.2.0-rc.2 在
+  // spawn() 里丢掉了这个参数（上游 discussion #11893），于是出现
+  // 「字段赋了值但没人读」—— 插件报告启用成功，实际毫无作用。
+  //
+  // 用户端的表现是「装了没效果」，而日志里一切正常。这比直接报错更糟，
+  // 所以这里主动检测并明确告知。
+  //
+  // 检测手段是静态的：直接看 DSH 源码里那两个调用点的参数个数。
+  // 不用运行时观测，因为 bug 恰恰让观测点本身也失效了（internals 整个被丢）。
+  const dshCompat = checkDshInternalsBug();
+  if (dshCompat === 'buggy') {
+    ctx.logger?.warn?.(
+      '[aot-runner] 检测到当前 DSH 版本会丢弃 internals 参数'
+      + '（spawn() 未把 internals 传给 launch*），注入不会生效。'
+      + '本插件已自动停用，避免「看似启用实则无效」。'
+      + '修复方法见包内 vendor/README.md，或上游 discussion #11893。',
+    );
+    restore();
+    return;
+  }
+  if (dshCompat === 'unknown' && verbose) {
+    ctx.logger?.warn?.(
+      '[aot-runner] 无法确认 DSH 是否支持 internals 注入'
+      + '（源码形状未识别，可能是新版本）。插件继续启用，'
+      + '若发现子进程仍走 node runner，请查看 vendor/README.md。',
+    );
+  }
 
   // ---- 7. 卸载时还原 ----
   ctx.effect?.(() => () => {

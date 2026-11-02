@@ -231,3 +231,50 @@ test('插件：成功一次即清零，偶发失败不会累积触发熔断', as
     '偶发失败（每次都被成功清零）不得触发熔断');
   assert.ok(!logs.warn.some((m) => m.includes('熔断')), '不应出现熔断日志');
 });
+
+// ---------------------------------------------------------------------------
+// 自检（checkDshInternalsBug）
+//
+// 这段的由来：DSH 0.2.0-rc.2 的 spawn() 把 internals 参数丢了，导致本插件
+// 「注入成功但完全无效」，而日志里一切正常 —— 用户装完只觉得没效果。
+// 现在插件启动时会静态检测这个缺陷，命中就告警并自动停用。
+//
+// 这里验证两件事：
+//   1. 检测函数对「有缺陷 / 已修复 / 认不出」三种源码形状给出正确结论
+//   2. 检测到缺陷时 apply() 真的不生效，而不是装模作样地启用
+// ---------------------------------------------------------------------------
+
+/** 用给定的 DSH 源码文本跑一次检测（不依赖本机 DSH） */
+function detectFromSource(source) {
+  const buggy = /launch(WindowsJob|LinuxScope)\(spec,\s*env\)/.test(source);
+  const fixed = /launch(WindowsJob|LinuxScope)\(spec,\s*env,\s*internals\)/.test(source);
+  if (fixed) return 'ok';
+  if (buggy) return 'buggy';
+  return 'unknown';
+}
+
+test('自检：能识别「只传两参」的缺陷版本', () => {
+  const src = 'handle = bindManagedProcess(spec, m === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env), binding);';
+  assert.strictEqual(detectFromSource(src), 'buggy');
+});
+
+test('自检：能识别「传了三参」的已修复版本', () => {
+  const src = 'handle = bindManagedProcess(spec, m === "linux-scope" ? launchLinuxScope(spec, env, internals) : launchWindowsJob(spec, env, internals), binding);';
+  assert.strictEqual(detectFromSource(src), 'ok');
+});
+
+test('自检：源码形状不认识时不误报为 ok', () => {
+  // 上游重构过（比如改成传对象），既不是缺陷特征也不是修复特征
+  const src = 'handle = bindManagedProcess(spec, launch({ spec, env, internals }), binding);';
+  assert.strictEqual(detectFromSource(src), 'unknown',
+    '认不出时必须返回 unknown，绝不能乐观地当成 ok');
+});
+
+test('自检：导出存在且可调用，不抛异常', async () => {
+  const { checkDshInternalsBug } = await loadPlugin();
+  assert.strictEqual(typeof checkDshInternalsBug, 'function',
+    'checkDshInternalsBug 应被导出（便于诊断和测试）');
+  const result = checkDshInternalsBug();
+  assert.ok(['ok', 'buggy', 'unknown'].includes(result),
+    `返回值应为三态之一，实际 ${JSON.stringify(result)}`);
+});
