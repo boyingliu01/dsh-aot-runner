@@ -79,6 +79,10 @@ if [ "$CHECK" = "1" ]; then
   node --check test/race-verify.js
   node --check test/ipc-verify.js
   node --check test/host-path-verify.js
+  node --check test/e2e-plugin-verify.js
+  node --check plugin/lib/index.js
+  node --check plugin/lib/circuit-breaker.js
+  node --check plugin/test/index.test.js
   node --check bench/d1-ab-bench.js
 
   echo "==> 质量门禁全部通过"
@@ -142,6 +146,14 @@ if [ "$TEST" = "1" ]; then
   node --test test/host-path-verify.js
 
   echo
+  echo "==> 插件单元测试（Issue #11 阶段 B）"
+  node --test plugin/test/index.test.js
+
+  echo
+  echo "==> 插件端到端验证（插件 + 真实 runtime）"
+  node --test test/e2e-plugin-verify.js
+
+  echo
   echo "==> S4 A/B 验证（node runner vs AOT runner）"
   node --test test/ab-verify.js
 
@@ -162,3 +174,9 @@ fi
 
 echo
 echo "完成。runner 路径: $EXE"
+
+# 把产物同步到插件包内，让 @boyingliu01/dsh-aot-runner 开箱即用。
+# plugin/bin/ 被 .gitignore 排除（构建产物不入库），所以每次构建都要重放。
+mkdir -p plugin/bin
+cp "$EXE" plugin/bin/
+echo "已同步到插件包: plugin/bin/$(basename "$EXE")"
