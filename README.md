@@ -1,8 +1,8 @@
 # dsh-aot-runner
 
 DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文件替换 Node.js 版 runner，
-把每次子进程调用的固定开销从约 360ms 降到约 150ms（**消除约 60%**），且行为与 Node 版
-在 24 个用例上字节级一致。
+把每次子进程调用的固定开销从约 **200~220ms 降到约 70~76ms（消除 65%）**，
+且行为与 Node 版在 28 个用例上字节级一致。
 
 **协议状态**：AOT 版实现的是与 Node 版**相同的 Node IPC 协议**（fd 3），
 可被真实 DSH host 直接调用（Issue #11 已完成协议对齐）。
@@ -11,7 +11,8 @@ DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文�
 > [Issues](https://github.com/boyingliu01/dsh-aot-runner/issues)（Issue 是唯一事实来源）。
 >
 > 当前状态：**已可通过插件接入**（[`plugin/`](plugin/README.md)），
-> 支持配置开关与熔断降级。下一步是在日常使用中长跑验证并量化收益。
+> 支持配置开关与熔断降级。性能对比第一层（隔离基准）+ 第二层（真实负载）已通过，
+> 详见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md)。
 
 ---
 
@@ -24,24 +25,30 @@ node.exe (dsh host) → node.exe runner.js -- <target> → target
 ```
 
 中间那个 `runner.js` 每次都要重新加载 Node 运行时、解析模块、走一遍 IPC 握手。
-profile 显示它单独贡献 **300–360ms** 的固定延迟 —— 比真正要跑的命令还慢。
+profile 显示它单独贡献 **200–220ms** 的固定延迟 —— 比真正要跑的命令还慢。
 
-把它换成 NativeAOT 编译的原生 exe 后，这部分降到 **150ms 左右**。
+把它换成 NativeAOT 编译的原生 exe 后，这部分降到 **69–76ms**。
 
 ### 实测收益
 
-同一时间窗内交错采样（避免负载漂移干扰），n=30：
+分两层测（2026-11-02，真实 IPC 协议），只报**离散度 < 10% 的可信轮次**：
 
-| | min | p50 | p95 |
+| 实现 | p50 | p99 | runner 开销 |
 |---|---|---|---|
-| 原生地板 `hostname.exe` | 36ms | 54ms | 189ms |
-| **node runner（现状）** | 280ms | **413ms** | 673ms |
-| **AOT runner** | 138ms | **199ms** | 342ms |
+| 原生地板 `hostname.exe` | 32~36ms | — | — |
+| node runner（现状） | 238~250ms | 331~393ms | 198~217ms |
+| **AOT runner** | **109ms** | **173~220ms** | **69~76ms** |
 
-- **每次调用净省 214ms**
-- **消除 59.6% 的 runner 开销**
+- **每次调用净省 130~141ms**
+- **消除 65.0% 的 runner 开销**（可信两轮 64.8% / 65.0%）
+- **p99 长尾改善 131~206ms**
 
-> 绝对值随系统负载波动，但**收益比例稳定在 60% 左右**，这是可靠结论。
+稳定性：120 次连续调用 **0 失败**，RSS 52.6 → 54.7MB 无累积增长。
+
+> **关于口径**：绝对值随系统负载波动很大（同一台机器连跑三次可得到
+> 40.5% / 64.0% / 65.6%）。基准已内置**自动可信度判定**（离散度 > 10%
+> 直接标 UNRELIABLE），**收益比例是稳定指标，绝对值不是**。
+> 完整数据与方法见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md)。
 
 ---
 
@@ -294,33 +301,36 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 | 阶段 | 状态 | 说明 |
 |---|---|---|
 | S0 可行性 | ✅ | CreateProcessW + Job Object 跑通 |
+| S0b 协议对齐 | ✅ | Node IPC（fd 3），首次可被真实 host 调用（[#11](https://github.com/boyingliu01/dsh-aot-runner/issues/11)）|
 | S1 NativeAOT 最小实现 | ✅ | 零反射，1.2MB |
-| S1b 依赖检查 | ❌ | 待 `dumpbin /DEPENDENTS` |
-| S1c 签名分发 | ❌ | 待办 |
+| S1b 依赖检查 | ✅ | 无 VC++ / .NET 运行时依赖（[#5](https://github.com/boyingliu01/dsh-aot-runner/issues/5)）|
+| S1c 签名分发 | ⏸ 推迟 | 自用无证书（[#8](https://github.com/boyingliu01/dsh-aot-runner/issues/8)）|
 | S2 功能对齐 | ✅ | 协议/stdio/exit code |
 | S2b 性能实测 | ✅ | 见上表 |
-| S3 语义完备 | ⚠️ ~50% | terminate ✅ / SafeHandle ✅ / control pipe ❌ |
-| **S4 A/B 验证** | ✅ | **24/24 通过** |
-| S5 泄漏/混沌 | ❌ | 待办 |
-| S6 接入 `ctx.subprocess` | ❌ | 待办 |
+| S3 语义完备 | ✅ | terminate 竞态（[#4](https://github.com/boyingliu01/dsh-aot-runner/issues/4)）、control pipe（[#2](https://github.com/boyingliu01/dsh-aot-runner/issues/2)）|
+| S4 A/B 验证 | ✅ | **28/28 通过** |
+| S5 泄漏/混沌 | ✅ | 100 次零泄漏 + 混沌（[#3](https://github.com/boyingliu01/dsh-aot-runner/issues/3)）|
+| S6 插件接入 | ✅ | 插件 + 熔断器（[#11](https://github.com/boyingliu01/dsh-aot-runner/issues/11) 阶段 B）|
+| S7 性能对比验证 | 🔄 | 第一层 + 第二层 ✅，第三层进行中 |
+
+**全套件 56/56 通过**：`npm run test:all`。
 
 ### 已知待办
 
-按线上 Issue 的优先级排列（**Issue 是唯一事实来源**，编号以 GitHub 为准）：
+按线上 Issue 排列（**Issue 是唯一事实来源**）：
 
-| Issue | 优先级 | 内容 |
+| Issue | 状态 | 内容 |
 |---|---|---|
-| [#3](https://github.com/boyingliu01/dsh-aot-runner/issues/3) | P0 | S5 进程树零泄漏回归（100 连续调用）+ 混沌测试 |
-| [#2](https://github.com/boyingliu01/dsh-aot-runner/issues/2) | P0 | S3 control pipe —— fd 7 透传 + 环境标记 + 关闭副本 |
-| [#6](https://github.com/boyingliu01/dsh-aot-runner/issues/6) | P0 | S6 熔断器 NORMAL→SUSPECT→FALLBACK→DISABLED + 运行时探针 |
-| [#4](https://github.com/boyingliu01/dsh-aot-runner/issues/4) | P1 | S3 terminate 竞态，高频 start/terminate 交替 |
-| [#5](https://github.com/boyingliu01/dsh-aot-runner/issues/5) | P1 | S1b `dumpbin /DEPENDENTS` 确认无 VC++ 运行时依赖 |
-| [#7](https://github.com/boyingliu01/dsh-aot-runner/issues/7) | P1 | S6 接入 `ctx.subprocess` seam |
-| [#8](https://github.com/boyingliu01/dsh-aot-runner/issues/8) | P2 | S1c 签名与分发布置 |
+| [#8](https://github.com/boyingliu01/dsh-aot-runner/issues/8) | ⏸ 推迟 | S1c 签名与分发布置（自用无证书）|
+| [#1](https://github.com/boyingliu01/dsh-aot-runner/issues/1) | 🔄 跟踪 | 路线图与验收标准 |
 
 非 Issue 记录的技术债：
 
 - **JSON 迁移** `JsonDocument` → `Utf8JsonReader`（可再省 ~15ms）
+- **runner 开销仍有压缩空间**：当前 69~76ms，地板 32~36ms，理论上还能再省 40ms+
+- **两个测试缺口**（详见 [性能对比测试报告](docs/性能对比测试报告.md)）：
+  熔断器的 e2e 验证（node:test 环境下行为不确定）、
+  切帧丢数据类缺陷（需要 runner 侧测试接缝）
 
 ### 关于 `resolveWindowsExecutable`：已核对一致
 
