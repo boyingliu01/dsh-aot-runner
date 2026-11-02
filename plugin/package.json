@@ -1,0 +1,44 @@
+{
+  "name": "@boyingliu01/dsh-aot-runner",
+  "version": "0.1.0",
+  "description": "用 NativeAOT runner 替换 DSH 的 Node.js 子进程 runner，每次调用省约 450ms",
+  "type": "module",
+  "license": "MIT",
+  "author": "boyingliu01",
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "aot",
+    "nativeaot",
+    "runner",
+    "subprocess",
+    "windows",
+    "performance"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boyingliu01/dsh-aot-runner.git"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib/",
+    "bin/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

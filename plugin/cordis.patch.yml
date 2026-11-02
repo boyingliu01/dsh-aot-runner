@@ -1,0 +1,7 @@
+- insert:
+    - id: aot-runner
+      name: '@boyingliu01/dsh-aot-runner'
+      config:
+        enabled: false
+        failThreshold: 3
+        verbose: true

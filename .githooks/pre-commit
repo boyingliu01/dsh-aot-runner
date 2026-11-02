@@ -12,6 +12,10 @@ node --check test/leak-verify.js
 node --check test/race-verify.js
 node --check test/ipc-verify.js
 node --check test/host-path-verify.js
+node --check test/e2e-plugin-verify.js
+node --check plugin/lib/index.js
+node --check plugin/lib/circuit-breaker.js
+node --check plugin/test/index.test.js
 node --check test/runner-client.js
 node --check bench/d1-ab-bench.js
 
