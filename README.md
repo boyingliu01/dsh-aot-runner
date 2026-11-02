@@ -10,8 +10,8 @@ DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文�
 > 📋 **下一步计划看 [ROADMAP.md](ROADMAP.md)**，任务细节在
 > [Issues](https://github.com/boyingliu01/dsh-aot-runner/issues)（Issue 是唯一事实来源）。
 >
-> 当前状态：runner 本体已可被 host 调用；下一步是
-> [#11 阶段 B 插件接入 + 熔断器](https://github.com/boyingliu01/dsh-aot-runner/issues/11)。
+> 当前状态：**已可通过插件接入**（[`plugin/`](plugin/README.md)），
+> 支持配置开关与熔断降级。下一步是在日常使用中长跑验证并量化收益。
 
 ---
 
