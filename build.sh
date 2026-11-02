@@ -77,6 +77,8 @@ if [ "$CHECK" = "1" ]; then
   node --check test/ab-verify.js
   node --check test/leak-verify.js
   node --check test/race-verify.js
+  node --check test/ipc-verify.js
+  node --check test/host-path-verify.js
   node --check bench/d1-ab-bench.js
 
   echo "==> 质量门禁全部通过"
@@ -131,6 +133,14 @@ echo
 export AOT_RUNNER="$EXE"
 
 if [ "$TEST" = "1" ]; then
+  echo
+  echo "==> S0 Node IPC 协议回归（Issue #11）"
+  node --test test/ipc-verify.js
+
+  echo
+  echo "==> S0 真实 host 路径验证（Issue #11 关键检查点）"
+  node --test test/host-path-verify.js
+
   echo
   echo "==> S4 A/B 验证（node runner vs AOT runner）"
   node --test test/ab-verify.js
