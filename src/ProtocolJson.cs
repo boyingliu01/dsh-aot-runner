@@ -40,26 +40,43 @@ internal static class ProtocolJson
                 return null;
             }
 
-            var req = new StartRequest();
-            if (root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String)
-                req.Type = t.GetString() ?? "";
-
-            if (root.TryGetProperty("cwd", out var c) && c.ValueKind == JsonValueKind.String)
-                req.Cwd = c.GetString() ?? "";
-
-            if (root.TryGetProperty("control", out var ctl) && ctl.ValueKind == JsonValueKind.String)
-                req.Control = ctl.GetString();
+            var req = new StartRequest
+            {
+                Type = GetStringOr(root, "type", "")!,
+                Cwd = GetStringOr(root, "cwd", "")!,
+                Control = GetStringOr(root, "control", null),
+            };
 
             if (root.TryGetProperty("env", out var env) && env.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var p in env.EnumerateObject())
-                {
-                    req.Env[p.Name] = p.Value.ValueKind == JsonValueKind.String
-                        ? p.Value.GetString() ?? ""
-                        : p.Value.GetRawText();
-                }
-            }
+                ReadEnvInto(env, req.Env);
+
             return req;
+        }
+    }
+
+    /// <summary>
+    /// 取字符串字段；字段缺失或类型不对时返回 <paramref name="fallback"/>。
+    /// 提取出来是为了让 ParseStart 不必为每个字段重复一遍
+    /// 「TryGetProperty + ValueKind 判断」这组固定搭配。
+    /// </summary>
+    private static string? GetStringOr(JsonElement root, string name, string? fallback)
+    {
+        if (!root.TryGetProperty(name, out var value)) return fallback;
+        if (value.ValueKind != JsonValueKind.String) return fallback;
+        return value.GetString() ?? fallback;
+    }
+
+    /// <summary>
+    /// 把 env 对象读进字典。字符串按原值取，其余类型保留原始 JSON 文本
+    /// （与 node 侧 JSON.stringify 的表现对齐）。
+    /// </summary>
+    private static void ReadEnvInto(JsonElement env, Dictionary<string, string> target)
+    {
+        foreach (var p in env.EnumerateObject())
+        {
+            target[p.Name] = p.Value.ValueKind == JsonValueKind.String
+                ? p.Value.GetString() ?? ""
+                : p.Value.GetRawText();
         }
     }
 

@@ -230,15 +230,19 @@ function doVerify() {
 
 const arg = (process.argv[2] || 'status').toLowerCase();
 
-switch (arg) {
-  case 'status': process.exit(doStatus());
-  case 'apply': process.exit(doApply());
-  case 'revert': process.exit(doRevert());
-  case 'verify': process.exit(doVerify());
-  case '-h':
-  case '--help':
-  case 'help':
-    console.log(`DSH subprocess-local 补丁工具
+// 用 if/else 链而非 switch：每个分支都以 process.exit() 收口，
+// switch 里不带 break 会被静态分析判为 fallthrough（既有歧义也不利阅读），
+// 而顶层又不能用 return。
+if (arg === 'status') {
+  process.exit(doStatus());
+} else if (arg === 'apply') {
+  process.exit(doApply());
+} else if (arg === 'revert') {
+  process.exit(doRevert());
+} else if (arg === 'verify') {
+  process.exit(doVerify());
+} else if (arg === '-h' || arg === '--help' || arg === 'help') {
+  console.log(`DSH subprocess-local 补丁工具
 
 用法:
   node vendor/patch-dsh.mjs [命令]
@@ -255,9 +259,9 @@ switch (arg) {
   导致 AOT runner 插件注入失效。
 
   上游讨论: https://github.com/deepseek-ai/deepseek-harness/discussions/11893`);
-    process.exit(0);
-  default:
-    console.error(`未知命令: ${arg}`);
-    console.error('运行 node vendor/patch-dsh.mjs --help 查看用法');
-    process.exit(64);
+  process.exit(0);
+} else {
+  console.error(`未知命令: ${arg}`);
+  console.error('运行 node vendor/patch-dsh.mjs --help 查看用法');
+  process.exit(64);
 }

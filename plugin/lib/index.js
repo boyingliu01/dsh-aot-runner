@@ -188,50 +188,185 @@ export function findRuntime(ctx) {
  * @param {any} ctx
  * @param {Config} config
  */
-export function apply(ctx, config = {}) {
-  const {
-    enabled = true,
-    runnerPath,
-    failThreshold = 3,
-    verbose = true,
-  } = config;
+/**
+ * 解析并校验启用前提。任一条不满足就返回 null（调用方直接退出）。
+ *
+ * 拆出来的原因：这些检查串起来有十几个 return 分支，原本全堆在 apply 里，
+ * 让 apply 涨到 147 行、深嵌套 5 层 —— 读的人很难看清「什么时候真的会启用」。
+ *
+ * @returns {{ path: string, source: string } | null}
+ */
+function resolvePreconditions(ctx, config) {
+  const { enabled = true, runnerPath } = config;
 
   if (!enabled) {
     ctx.logger?.info?.('[aot-runner] 已禁用，继续使用 node runner');
-    return;
+    return null;
   }
 
-  // ---- 1. 平台检查 ----
   if (process.platform !== 'win32') {
     ctx.logger?.info?.('[aot-runner] 仅支持 Windows，当前平台继续使用 node runner');
-    return;
+    return null;
   }
 
-  // ---- 2. 定位 runner ----
   const resolved = resolveRunnerPath(runnerPath);
   if (resolved === null) {
-    const hint = runnerPath
-      ? `配置的 runnerPath 不存在：${runnerPath}`
-      : process.env.DSH_AOT_RUNNER
-        ? `环境变量 DSH_AOT_RUNNER 指向的文件不存在：${process.env.DSH_AOT_RUNNER}`
-        : '包内缺少 bin/dsh-aot-runner.exe（需要先构建）';
-    ctx.logger?.warn?.(`[aot-runner] ${hint}，继续使用 node runner`);
-    return;
+    ctx.logger?.warn?.(`[aot-runner] ${describeMissingRunner(runnerPath)}，继续使用 node runner`);
+    return null;
   }
 
-  // ---- 3. 拿到 runtime ----
+  return resolved;
+}
+
+/** 说明为什么找不到 runner，给出可操作的下一步。 */
+function describeMissingRunner(runnerPath) {
+  if (runnerPath) return `配置的 runnerPath 不存在：${runnerPath}`;
+  if (process.env.DSH_AOT_RUNNER) {
+    return `环境变量 DSH_AOT_RUNNER 指向的文件不存在：${process.env.DSH_AOT_RUNNER}`;
+  }
+  return '包内缺少 bin/dsh-aot-runner.exe（需要先构建）';
+}
+
+/**
+ * 把熔断器接到 runtime.spawn 的失败信号上。
+ *
+ * spawn 失败在 DSH 里表现为两种形式：
+ *   a) spawn() 同步抛错（runner 不存在 / 权限不足）
+ *   b) handle.done reject（runner 起来了但协议错误 / 中途崩溃）
+ *
+ * 只在「基础设施级失败」时计数 —— target 自己非零退出不算 runner 的错。
+ *
+ * 必须保存**两个**引用：
+ *   originalSpawnRef   —— 原型上的原方法（用于还原，保持引用相等）
+ *   originalSpawnBound —— 绑定到 runtime 的版本（用于调用）
+ *
+ * 早先只存了 bind 后的版本并直接赋回去，导致还原后 runtime.spawn 变成
+ * 一个绑定函数而不是原型方法（引用不等、且多次 apply 会层层包装）。
+ *
+ * @returns {{ originalRef: Function, restore: () => void }}
+ */
+function installBreakerHook(runtime, breaker) {
+  const originalRef = runtime.spawn;
+  const originalBound = originalRef.bind(runtime);
+
+  runtime.spawn = (spec, ...rest) => {
+    let handle;
+    try {
+      handle = originalBound(spec, ...rest);
+    } catch (error) {
+      breaker.recordFailure(error);
+      throw error;
+    }
+
+    if (handle?.done && typeof handle.done.catch === 'function') {
+      handle.done.then(
+        () => breaker.recordSuccess(),
+        // target 的正常非零退出走 resolve，不会到这里；
+        // 能到这里的都是 runner 自身的问题。
+        (error) => breaker.recordFailure(error),
+      );
+    }
+
+    return handle;
+  };
+
+  return {
+    originalRef,
+    restore: () => { runtime.spawn = originalRef; },
+  };
+}
+
+/**
+ * 自检：确认注入真的会被 DSH 消费。
+ *
+ * 为什么需要：注入 `internals.runnerInvocation` 只有在 DSH 把它传给
+ * launchWindowsJob/launchLinuxScope 时才有效。DSH 0.2.0-rc.2 在 spawn() 里
+ * 丢掉了这个参数（上游 discussion #11893），于是出现「字段赋了值但没人读」
+ * —— 插件报告启用成功，实际毫无作用。
+ *
+ * 用户端表现是「装了没效果」，而日志里一切正常。这比直接报错更糟，
+ * 所以主动检测并明确告知。
+ *
+ * 检测手段是静态的：直接看 DSH 源码里那两个调用点的参数个数。
+ * 不用运行时观测，因为 bug 恰恰让观测点本身也失效了（internals 整个被丢）。
+ *
+ * @returns {'ok' | 'buggy'} 是否应当继续启用
+ */
+function runSelfCheck(ctx, verbose) {
+  const compat = checkDshInternalsBug();
+
+  if (compat === 'buggy') {
+    ctx.logger?.warn?.(
+      '[aot-runner] 检测到当前 DSH 版本会丢弃 internals 参数'
+      + '（spawn() 未把 internals 传给 launch*），注入不会生效。'
+      + '本插件已自动停用，避免「看似启用实则无效」。'
+      + '修复方法见包内 vendor/README.md，或上游 discussion #11893。',
+    );
+    return 'buggy';
+  }
+
+  if (compat === 'unknown' && verbose) {
+    ctx.logger?.warn?.(
+      '[aot-runner] 无法确认 DSH 是否支持 internals 注入'
+      + '（源码形状未识别，可能是新版本）。插件继续启用，'
+      + '若发现子进程仍走 node runner，请查看 vendor/README.md。',
+    );
+  }
+
+  return 'ok';
+}
+
+/** 创建切换 AOT / 原 runner 的两个动作。 */
+function makeInvocationSwitch(runtime, originalInvocation, aotInvocation) {
+  return {
+    activate: () => {
+      if (runtime.internals) runtime.internals.runnerInvocation = aotInvocation;
+    },
+    restore: () => {
+      if (!runtime.internals) return;
+      if (originalInvocation === undefined) delete runtime.internals.runnerInvocation;
+      else runtime.internals.runnerInvocation = originalInvocation;
+    },
+  };
+}
+
+/**
+ * 启用 AOT runner 插件。
+ *
+ * 流程（每步失败都安全退出，不会留下半启用状态）：
+ *   1. 前提校验（开关 / 平台 / runner 是否存在）
+ *   2. 拿 runtime
+ *   3. 自检 DSH 兼容性
+ *   4. 注入 runnerInvocation
+ *   5. 接熔断器
+ *   6. 注册卸载还原
+ */
+export function apply(ctx, config = {}) {
+  const { failThreshold = 3, verbose = true } = config;
+
+  // ---- 1. 前提校验 ----
+  const resolved = resolvePreconditions(ctx, config);
+  if (resolved === null) return;
+
+  // ---- 2. 拿 runtime ----
   const runtime = findRuntime(ctx);
   if (runtime === null) {
     ctx.logger?.warn?.('[aot-runner] 找不到 subprocess 服务，无法注入 runner');
     return;
   }
 
-  // ---- 4. 保存原始调用方式，供降级时恢复 ----
-  // 这里不假设它一定有值：某些测试环境会把它清空。
-  const originalInvocation = runtime.internals?.runnerInvocation;
-  const aotInvocation = [resolved.path];
+  // ---- 3. 自检 ----
+  if (runSelfCheck(ctx, verbose) === 'buggy') return;
 
-  // ---- 5. 装熔断器 ----
+  // ---- 4. 注入 ----
+  // 保存原值时不假设它一定有值：某些测试环境会把它清空。
+  const originalInvocation = runtime.internals?.runnerInvocation;
+  const { activate, restore } = makeInvocationSwitch(
+    runtime, originalInvocation, [resolved.path],
+  );
+  activate();
+
+  // ---- 5. 熔断器 ----
   const breaker = new CircuitBreaker({
     threshold: failThreshold,
     onOpen: (reason) => {
@@ -243,93 +378,11 @@ export function apply(ctx, config = {}) {
       activate();
     },
   });
+  const hook = installBreakerHook(runtime, breaker);
 
-  const activate = () => {
-    if (runtime.internals) runtime.internals.runnerInvocation = aotInvocation;
-  };
-
-  const restore = () => {
-    if (!runtime.internals) return;
-    if (originalInvocation === undefined) delete runtime.internals.runnerInvocation;
-    else runtime.internals.runnerInvocation = originalInvocation;
-  };
-
-  activate();
-
-  // ---- 6. 把熔断器接到失败信号上 ----
-  //
-  // 关键：spawn 失败在 DSH 里表现为两种形式
-  //   a) spawn() 同步抛错（runner 不存在 / 权限不足）
-  //   b) handle.done reject（runner 起来了但协议错误 / 中途崩溃）
-  //
-  // 只在「基础设施级失败」时计数 —— target 自己非零退出不算 runner 的错。
-  //
-  // 这里必须保存**两个**引用：
-  //   originalSpawnRef      —— 原型上的原方法（用于还原，保持引用相等）
-  //   originalSpawnBound    —— 绑定到 runtime 的版本（用于调用）
-  //
-  // 早先只存了 bind 后的版本并直接赋回去，导致：还原后 runtime.spawn 变成
-  // 一个绑定函数而不是原型方法（引用不等、且多次 apply 会层层包装）。
-  const originalSpawnRef = runtime.spawn;
-  const originalSpawnBound = originalSpawnRef.bind(runtime);
-
-  runtime.spawn = (spec, ...rest) => {
-    let handle;
-    try {
-      handle = originalSpawnBound(spec, ...rest);
-    } catch (error) {
-      breaker.recordFailure(error);
-      throw error;
-    }
-
-    if (handle?.done && typeof handle.done.catch === 'function') {
-      handle.done.then(
-        () => breaker.recordSuccess(),
-        (error) => {
-          // target 的正常非零退出走 resolve，不会到这里；
-          // 能到这里的都是 runner 自身的问题。
-          breaker.recordFailure(error);
-        },
-      );
-    }
-
-    return handle;
-  };
-
-  // ---- 6.5 自检：确认注入真的会被 DSH 消费 ----
-  //
-  // 为什么需要这一步：注入 `internals.runnerInvocation` 只有在 DSH 把它
-  // 传给 launchWindowsJob/launchLinuxScope 时才有效。DSH 0.2.0-rc.2 在
-  // spawn() 里丢掉了这个参数（上游 discussion #11893），于是出现
-  // 「字段赋了值但没人读」—— 插件报告启用成功，实际毫无作用。
-  //
-  // 用户端的表现是「装了没效果」，而日志里一切正常。这比直接报错更糟，
-  // 所以这里主动检测并明确告知。
-  //
-  // 检测手段是静态的：直接看 DSH 源码里那两个调用点的参数个数。
-  // 不用运行时观测，因为 bug 恰恰让观测点本身也失效了（internals 整个被丢）。
-  const dshCompat = checkDshInternalsBug();
-  if (dshCompat === 'buggy') {
-    ctx.logger?.warn?.(
-      '[aot-runner] 检测到当前 DSH 版本会丢弃 internals 参数'
-      + '（spawn() 未把 internals 传给 launch*），注入不会生效。'
-      + '本插件已自动停用，避免「看似启用实则无效」。'
-      + '修复方法见包内 vendor/README.md，或上游 discussion #11893。',
-    );
-    restore();
-    return;
-  }
-  if (dshCompat === 'unknown' && verbose) {
-    ctx.logger?.warn?.(
-      '[aot-runner] 无法确认 DSH 是否支持 internals 注入'
-      + '（源码形状未识别，可能是新版本）。插件继续启用，'
-      + '若发现子进程仍走 node runner，请查看 vendor/README.md。',
-    );
-  }
-
-  // ---- 7. 卸载时还原 ----
+  // ---- 6. 卸载还原 ----
   ctx.effect?.(() => () => {
-    runtime.spawn = originalSpawnRef;
+    hook.restore();
     restore();
   }, 'aot-runner restore');
 

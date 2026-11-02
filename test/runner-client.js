@@ -133,8 +133,8 @@ function controlEnv(env, control) {
   return { ...env, DSH_SUBPROCESS_CONTROL: 'pipe' };
 }
 
-/** 启动 runner 但**不等待结果**，返回可控句柄 —— 供泄漏/竞态测试使用。 */
-function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), control = false }) {
+/** 按 runner 类型构造启动参数（command + args + env + stdio）。 */
+function runnerLaunchSpec(kind, { argv, cwd, control }) {
   const isAot = kind === 'aot';
 
   // 两种 runner 走**完全相同的真实 host 布局**（Issue #11）。
@@ -152,21 +152,19 @@ function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), contr
     ? (() => { const e = { ...process.env }; delete e.DSH_SUBPROCESS_RUNNER; return e; })()
     : { ...process.env, DSH_SUBPROCESS_RUNNER: 'windows' };
 
-  const c = isAot
-    ? spawn(AOT_RUNNER, ['--', ...argv], { cwd, windowsHide: true, env: childEnv, stdio })
-    : spawn(NODE, [NODE_RUNNER, '--', ...argv], { cwd: process.cwd(), windowsHide: true, env: childEnv, stdio });
+  return isAot
+    ? { command: AOT_RUNNER, args: ['--', ...argv], options: { cwd, windowsHide: true, env: childEnv, stdio } }
+    : { command: NODE, args: [NODE_RUNNER, '--', ...argv], options: { cwd: process.cwd(), windowsHide: true, env: childEnv, stdio } };
+}
 
+// terminate 需要知道 target 已起来，start 消息延后这么久再发，
+// 让 runner 有机会先进入接收状态。
+const START_DELAY_MS = 30;
+
+/** 把子进程的输出 / IPC 消息收集到 state 上。 */
+function wireChildStreams(c, state, { control }) {
   // proto 是解析缓冲区（会被消费），protoRaw 记录所有完整原始行 ——
   // 后者用于「有没有重复投递终态结果」这类断言。混用会导致该断言永远成立。
-  const state = {
-    stdout: '', stderr: '', proto: '', protoRaw: [], controlData: '', result: null, pid: null,
-  };
-
-  const payload = { type: 'start', cwd, env: controlEnv(env, control) };
-  if (control) payload.control = 'pipe';
-
-  // 两侧统一：结果走 Node IPC 消息，target 的 stdio 在 5/6，
-  // control 在 7。stdio[4] 是 target 的 stdin（我们写入，不监听 'data'）。
   c.on('message', (m) => {
     if (m && (m.type === 'target-exit' || m.type === 'error')) {
       state.result = m;
@@ -180,47 +178,85 @@ function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), contr
   // IPC 通道对一个已退出的子进程发消息时抛的是**异步** error 事件。
   // 没有监听器时 Node 会当成未捕获异常直接终结进程 —— 必须挂一个。
   c.on('error', (e) => { state.ipcError = e.code ?? e.message; });
+}
 
-  c.on('spawn', () => {
-    state.pid = c.pid;
-    // terminate 需要知道 target 已起来，这里留一小段让 start 先被消费
-    setTimeout(() => {
-      if (!c.connected) return;
-      try {
-        c.send(payload);
-      } catch { /* runner 可能已退出 */ }
-    }, 30);
+// 默认等待 target 退出的上限（毫秒）
+const DEFAULT_WAIT_MS = 15000;
+
+/** 等 target 退出，或到点直接看当前状态。 */
+function waitForResult(c, state, ms = DEFAULT_WAIT_MS) {
+  if (state.result) return Promise.resolve(state);
+  return new Promise((resolve) => {
+    c.on('exit', () => resolve(state));
+    setTimeout(() => resolve(state), ms);
   });
+}
 
+/**
+ * 通过 IPC 让 runner 向 target 发 terminate。
+ *
+ * 必须先用 connected 判断再发：对已断开的 IPC 通道调用 send() 抛的是
+ * **异步** 'error' 事件（ERR_IPC_CHANNEL_CLOSED），try/catch 抓不住，
+ * 会直接冒泡成未捕获异常把测试进程带崩。
+ * 这正是竞态测试要覆盖的场景：runner 已退出时再发 terminate。
+ *
+ * @returns {boolean} 消息是否成功发出
+ */
+function sendTerminate(c, signal) {
+  if (!c.connected) return false;
+  try {
+    c.send({ type: 'terminate', signal });
+    return true;
+  } catch {
+    return false;   // 同步抛出（通道已销毁）时兜底
+  }
+}
+
+/** 构造返回给测试用的可控句柄。 */
+function makeHandle(c, state) {
   return {
     child: c,
     state,
     /** 让 runner 向 target 发 terminate（走 Node IPC 通道，与真实 host 一致） */
     terminate(signal = 'SIGTERM') {
-      // 必须先用 connected 判断再发：对已断开的 IPC 通道调用 send() 抛的是
-      // **异步** 'error' 事件（ERR_IPC_CHANNEL_CLOSED），try/catch 抓不住，
-      // 会直接冒泡成未捕获异常把测试进程带崩。
-      // 这正是竞态测试要覆盖的场景：runner 已退出时再发 terminate。
-      if (!c.connected) return false;
-      try {
-        c.send({ type: 'terminate', signal });
-        return true;
-      } catch {
-        return false;   // 同步抛出（通道已销毁）时兜底
-      }
+      return sendTerminate(c, signal);
     },
     /** 等 target 退出或超时 */
     wait(ms = 15000) {
-      return new Promise((resolve) => {
-        const done = () => resolve(state);
-        if (state.result) return done();
-        c.on('exit', done);
-        setTimeout(done, ms);
-      });
+      return waitForResult(c, state, ms);
     },
     /** 直接杀 runner 进程本身（混沌测试用） */
     killRunner() { try { c.kill(); } catch { /* ignore */ } },
   };
+}
+
+/** 启动 runner 但**不等待结果**，返回可控句柄 —— 供泄漏/竞态测试使用。 */
+function launchRunner(kind, { argv, cwd = 'C:/Windows', env = targetEnv(), control = false }) {
+  const spec = runnerLaunchSpec(kind, { argv, cwd, env, control });
+  const c = spawn(spec.command, spec.args, spec.options);
+
+  const state = {
+    stdout: '', stderr: '', proto: '', protoRaw: [], controlData: '', result: null, pid: null,
+  };
+
+  const payload = { type: 'start', cwd, env: controlEnv(env, control) };
+  if (control) payload.control = 'pipe';
+
+  // 两侧统一：结果走 Node IPC 消息，target 的 stdio 在 5/6，
+  // control 在 7。stdio[4] 是 target 的 stdin（我们写入，不监听 'data'）。
+  wireChildStreams(c, state, { control });
+
+  c.on('spawn', () => {
+    state.pid = c.pid;
+    setTimeout(() => {
+      if (!c.connected) return;
+      try {
+        c.send(payload);
+      } catch { /* runner 可能已退出 */ }
+    }, START_DELAY_MS);
+  });
+
+  return makeHandle(c, state);
 }
 
 /**
@@ -264,7 +300,7 @@ function runNode({ argv, cwd = 'C:/Windows', env = targetEnv(), control = false,
     c.on('message', (m) => {
       if (m && (m.type === 'target-exit' || m.type === 'error')) fin(null, m);
     });
-    c.on('exit', (code) => { if (!settled) fin(null, null); });
+    c.on('exit', () => { if (!settled) fin(null, null); });
     c.on('error', (e) => fin(String(e)));
     setTimeout(() => fin('timeout'), timeoutMs);
   });

@@ -218,14 +218,69 @@ internal sealed class JobRunner : IDisposable
         var envBlock = BuildEnvironmentBlock(req.Env);
 
         // ---- 3. 把 target 的 stdio 接到 host 传入的通道 ----
-        // host 用 Node 的 spawn stdio 数组按「文件描述符」编号传递通道：
-        //   stdio[4] → fd 4 (target stdin)
-        //   stdio[5] → fd 5 (target stdout)
-        //   stdio[6] → fd 6 (target stderr)
-        //   stdio[7] → fd 7 (control channel，仅 control:"pipe" 时存在)
-        // Windows 上必须用 CRT 的 _get_osfhandle 取句柄 —— GetStdHandle(4/5/6)
-        // 只会返回 INVALID_HANDLE_VALUE（实测 0xFFFFFFFF），因为它查的是标准
-        // 句柄表的固定索引（-10/-11/-12），不是 CRT 的 fd 表。
+        var stdio = ResolveStdioHandles();
+
+        // ---- 3a. control channel（Issue #2）----
+        var controlRequested = req.Control == "pipe";
+        var hControl = controlRequested ? Native.CrtGetOsFHandle(CrtDescriptorTable.ControlFileDescriptor) : IntPtr.Zero;
+        if (controlRequested && !IsValid(hControl))
+        {
+            // host 声明了 control 却没传可用的 fd 7：这是 host 侧契约违约，
+            // 不能静默降级成「无 control」，否则 target 会永远等一条不存在的通道。
+            PublishControlMissingError();
+            return;
+        }
+
+        // ---- 3b. 精确控制继承：只放行 target 需要的句柄 ----
+        var targetHandles = controlRequested
+            ? new[] { stdio.In, stdio.Out, stdio.Err, hControl }
+            : new[] { stdio.In, stdio.Out, stdio.Err };
+        var inheritToggled = EnableInheritanceFor(targetHandles);
+
+        // CRT 描述符表：只有 control 请求时才需要（其余情况走默认标准句柄表）
+        var descriptorTable = CrtDescriptorTable.Encode(stdio.In, stdio.Out, stdio.Err, hControl);
+        var descriptorPtr = IntPtr.Zero;
+        if (descriptorTable is not null)
+        {
+            descriptorPtr = Marshal.AllocHGlobal(descriptorTable.Length);
+            Marshal.Copy(descriptorTable, 0, descriptorPtr, descriptorTable.Length);
+        }
+
+        // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
+        // 那是实验残留 —— runner 是 console 程序，fd 0/1/2 由 host 映射到 target 的
+        // stdout/stderr，动它们会连带关掉输出通道，而抑制继承本来就不依赖这一步。
+        // 真正保证 target 拿不到协议句柄的是：fd 4/5/6 之外不额外打开可继承句柄，
+        // 且 CreateProcessW 返回后立刻在 finally 里恢复所有被改过的标志。
+
+        var si = BuildStartupInfo(stdio, descriptorTable, descriptorPtr);
+
+        try
+        {
+            LaunchProcess(req, job, appName, cmdline, envBlock, si, inheritToggled);
+        }
+        finally
+        {
+            if (descriptorPtr != IntPtr.Zero) Marshal.FreeHGlobal(descriptorPtr);
+        }
+    }
+
+    /// <summary>target 的三个 stdio 句柄。</summary>
+    private readonly record struct StdioHandles(IntPtr In, IntPtr Out, IntPtr Err);
+
+    /// <summary>
+    /// 解析 target 的 stdin/stdout/stderr 句柄。
+    ///
+    /// host 用 Node 的 spawn stdio 数组按「文件描述符」编号传递通道：
+    ///   stdio[4] → fd 4 (target stdin)
+    ///   stdio[5] → fd 5 (target stdout)
+    ///   stdio[6] → fd 6 (target stderr)
+    ///
+    /// Windows 上必须用 CRT 的 _get_osfhandle 取句柄 —— GetStdHandle(4/5/6)
+    /// 只会返回 INVALID_HANDLE_VALUE（实测 0xFFFFFFFF），因为它查的是标准
+    /// 句柄表的固定索引（-10/-11/-12），不是 CRT 的 fd 表。
+    /// </summary>
+    private static StdioHandles ResolveStdioHandles()
+    {
         var hIn = Native.CrtGetOsFHandle(4);
         var hOut = Native.CrtGetOsFHandle(5);
         var hErr = Native.CrtGetOsFHandle(6);
@@ -251,48 +306,41 @@ internal sealed class JobRunner : IDisposable
             Trace.Write("stdio: WARNING fd4/5/6 缺失，target 将继承本进程标准句柄（输出可能进入 NUL）");
         }
 
-        // ---- 3a. control channel（Issue #2）----
-        // control:"pipe" 时 host 在 stdio[7] 传一个管道，target 会用
-        // openInheritedControlChannel() 以 fd 7 打开它。
-        //
-        // 必须做两件事，缺一 target 就用不了：
-        //   1. 在 target 环境块里注入 DSH_SUBPROCESS_CONTROL=pipe
-        //      （target 靠这个标记才知道「我继承了控制通道」）
-        //   2. 通过 STARTUPINFO.lpReserved2 下发 CRT 描述符表，
-        //      把 fd 7 映射到该句柄（只置继承标志不够，见 CrtDescriptorTable 注释）
-        var controlRequested = req.Control == "pipe";
-        var hControl = controlRequested ? Native.CrtGetOsFHandle(CrtDescriptorTable.ControlFileDescriptor) : IntPtr.Zero;
-        if (controlRequested && !IsValid(hControl))
-        {
-            // host 声明了 control 却没传可用的 fd 7：这是 host 侧契约违约，
-            // 不能静默降级成「无 control」，否则 target 会永远等一条不存在的通道。
-            PublishResult(new ErrorResult
-            {
-                Error = new SerializedError
-                {
-                    Name = "Error",
-                    Message = "subprocess control channel was not inherited",
-                    Code = "EPROTOCOL",
-                },
-            });
-            return;
-        }
+        return new StdioHandles(hStdIn, hStdOut, hStdErr);
+    }
 
-        // ---- 3b. 精确控制继承：只放行 target 需要的句柄 ----
-        // CreateProcessW 的 bInheritHandles=true 会继承本进程所有「可继承」句柄。
-        // runner 自己从 host 继承来的协议管道（fd0/fd1/fd2）默认就是可继承的，
-        // 若不处理，target 会连 runner 的协议通道一起继承走。
-        //
-        // 这不只是洁癖问题：MSYS2/Cygwin 程序（git-bash）对句柄表极其敏感，
-        // 多拿到 inherited 句柄会在初始化时崩在
-        //   NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022
-        // 实测 bash 因此 100% 启动失败（exit=-1073741502）。
-        //
-        // 做法：把 target 要用的句柄显式置为 HANDLE_FLAG_INHERIT，
-        // CreateProcessW 返回后在 finally 里原样恢复。
-        var targetHandles = controlRequested
-            ? new[] { hStdIn, hStdOut, hStdErr, hControl }
-            : new[] { hStdIn, hStdOut, hStdErr };
+    /// <summary>emit 「control 通道未继承」的 EPROTOCOL 错误（host 侧契约违约）。</summary>
+    private void PublishControlMissingError()
+    {
+        PublishResult(new ErrorResult
+        {
+            Error = new SerializedError
+            {
+                Name = "Error",
+                Message = "subprocess control channel was not inherited",
+                Code = "EPROTOCOL",
+            },
+        });
+    }
+
+    /// <summary>
+    /// 精确控制继承：只放行 target 需要的句柄。
+    ///
+    /// CreateProcessW 的 bInheritHandles=true 会继承本进程所有「可继承」句柄。
+    /// runner 自己从 host 继承来的协议管道（fd0/fd1/fd2）默认就是可继承的，
+    /// 若不处理，target 会连 runner 的协议通道一起继承走。
+    ///
+    /// 这不只是洁癖问题：MSYS2/Cygwin 程序（git-bash）对句柄表极其敏感，
+    /// 多拿到 inherited 句柄会在初始化时崩在
+    ///   NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-...): 0xC0000022
+    /// 实测 bash 因此 100% 启动失败（exit=-1073741502）。
+    ///
+    /// 做法：把 target 要用的句柄显式置为 HANDLE_FLAG_INHERIT，
+    /// CreateProcessW 返回后在 finally 里原样恢复。
+    /// </summary>
+    /// <returns>被改动过的句柄及其原始状态，供调用方恢复。</returns>
+    private static List<(IntPtr Handle, bool WasInheritable)> EnableInheritanceFor(IntPtr[] targetHandles)
+    {
         var inheritToggled = new List<(IntPtr Handle, bool WasInheritable)>(targetHandles.Length);
         foreach (var h in targetHandles)
         {
@@ -305,30 +353,30 @@ internal sealed class JobRunner : IDisposable
                     Native.SetHandleInformation(h, Native.HANDLE_FLAG_INHERIT, Native.HANDLE_FLAG_INHERIT);
             }
         }
+        return inheritToggled;
+    }
 
-        // CRT 描述符表：只有 control 请求时才需要（其余情况走默认标准句柄表）
-        var descriptorTable = CrtDescriptorTable.Encode(hStdIn, hStdOut, hStdErr, hControl);
-        var descriptorPtr = IntPtr.Zero;
-        if (descriptorTable is not null)
-        {
-            descriptorPtr = Marshal.AllocHGlobal(descriptorTable.Length);
-            Marshal.Copy(descriptorTable, 0, descriptorPtr, descriptorTable.Length);
-        }
-
-        // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
-        // 那是实验残留 —— runner 是 console 程序，fd 0/1/2 由 host 映射到 target 的
-        // stdout/stderr，动它们会连带关掉输出通道，而抑制继承本来就不依赖这一步。
-        // 真正保证 target 拿不到协议句柄的是：fd 4/5/6 之外不额外打开可继承句柄，
-        // 且 CreateProcessW 返回后立刻在 finally 里恢复所有被改过的标志。
-
+    /// <summary>
+    /// 构造 STARTUPINFO，并在 control 请求时挂上 CRT 描述符表。
+    ///
+    /// control:"pipe" 时 host 在 stdio[7] 传一个管道，target 会用
+    /// openInheritedControlChannel() 以 fd 7 打开它。必须做两件事，缺一不可：
+    ///   1. 在 target 环境块里注入 DSH_SUBPROCESS_CONTROL=pipe
+    ///      （target 靠这个标记才知道「我继承了控制通道」）
+    ///   2. 通过 STARTUPINFO.lpReserved2 下发 CRT 描述符表，
+    ///      把 fd 7 映射到该句柄（只置继承标志不够，见 CrtDescriptorTable 注释）
+    /// </summary>
+    private static Native.STARTUPINFO BuildStartupInfo(
+        StdioHandles stdio, byte[]? descriptorTable, IntPtr descriptorPtr)
+    {
         var si = new Native.STARTUPINFO
         {
             cb = Marshal.SizeOf<Native.STARTUPINFO>(),
             dwFlags = Native.STARTF_USESTDHANDLES | Native.STARTF_USESHOWWINDOW,
             wShowWindow = Native.SW_HIDE,
-            hStdInput = hStdIn,
-            hStdOutput = hStdOut,
-            hStdError = hStdErr,
+            hStdInput = stdio.In,
+            hStdOutput = stdio.Out,
+            hStdError = stdio.Err,
         };
 
         // control 请求：把 CRT 描述符表挂到 STARTUPINFO 上。
@@ -340,6 +388,23 @@ internal sealed class JobRunner : IDisposable
             si.lpReserved2 = descriptorPtr;
         }
 
+        return si;
+    }
+
+    /// <summary>
+    /// 调用 CreateProcessW 并完成 Job 入队、线程放行、句柄继承恢复。
+    ///
+    /// RUNNER-SPEC §5.3 步骤 3~5。任何一步失败都会 emit 错误并 Finish()。
+    /// </summary>
+    private void LaunchProcess(
+        StartRequest req,
+        SafeJobHandle job,
+        string appName,
+        string cmdline,
+        byte[] envBlock,
+        Native.STARTUPINFO si,
+        List<(IntPtr Handle, bool WasInheritable)> inheritToggled)
+    {
         var envPtr = Marshal.AllocHGlobal(envBlock.Length);
         try
         {
@@ -353,14 +418,8 @@ internal sealed class JobRunner : IDisposable
             Trace.Timed($"about to CreateProcessW: {appName}");
             try
             {
-                if (!Native.CreateProcessW(appName, cmdline, IntPtr.Zero, IntPtr.Zero,
-                        bInheritHandles: true, dwCreationFlags: flags,
-                        lpEnvironment: envPtr, lpCurrentDirectory: cwd,
-                        ref si, out var pi))
+                if (!CreateSuspendedProcess(appName, cmdline, envPtr, cwd, flags, si, out var pi))
                 {
-                    // 对齐 node 的 asSpawnError：把 Win32 码翻成 Node errno 文本，
-                    // 而不是自创 "CreateProcessW failed for ..." 这类消息。
-                    EmitCreateProcessError(Marshal.GetLastWin32Error(), _argv[0]);
                     Finish();
                     return;
                 }
@@ -378,21 +437,8 @@ internal sealed class JobRunner : IDisposable
                 Trace.Timed("AssignProcessToJobObject ok");
 
                 // RUNNER-SPEC §5.3 步骤 5：再放行。
-                // ResumeThread 失败时返回 0xFFFFFFFF，必须检查 —— 不检查的话线程
-                // 永远挂起，target 静默不执行，而我们却在等一个永远不会出现的退出码，
-                // 外部表现为「调用卡住」。
-                var suspendCount = Native.ResumeThread(pi.hThread);
-                if (suspendCount == Native.RESUME_THREAD_FAILED)
-                {
-                    var resumeError = Marshal.GetLastWin32Error();
-                    // ERROR_NOT_SUSPENDED 说明线程已经是运行态，不是失败
-                    if (resumeError != Native.ERROR_NOT_SUSPENDED)
-                    {
-                        EmitCreateProcessError(resumeError, _argv[0]);
-                        Finish();
-                        return;
-                    }
-                }
+                if (!ResumeTargetThread(pi)) return;
+
                 Trace.Timed("ResumeThread ok");
                 // 注：DSH 的 runner.js 会在 spawn 后 closeSync(4/5/6/7) 关闭自己的副本。
                 // AOT 版暂不照做 —— 现有 24 项 A/B 在不关的情况下已与 node 行为一致，
@@ -412,8 +458,45 @@ internal sealed class JobRunner : IDisposable
         finally
         {
             Marshal.FreeHGlobal(envPtr);
-            if (descriptorPtr != IntPtr.Zero) Marshal.FreeHGlobal(descriptorPtr);
         }
+    }
+
+    /// <summary>CreateProcessW 封装；失败时按 node 的 errno 文本 emit 错误。</summary>
+    private bool CreateSuspendedProcess(
+        string appName, string cmdline, IntPtr envPtr, string? cwd,
+        uint flags, Native.STARTUPINFO si, out Native.PROCESS_INFORMATION pi)
+    {
+        var ok = Native.CreateProcessW(appName, cmdline, IntPtr.Zero, IntPtr.Zero,
+            bInheritHandles: true, dwCreationFlags: flags,
+            lpEnvironment: envPtr, lpCurrentDirectory: cwd,
+            ref si, out pi);
+        if (ok) return true;
+
+        // 对齐 node 的 asSpawnError：把 Win32 码翻成 Node errno 文本，
+        // 而不是自创 "CreateProcessW failed for ..." 这类消息。
+        EmitCreateProcessError(Marshal.GetLastWin32Error(), _argv[0]);
+        return false;
+    }
+
+    /// <summary>
+    /// 放行之前 CREATE_SUSPENDED 挂起的 target 线程。
+    ///
+    /// ResumeThread 失败时返回 0xFFFFFFFF，必须检查 —— 不检查的话线程
+    /// 永远挂起，target 静默不执行，而我们却在等一个永远不会出现的退出码，
+    /// 外部表现为「调用卡住」。
+    /// </summary>
+    private bool ResumeTargetThread(Native.PROCESS_INFORMATION pi)
+    {
+        var suspendCount = Native.ResumeThread(pi.hThread);
+        if (suspendCount != Native.RESUME_THREAD_FAILED) return true;
+
+        var resumeError = Marshal.GetLastWin32Error();
+        // ERROR_NOT_SUSPENDED 说明线程已经是运行态，不是失败
+        if (resumeError == Native.ERROR_NOT_SUSPENDED) return true;
+
+        EmitCreateProcessError(resumeError, _argv[0]);
+        Finish();
+        return false;
     }
 
     /// <summary>把路径规范化为 Windows 反斜杠格式；空值返回 null（表示继承当前目录）。</summary>
@@ -455,47 +538,69 @@ internal sealed class JobRunner : IDisposable
         var nameStart = WindowsFileNameStart(program);
         var directory = program.Substring(0, nameStart);
         var name = program.Substring(nameStart);
-        var hasPath = nameStart != 0;
 
+        var candidates = BuildExecutableCandidates(name);
+        var roots = BuildSearchRoots(nameStart != 0, directory, env);
+
+        foreach (var root in roots)
+        {
+            var basePath = WindowsSearchPathJoin(root, name, cwd ?? "");
+            var found = ProbeCandidates(basePath, candidates);
+            if (found is not null) return found;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 候选名顺序：自带扩展名的原样名 → .com → .exe（与 libuv 一致）。
+    /// </summary>
+    private static List<string> BuildExecutableCandidates(string name)
+    {
         // 扩展名判定：点号存在且不是最后一个字符
         var dot = name.IndexOf('.');
         var hasExtension = dot >= 0 && dot < name.Length - 1;
         var separator = name.EndsWith('.') ? "" : ".";
 
-        // 候选名顺序：自带扩展名的原样名 → .com → .exe
         var candidates = new List<string>(3);
         if (hasExtension) candidates.Add(name);
         candidates.Add(name + separator + "com");
         candidates.Add(name + separator + "exe");
+        return candidates;
+    }
 
-        // 搜索根：带路径 → 只有该目录；不带路径 → cwd（可禁用）+ 各 PATH 目录
+    /// <summary>
+    /// 搜索根：带路径 → 只有该目录；不带路径 → cwd（可禁用）+ 各 PATH 目录。
+    /// </summary>
+    private static List<string> BuildSearchRoots(bool hasPath, string directory, Dictionary<string, string>? env)
+    {
         var roots = new List<string>(8);
         if (hasPath)
         {
             roots.Add(directory);
-        }
-        else
-        {
-            // 本进程环境决定是否搜索 cwd（与 node 的 currentEnv 视角一致）
-            var noDefaultCwd = Environment.GetEnvironmentVariable("NODEFAULTCURRENTDIRECTORYINEXEPATH");
-            if (noDefaultCwd is null) roots.Add("");
-            roots.AddRange(SplitPath(GetEnvValue(env, "PATH")
-                ?? Environment.GetEnvironmentVariable("PATH") ?? ""));
+            return roots;
         }
 
-        foreach (var root in roots)
+        // 本进程环境决定是否搜索 cwd（与 node 的 currentEnv 视角一致）
+        var noDefaultCwd = Environment.GetEnvironmentVariable("NODEFAULTCURRENTDIRECTORYINEXEPATH");
+        if (noDefaultCwd is null) roots.Add("");
+
+        roots.AddRange(SplitPath(GetEnvValue(env, "PATH")
+            ?? Environment.GetEnvironmentVariable("PATH") ?? ""));
+        return roots;
+    }
+
+    /// <summary>在某个基准路径下依次探测候选名，返回第一个存在的。</summary>
+    private static string? ProbeCandidates(string basePath, List<string> candidates)
+    {
+        foreach (var candidate in candidates)
         {
-            var basePath = WindowsSearchPathJoin(root, name, cwd ?? "");
-            foreach (var candidate in candidates)
+            var full = basePath.Length == 0 ? candidate : basePath + candidate;
+            try
             {
-                var full = basePath.Length == 0 ? candidate : basePath + candidate;
-                try
-                {
-                    // executableCandidateExists：存在且不是目录
-                    if (File.Exists(full)) return full;
-                }
-                catch { }
+                // executableCandidateExists：存在且不是目录
+                if (File.Exists(full)) return full;
             }
+            catch { }
         }
         return null;
     }
@@ -653,20 +758,8 @@ internal sealed class JobRunner : IDisposable
         var process = _process;
         var job = _job;
 
-        if (process is not null && !process.IsInvalid && !process.IsClosed)
-        {
-            if (Native.GetExitCodeProcess(process.DangerousGetHandle(), out var code)
-                && code != Native.STILL_ACTIVE)
-            {
-                Trace.Timed($"target exited code={code}");
-
-                process.Dispose();
-                _process = null;
-                // RUNNER-SPEC §6.1：投递 target-exit
-                PublishResult(new TargetExitResult { ExitCode = (int)code });
-                return;
-            }
-        }
+        // 先看 target 是否已退出；退出了就不必再管 job
+        if (TryPublishExit(process)) return;
 
         if (job is not null && !job.IsInvalid && !job.IsClosed && job.IsEmpty())
         {
@@ -674,6 +767,26 @@ internal sealed class JobRunner : IDisposable
             _job = null;
             if (_resultDelivered) Finish();
         }
+    }
+
+    /// <summary>
+    /// target 已退出则投递 target-exit 并收尾，返回 true。
+    /// 尚未退出、或没有可用的 process 句柄时返回 false。
+    /// </summary>
+    private bool TryPublishExit(SafeKernelHandle? process)
+    {
+        if (process is null || process.IsInvalid || process.IsClosed) return false;
+
+        if (!Native.GetExitCodeProcess(process.DangerousGetHandle(), out var code)) return false;
+        if (code == Native.STILL_ACTIVE) return false;
+
+        Trace.Timed($"target exited code={code}");
+
+        process.Dispose();
+        _process = null;
+        // RUNNER-SPEC §6.1：投递 target-exit
+        PublishResult(new TargetExitResult { ExitCode = (int)code });
+        return true;
     }
 
     // ---------------- terminate ----------------

@@ -23,22 +23,9 @@ const {
 
 assertEnvironment();
 
-/** 等待若干毫秒 */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * 轮询直到条件成立或超时。
- * 进程回收是异步的：Job close 到内核真正清理进程有微小延迟，
- * 固定 sleep 要么不够稳、要么拖慢测试，所以用轮询。
- */
-async function waitUntil(pred, { timeoutMs = 8000, intervalMs = 50 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pred()) return true;
-    await sleep(intervalMs);
-  }
-  return pred();
-}
+// sleep / waitUntil 与 race-verify 曾经各有一份完全相同的实现
+// （Gate 2 查出的克隆），统一改为引用 test-utils。
+const { sleep, waitUntil } = require('./test-utils.js');
 
 /** 列出当前所有匹配名字的进程 PID（跨 runner/target 检查泄漏用） */
 function pidsByName(namePattern) {

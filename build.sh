@@ -72,6 +72,30 @@ if [ "$CHECK" = "1" ]; then
   fi
   rm -f "$BUILD_LOG"
 
+  echo "==> 质量门禁：版本一致性"
+  node scripts/check-version.mjs
+
+  echo "==> 质量门禁：覆盖率门槛（对应 xp-gate Gate 5）"
+  if command -v npx >/dev/null 2>&1; then
+    npx --no-install c8 node --test plugin/test/index.test.js >/dev/null || {
+      echo "覆盖率未达标（阈值见 .c8rc.json）" >&2
+      npx --no-install c8 node --test plugin/test/index.test.js 2>&1 | tail -8 >&2
+      exit 1
+    }
+  else
+    echo "跳过：未找到 npx"
+  fi
+
+  echo "==> 质量门禁：ESLint（对应 xp-gate Gate 1）"
+  if command -v npx >/dev/null 2>&1; then
+    npx --no-install eslint . || {
+      echo "ESLint 未通过。若提示找不到 eslint，请先 npm i -g eslint。" >&2
+      exit 1
+    }
+  else
+    echo "跳过：未找到 npx"
+  fi
+
   echo "==> 质量门禁：JS 语法"
   node --check test/runner-client.js
   node --check test/ab-verify.js
@@ -85,6 +109,7 @@ if [ "$CHECK" = "1" ]; then
   node --check plugin/test/index.test.js
   node --check bench/d1-ab-bench.js
   node --check vendor/patch-dsh.mjs
+  node --check scripts/check-version.mjs
 
   echo "==> 质量门禁：上游补丁留档"
   node vendor/patch-dsh.mjs verify

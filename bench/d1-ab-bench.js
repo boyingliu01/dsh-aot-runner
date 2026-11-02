@@ -73,95 +73,104 @@ function fmtEnv(e) {
 }
 
 // ---------------- node runner 调用 ----------------
-function runNodeRunner() {
+// 单次 runner 调用的超时上限：超过就认为挂了，不必再等。
+const RUNNER_TIMEOUT_MS = 15000;
+
+// 传给 target 的环境变量白名单 —— 只保留启动子进程真正需要的，
+// 避免把基准进程的全部环境（含各种 node/npm 变量）透传进去。
+const TARGET_ENV_KEYS = ['PATH', 'SystemRoot', 'TEMP', 'TMP'];
+
+/** 从当前进程环境里挑出白名单内的变量。 */
+function pickTargetEnv(source) {
+  return Object.fromEntries(
+    Object.entries(source).filter(([k]) => TARGET_ENV_KEYS.includes(k)),
+  );
+}
+
+/**
+ * 跑一次 runner 并计时。
+ *
+ * 两个 runner 走**完全相同的真实 host 布局**（Issue #11）：
+ * stdio[3]='ipc' 才是生产路径。基准必须测真实协议，
+ * 否则测出来的数字对应的是一个 host 根本调不起来的产物。
+ *
+ * 此前 node / aot 各有一份几乎相同的实现（约 45 行 × 2），
+ * 既触发 Gate 2 重复代码，也让「改一处忘另一处」成为必然。
+ * 现在合并为一个按 kind 分支的公共实现。
+ *
+ * @param {'node' | 'aot'} kind
+ * @returns {Promise<{ms: number, tag: string, stdout: string, stderr: string}>}
+ */
+function runRunner(kind) {
   return new Promise((resolve) => {
     const t0 = process.hrtime.bigint();
     let settled = false;
-    let stdout = '', stderr = '';
-    const fin = (tag, extra = {}) => {
-      if (settled) return;
-      settled = true;
-      try { c.kill(); } catch {}
-      resolve({ ms: Number(process.hrtime.bigint() - t0) / 1e6, tag, stdout, stderr, ...extra });
-    };
+    let stdout = '';
+    let stderr = '';
 
     const env = { ...process.env };
-    delete env.DSH_SUBPROCESS_RUNNER;
-    env.DSH_SUBPROCESS_RUNNER = 'windows';
+    // node runner 需要 DSH_SUBPROCESS_RUNNER 才走 windows 作业；
+    // aot runner 不认这个变量，去掉以免干扰。
+    if (kind === 'node') env.DSH_SUBPROCESS_RUNNER = 'windows';
+    else delete env.DSH_SUBPROCESS_RUNNER;
 
-    const c = spawn(NODE, [NODE_RUNNER, '--', ...TARGET], {
-      cwd: process.cwd(),
+    const command = kind === 'aot' ? AOT_RUNNER : NODE;
+    const args = kind === 'aot' ? ['--', ...TARGET] : [NODE_RUNNER, '--', ...TARGET];
+
+    const c = spawn(command, args, {
+      cwd: kind === 'aot' ? CWD : process.cwd(),
       windowsHide: true,
       env,
       stdio: ['ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 'pipe'],
     });
 
-    // ipc 通道：发 start 请求
-    if (c.send) {
-      c.on('spawn', () => {
-        try {
-          c.send({ type: 'start', cwd: CWD, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP } });
-        } catch (e) { fin('send-error', { error: String(e) }); }
+    const fin = (tag, extra = {}) => {
+      if (settled) return;
+      settled = true;
+      try { c.kill(); } catch { /* 已退出 */ }
+      resolve({
+        ms: Number(process.hrtime.bigint() - t0) / 1e6, tag, stdout, stderr, ...extra,
       });
-    }
-    if (c.stdio[5]) c.stdio[5].on('data', (d) => { stdout += d.toString(); });
-    if (c.stdio[6]) c.stdio[6].on('data', (d) => { stderr += d.toString(); });
-    if (c.stdio[4]) c.stdio[4].on('data', () => {});
+    };
 
-    // ipc 上的 target-exit 结果
-    c.on('message', (m) => {
-      if (m && (m.type === 'target-exit' || m.type === 'error')) fin('result', { msg: m });
+    attachRunnerListeners(c, {
+      onData: (stream, chunk) => {
+        if (stream === 'stdout') stdout += chunk.toString();
+        else if (stream === 'stderr') stderr += chunk.toString();
+      },
+      finish: fin,
     });
-    c.on('exit', () => fin('exit'));
-    c.on('error', (e) => fin('error', { error: String(e) }));
-    setTimeout(() => fin('timeout'), 15000);
   });
 }
 
-// ---------------- AOT runner 调用 ----------------
-function runAotRunner() {
-  return new Promise((resolve) => {
-    const t0 = process.hrtime.bigint();
-    let settled = false;
-    let stdout = '', stderr = '', proto = '';
-    const fin = (tag, extra = {}) => {
-      if (settled) return;
-      settled = true;
-      try { c.kill(); } catch {}
-      resolve({ ms: Number(process.hrtime.bigint() - t0) / 1e6, tag, stdout, stderr, ...extra });
-    };
-
-    const env = { ...process.env };
-    delete env.DSH_SUBPROCESS_RUNNER;
-
-    // 与 node runner 完全相同的真实 host 布局（Issue #11）：
-    // stdio[3]='ipc' 才是生产路径。基准必须测真实协议，
-    // 否则测出来的数字对应的是一个 host 根本调不起来的产物。
-    const c = spawn(AOT_RUNNER, ['--', ...TARGET], {
-      cwd: CWD,
-      windowsHide: true,
-      env,
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 'pipe'],
-    });
-
-    c.on('spawn', () => {
-      try {
-        c.send({
-          type: 'start',
-          cwd: CWD,
-          env: Object.fromEntries(Object.entries(env).filter(([k]) => k === 'PATH' || k === 'SystemRoot' || k === 'TEMP' || k === 'TMP')),
-        });
-      } catch (e) { fin('send-error', { error: String(e) }); }
-    });
-    c.on('message', (m) => {
-      if (m && (m.type === 'target-exit' || m.type === 'error')) fin('result');
-    });
-    if (c.stdio[5]) c.stdio[5].on('data', (d) => { stdout += d.toString(); });
-    if (c.stdio[6]) c.stdio[6].on('data', (d) => { stderr += d.toString(); });
-    c.on('error', (e) => fin('error', { error: String(e) }));
-    c.on('exit', () => fin('exit'));
-    setTimeout(() => fin('timeout'), 15000);
+/** 把 runner 的各类事件接到统一的收尾回调上。 */
+function attachRunnerListeners(c, { onData, finish }) {
+  c.on('spawn', () => {
+    try {
+      c.send({ type: 'start', cwd: CWD, env: pickTargetEnv(process.env) });
+    } catch (e) {
+      finish('send-error', { error: String(e) });
+    }
   });
+  c.on('message', (m) => {
+    if (m && (m.type === 'target-exit' || m.type === 'error')) finish('result', { msg: m });
+  });
+  if (c.stdio[5]) c.stdio[5].on('data', (d) => onData('stdout', d));
+  if (c.stdio[6]) c.stdio[6].on('data', (d) => onData('stderr', d));
+  if (c.stdio[4]) c.stdio[4].on('data', () => {});
+  c.on('error', (e) => finish('error', { error: String(e) }));
+  c.on('exit', () => finish('exit'));
+  setTimeout(() => finish('timeout'), RUNNER_TIMEOUT_MS);
+}
+
+/** 跑 node runner（基线）。 */
+function runNodeRunner() {
+  return runRunner('node');
+}
+
+/** 跑 AOT runner（实验组）。 */
+function runAotRunner() {
+  return runRunner('aot');
 }
 
 // ---------------- 原生地板 ----------------
@@ -280,51 +289,69 @@ function verdict(dispNode, dispAot, acc) {
 }
 
 /** 输出统计结果与收益结论。 */
-function report(acc) {
-  const sf = stats(acc.floors);
-  const sn = stats(acc.nodes);
-  const sa = stats(acc.aots);
-  const dNode = dispersion(acc.nodes);
-  const dAot = dispersion(acc.aots);
+// 报告里的横向分隔线宽度，与表格对齐
+const DIVIDER_WIDTH = 78;
 
-  console.log('\n' + '='.repeat(78));
+/** 打印三行主表格（地板 / node / AOT）。 */
+function printTable(acc, sf, sn, sa) {
+  console.log('');
+  console.log('='.repeat(DIVIDER_WIDTH));
   console.log('结果（p50 为主指标）');
-  console.log('='.repeat(78));
+  console.log('='.repeat(DIVIDER_WIDTH));
   console.log('                        min     p50     p95     p99     max    离散度');
   const row = (label, s, d) => console.log(
     `${label.padEnd(22)}:${fm(s.min)}ms${fm(s.p50)}ms${fm(s.p95)}ms${fm(s.p99)}ms${fm(s.max)}ms  ${fmtDisp(d)}`);
   row('原生地板 hostname.exe', sf, dispersion(acc.floors));
-  row(`node runner (n=${sn.n})`, sn, dNode);
-  row(`AOT runner  (n=${sa.n})`, sa, dAot);
+  row(`node runner (n=${sn.n})`, sn, dispersion(acc.nodes));
+  row(`AOT runner  (n=${sa.n})`, sa, dispersion(acc.aots));
   console.log(`  失败样本: node=${acc.nodeFail}  AOT=${acc.aotFail}`);
-  console.log('-'.repeat(78));
+  console.log('-'.repeat(DIVIDER_WIDTH));
+}
 
+/** 打印 runner 开销与净收益。 */
+function printGain(sf, sn, sa) {
   const nodeOverhead = sn.p50 - sf.p50;
   const aotOverhead = sa.p50 - sf.p50;
   console.log(`node runner 跳开销     : ${fm(nodeOverhead)}ms  (= node p50 - 地板 p50)`);
   console.log(`AOT runner 跳开销      : ${fm(aotOverhead)}ms  (= AOT p50 - 地板 p50)`);
   console.log(`净收益（每次调用）     : ${fm(nodeOverhead - aotOverhead)}ms`);
   console.log(`收益比例               : ${((1 - aotOverhead / nodeOverhead) * 100).toFixed(1)}% 的 runner 开销被消除`);
-  console.log('-'.repeat(78));
+  console.log('-'.repeat(DIVIDER_WIDTH));
+}
 
-  // 极端值单独看：平均值好不代表体感好，偶发的一次 800ms 比平均快 200ms 更伤人
-  console.log(`极端值对比（tail latency）：`);
-  console.log(`  p99 : node ${fm(sn.p99)}ms → AOT ${fm(sa.p99)}ms  (${sn.p99 > sa.p99 ? '改善' : '⚠ 退化'} ${Math.abs(sn.p99 - sa.p99).toFixed(0)}ms)`);
-  console.log(`  max : node ${fm(sn.max)}ms → AOT ${fm(sa.max)}ms  (${sn.max > sa.max ? '改善' : '⚠ 退化'} ${Math.abs(sn.max - sa.max).toFixed(0)}ms)`);
-  console.log('-'.repeat(78));
+/** 打印尾延迟对比：平均值好不代表体感好，偶发的一次卡顿比平均快更伤人。 */
+function printTail(sn, sa) {
+  console.log('极端值对比（tail latency）：');
+  const line = (label, a, b) => {
+    const better = a > b;
+    console.log(`  ${label} : node ${fm(a)}ms → AOT ${fm(b)}ms  (${better ? '改善' : '⚠ 退化'} ${Math.abs(a - b).toFixed(0)}ms)`);
+  };
+  line('p99', sn.p99, sa.p99);
+  line('max', sn.max, sa.max);
+  console.log('-'.repeat(DIVIDER_WIDTH));
+}
 
-  console.log(`环境: 开始 ${fmtEnv(acc.envStart)}`);
-  console.log(`      结束 ${acc.envEnd ? fmtEnv(acc.envEnd) : 'n/a'}`);
-  const v = verdict(dNode, dAot, acc);
-  console.log(`可信度: ${v.level} —— ${v.reason}`);
-  console.log('='.repeat(78));
+/** 打印输出抽样，用于确认两者行为一致。 */
+function printSamples(acc) {
+  console.log('');
+  console.log('输出抽样（验证两者行为一致）：');
+  const d = (s) => JSON.stringify((s?.stdout || '').slice(0, 60));
+  console.log(`  node : stdout=${d(acc.sampleNode)} tag=${acc.sampleNode?.tag}`);
+  console.log(`  AOT  : stdout=${d(acc.sampleAot)} tag=${acc.sampleAot?.tag}`);
+}
 
-  console.log('\n输出抽样（验证两者行为一致）：');
-  console.log(`  node : stdout=${JSON.stringify((acc.sampleNode?.stdout || '').slice(0, 60))} tag=${acc.sampleNode?.tag}`);
-  console.log(`  AOT  : stdout=${JSON.stringify((acc.sampleAot?.stdout || '').slice(0, 60))} tag=${acc.sampleAot?.tag}`);
-
-  // 机器可读的一行，便于多轮汇总
-  console.log(`\nSUMMARY ${JSON.stringify({
+/**
+ * 打印机器可读的一行，便于多轮汇总。
+ *
+ * 参数收敛为一个对象：早先是 7 个并列实参，调用处一眼看不出谁对应谁，
+ * archlint 也把它标为 Long Parameter List。
+ */
+function printSummary(result) {
+  const { acc, sf, sn, sa, dNode, dAot, verdict: v } = result;
+  const nodeOverhead = sn.p50 - sf.p50;
+  const aotOverhead = sa.p50 - sf.p50;
+  console.log(`
+SUMMARY ${JSON.stringify({
     n: N,
     nodeP50: Math.round(sn.p50),
     aotP50: Math.round(sa.p50),
@@ -339,6 +366,27 @@ function report(acc) {
     cpu: acc.envStart.cpu,
     memGb: acc.envStart.memGb,
   })}`);
+}
+
+function report(acc) {
+  const sf = stats(acc.floors);
+  const sn = stats(acc.nodes);
+  const sa = stats(acc.aots);
+  const dNode = dispersion(acc.nodes);
+  const dAot = dispersion(acc.aots);
+
+  printTable(acc, sf, sn, sa);
+  printGain(sf, sn, sa);
+  printTail(sn, sa);
+
+  console.log(`环境: 开始 ${fmtEnv(acc.envStart)}`);
+  console.log(`      结束 ${acc.envEnd ? fmtEnv(acc.envEnd) : 'n/a'}`);
+  const v = verdict(dNode, dAot, acc);
+  console.log(`可信度: ${v.level} —— ${v.reason}`);
+  console.log('='.repeat(DIVIDER_WIDTH));
+
+  printSamples(acc);
+  printSummary({ acc, sf, sn, sa, dNode, dAot, verdict: v });
 }
 
 (async () => {

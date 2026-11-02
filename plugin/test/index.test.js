@@ -16,10 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 
-const PLUGIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** 加载插件模块（插件本身是 ESM） */
 async function loadPlugin() {
   return import(new URL('../lib/index.js', import.meta.url).href);

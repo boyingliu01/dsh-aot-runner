@@ -48,33 +48,38 @@ function resolveSubprocessLocalDir() {
   return pkgDir;
 }
 
-/** 构造能被 LocalSubprocessRuntime 接受的最小 cordis ctx */
+/** 构造一个记录日志的 logger。 */
+function makeLogger(logs) {
+  return {
+    info: (m) => logs.info.push(m),
+    warn: (m) => logs.warn.push(m),
+    debug: () => {},
+    error: () => {},
+  };
+}
+
+/**
+ * 构造能被 LocalSubprocessRuntime 接受的最小 cordis ctx。
+ *
+ * 注意 effect 的语义：真实 cordis 会**立即执行** fn，并记录它返回的清理函数。
+ * 早先写成「只收集不执行」，导致 LocalSubprocessRuntime 构造函数里的
+ * `ctx.effect(() => { process.prependListener('exit', ...) })` 没跑起来，
+ * runtime 处于半初始化状态 —— 表现出来的诡异现象是
+ * 「runner 启动失败却 resolve 成 exitCode 0」。
+ */
 function makeCtx() {
   const logs = { info: [], warn: [] };
   const effects = [];
-  return {
-    ctx: {
-      logger: {
-        info: (m) => logs.info.push(m),
-        warn: (m) => logs.warn.push(m),
-        debug: () => {},
-        error: () => {},
-      },
-      // 与真实 cordis 一致：effect 会**立即执行** fn，并记录它返回的清理函数。
-      // 早先写成「只收集不执行」，导致 LocalSubprocessRuntime 构造函数里的
-      // `ctx.effect(() => { process.prependListener('exit', ...) })` 没跑起来，
-      // runtime 处于半初始化状态 —— 表现出来的诡异现象是
-      // 「runner 启动失败却 resolve 成 exitCode 0」。
-      effect: (fn) => { effects.push(fn()); },
-      on: () => {},
-      reflect: { provide: () => {}, set: () => {}, get: () => undefined },
-      get: () => undefined,
-      set: () => {},
-      plugin: () => {},
-    },
-    logs,
-    effects,
+  const ctx = {
+    logger: makeLogger(logs),
+    effect: (fn) => { effects.push(fn()); },
+    on: () => {},
+    reflect: { provide: () => {}, set: () => {}, get: () => undefined },
+    get: () => undefined,
+    set: () => {},
+    plugin: () => {},
   };
+  return { ctx, logs, effects };
 }
 
 const ENV = {
@@ -83,23 +88,41 @@ const ENV = {
 
 };
 
-test('端到端：插件注入后真实 runtime 走 AOT runner', async () => {
-  const { LocalSubprocessRuntime } = require(resolveSubprocessLocalDir());
-
-  const { ctx, logs } = makeCtx();
-  const rt = new LocalSubprocessRuntime(ctx);
-
-  // 关键：ctx 上挂 subprocess，插件才能找到 runtime
-  ctx.subprocess = rt;
-
-  // 装观测点：记录 launcher 实际启动了什么命令。
-  // 见下方断言处对「为什么必须有这一步」的说明。
+/**
+ * 在 runtime 上装一个观测点，记录 launcher 实际启动了哪个可执行文件。
+ *
+ * 为什么必须有这个：直接断言 `internals.runnerInvocation` 的值只能证明
+ * 「字段被赋了值」，证明不了「有人读它」。DSH 0.2.0-rc.2 正好在 spawn()
+ * 里丢掉了 internals 参数，字段赋了没人用 —— 于是插件完全失效时，
+ * 只看字段值的测试依然全绿。必须看真实启动的命令行。
+ *
+ * @returns {string[]} 按调用顺序记录的 command 列表
+ */
+function observeLaunches(rt) {
   const observed = [];
   const childProcess = require('node:child_process');
+  const original = rt.internals.spawn;
   rt.internals.spawn = (command, args, options) => {
     observed.push(String(command));
-    return childProcess.spawn(command, args, options);
+    return original ? original(command, args, options) : childProcess.spawn(command, args, options);
   };
+  return observed;
+}
+
+/** 建一个挂了 subprocess 的 runtime（插件靠 ctx.subprocess 找到它）。 */
+function makeRuntime() {
+  const { LocalSubprocessRuntime } = require(resolveSubprocessLocalDir());
+  const { ctx, logs } = makeCtx();
+  const rt = new LocalSubprocessRuntime(ctx);
+  ctx.subprocess = rt;
+  return { ctx, logs, rt };
+}
+
+test('端到端：插件注入后真实 runtime 走 AOT runner', async () => {
+  const { ctx, logs, rt } = makeRuntime();
+
+  // 装观测点：记录 launcher 实际启动了什么命令。
+  const observed = observeLaunches(rt);
 
   // 用插件注入（而不是手工改 internals）
   const plugin = await import(pathToFileURL(PLUGIN_INDEX).href);
