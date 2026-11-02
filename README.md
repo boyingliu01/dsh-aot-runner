@@ -1,18 +1,29 @@
 # dsh-aot-runner
 
 DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文件替换 Node.js 版 runner，
-把每次子进程调用的固定开销从约 **200~220ms 降到约 70~76ms（消除 65%）**，
-且行为与 Node 版在 28 个用例上字节级一致。
+每次子进程调用**省 92~94ms（约 59%）**，且行为与 Node 版在 28 个用例上字节级一致。
+
+> ## ⚠️ 当前需要上游补丁才能生效
+>
+> 在 DSH **0.2.0-rc.2** 上，本插件**必须配合一个 1 行的上游补丁**才能工作。
+>
+> 原因是 DSH 的一个传参缺陷：`LocalSubprocessRuntime.spawn()` 调用
+> `launchWindowsJob()` / `launchLinuxScope()` 时漏传 `internals` 参数，
+> 导致所有基于 `internals` 的注入被静默忽略。
+>
+> - 缺陷报告：[deepseek-ai/deepseek-harness#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)
+> - 补丁与说明：**[`vendor/README.md`](vendor/README.md)**
+> - 插件会**自动检测**这个缺陷：命中时明确告警并停用自己，而不是假装在工作
+>
+> 上游修复后，删掉整个 `vendor/` 目录即可。
 
 **协议状态**：AOT 版实现的是与 Node 版**相同的 Node IPC 协议**（fd 3），
-可被真实 DSH host 直接调用（Issue #11 已完成协议对齐）。
+可被真实 DSH host 直接调用。
 
-> 📋 **下一步计划看 [ROADMAP.md](ROADMAP.md)**，任务细节在
-> [Issues](https://github.com/boyingliu01/dsh-aot-runner/issues)（Issue 是唯一事实来源）。
+> 📋 计划看 [ROADMAP.md](ROADMAP.md) ｜ 性能数据见 [docs/性能对比测试报告.md](docs/性能对比测试报告.md)
 >
 > 当前状态：**已可通过插件接入**（[`plugin/`](plugin/README.md)），
-> 支持配置开关与熔断降级。性能对比第一层（隔离基准）+ 第二层（真实负载）已通过，
-> 详见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md)。
+> 支持配置开关、熔断降级与启动自检。生产路径实测见下方「实测收益」。
 
 ---
 
@@ -31,19 +42,24 @@ profile 显示它单独贡献 **200–220ms** 的固定延迟 —— 比真正�
 
 ### 实测收益
 
-分两层测（2026-11-02，真实 IPC 协议），只报**离散度 < 10% 的可信轮次**：
+在**真实 DSH 的 `launchWindowsJob` 路径**上交替采样（3 轮 × 100 次）：
 
-| 实现 | p50 | p99 | runner 开销 |
+| 实现 | p50 | p99 | 离散度 |
 |---|---|---|---|
-| 原生地板 `hostname.exe` | 32~36ms | — | — |
-| node runner（现状） | 238~250ms | 331~393ms | 198~217ms |
-| **AOT runner** | **109ms** | **173~220ms** | **69~76ms** |
+| node runner（现状） | 156~158ms | 249~279ms | 11.7%~20.5% |
+| **AOT runner** | **63~64ms** | **142~206ms** | **1.9%~4.1%** |
 
-- **每次调用净省 130~141ms**
-- **消除 65.0% 的 runner 开销**（可信两轮 64.8% / 65.0%）
-- **p99 长尾改善 131~206ms**
+- **每次净省 92~94ms，比例稳定在 59.1%~59.6%**（三轮收敛，0 失败、0 输出不一致）
+- **p99 长尾改善 73~124ms**
+- 真实命令（`hostname` / `whoami` / `cmd /c echo`）每次省 **77~155ms**
+- 稳定性：300 次连续调用 **0 失败**，RSS 53~61MB 有涨有落、非单调增长
+- 熔断兜底：注入损坏 runner 时，连续 3 次失败后自动降级，第 4 次恢复正常
 
-稳定性：120 次连续调用 **0 失败**，RSS 52.6 → 54.7MB 无累积增长。
+> **波动收窄也是收益**：node runner 的 IQR/中位数离散度是 11.7%~20.5%，
+> AOT 是 1.9%~4.1%。对交互式场景来说，减少抖动比降低均值更重要。
+> 更早的手工驱动测试（不经过 DSH 的 launch 路径）测得 64.8%~66.0%，
+> 生产路径略低是因为多了 `bindManagedProcess`、Job Object、IPC 解析等
+> 两侧都要付的固定开销 —— **绝对差值 92ms 比比例更有说服力**。
 
 > **关于口径**：绝对值随系统负载波动很大（同一台机器连跑三次可得到
 > 40.5% / 64.0% / 65.6%）。基准已内置**自动可信度判定**（离散度 > 10%
@@ -142,10 +158,37 @@ node 的 `resolveWindowsExecutable` 规则（`runner-launch-*.js`）：
 ./build.sh                 # 增量构建
 ./build.sh --check         # 只跑质量门禁（格式 + 静态检查 + JS 语法）
 ./build.sh --clean         # 清理后重建
-./build.sh --test          # 构建 + 跑 24 项 A/B 验证
+./build.sh --test          # 构建 + 跑完整回归（60 项）
 ./build.sh --all           # 质量门禁 + 清理重建 + 测试 + 基准
 ./build.sh --out <目录>    # 指定产物目录
 ```
+
+### 装到 DSH（插件方式）
+
+**前提**：先按 [`vendor/README.md`](vendor/README.md) 打上游补丁 ——
+不打补丁的话，插件启动自检会发现并自动停用（这是刻意设计，避免「装了却没效果」）。
+
+```bash
+# 1. 构建产物（会自动同步到 plugin/bin/）
+./build.sh
+
+# 2. 检查补丁状态
+node vendor/patch-dsh.mjs status
+
+# 3. 在 DSH profile 里注册插件（示例：web profile）
+#    ~/.dsh/profiles/web/package.json 的 dependencies 加：
+#      "@boyingliu01/dsh-aot-runner": "link:<仓库绝对路径>/plugin"
+
+# 4. 在 profile 的 cordis.patch.yml 里启用
+#    - id: aot-runner
+#      config:
+#        enabled: true
+```
+
+> **注意**：覆盖已有条目只需写 `id` + 要改的字段。
+> 用 `insert:` 会让同一个 id 出现两条 —— **DSH 不报错但配置不生效**（静默失败）。
+
+详细配置项见 [`plugin/README.md`](plugin/README.md)。
 
 产物默认落在仓库内 `dist/dsh-aot-runner.exe`。构建前会自动做
 **Low Integrity 目录自检**（见下文「重要陷阱」），命中 Low IL 会直接中止而不是产出一个跑不起来的 exe。
@@ -313,7 +356,7 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 | S6 插件接入 | ✅ | 插件 + 熔断器（[#11](https://github.com/boyingliu01/dsh-aot-runner/issues/11) 阶段 B）|
 | S7 性能对比验证 | 🔄 | 第一层 + 第二层 ✅，第三层进行中 |
 
-**全套件 56/56 通过**：`npm run test:all`。
+**全套件 60/60 通过**：`npm run test:all`。
 
 ### 已知待办
 

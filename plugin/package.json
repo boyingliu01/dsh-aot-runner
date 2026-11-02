@@ -1,7 +1,7 @@
 {
   "name": "@boyingliu01/dsh-aot-runner",
   "version": "0.1.0",
-  "description": "用 NativeAOT runner 替换 DSH 的 Node.js 子进程 runner，每次调用省约 450ms",
+  "description": "用 NativeAOT runner 替换 DSH 的 Node.js 子进程 runner：实测每次调用省 92~94ms（约 59%），p99 改善 73~124ms",
   "type": "module",
   "license": "MIT",
   "author": "boyingliu01",
