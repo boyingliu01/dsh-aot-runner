@@ -199,3 +199,46 @@ node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
 >
 > **补充（2026-11-02）**：现在有 `test/host-path-verify.js`
 > 直接驱动真实 `LocalSubprocessRuntime`，这比 CI 更能说明「能被 host 用起来」。
+
+---
+
+## 质量门禁对齐（xp-gate v0.35.23）
+
+对照 xp-gate 全量扫描结果做了一轮系统性整改。
+
+### 已完成
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| Gate 0 版本一致性 | VERSION 1.0.0 / tag v0.1.0 不一致 | 四处统一 0.1.0，`scripts/check-version.mjs` 接入构建 |
+| Gate 1 代码质量 | 无 eslint 配置，工具报错即退出 | `eslint.config.mjs`（flat config），抓到并修掉 3 个真实缺陷 |
+| C# 圈复杂度 | 4 个函数 CCN > 10（最高 22），**无人发现** | 全部 ≤ 10 |
+| Gate 4 长函数 | 5 处（最长 147 行） | 全部 ≤ 50 行 |
+| Gate 4 深嵌套 | 5 处（最多 7 层） | 全部 ≤ 4 层 |
+| Gate 5 覆盖率 | 无覆盖率工具 | c8，实测 语句 88.8% / 分支 69.4% / 函数 83.3%，门槛接入构建 |
+| Gate 2 重复代码 | 16 处克隆 | 1.93%（9 处，均在测试夹具内） |
+| Gate 6 架构 | Long Parameter List 1 处 | 清零，7.5/10 |
+
+### 关键发现：xp-gate 看不见 C#
+
+`lib/language-tools.js` 没有 C# 适配器（`arch.js` 里有 `.cs → csharp`，两者不一致），
+所以 Gate 1/3/5/9/13 对 C# 一律**静默跳过**，输出「无源文件」——
+
+**看起来是通过，实际是没检查。**
+
+本项目主体恰恰是 C#（2031 行）。拿 lizard 手工扫才发现有 4 个函数 CCN 严重超标。
+
+已提 issue 说明根因与修复建议：<https://github.com/boyingliu01/xp-gate/issues/717>
+
+> 结论：**在 xp-gate 支持 C# 之前，`build.sh --check` 里的 `dotnet format` +
+> `-warnaserror` 才是 C# 质量的实际保障**，不能依赖 xp-gate 的绿灯。
+
+### 仍未处理
+
+- **Gate 11 Sprint Flow**：项目未走 sprint-flow 流程，无 `.sprint-state/`。
+  当前是单人维护的小规模迭代，引入 sprint 状态的收益不抵成本。
+- **魔法数字 108 处（info 级）**：多在测试/基准里作为超时、退出码、采样次数，
+  提出成常量反而降低可读性（`timeout: 300000` 比 `LONG_TIMEOUT` 更直观）。
+  该项不在 `gate-rules` 的阻断清单内，保持现状。
+- **archlint 的 3 处 Dead Code 误报**：`scripts/check-version.mjs` 等由 `build.sh`
+  以子进程方式调用，没有 import 关系，被静态分析判为死代码。
