@@ -82,13 +82,12 @@ function findTarget() {
     // 继续下一个候选
   }
 
-  // 候选 3：本机 DSH 的常见安装位置
-  const home = process.env.USERPROFILE || process.env.HOME || '';
-  const guesses = [
-    'C:/Users/think/.workbuddy/binaries/node/workspace/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js',
-    path.join(home, '.workbuddy', 'binaries', 'node', 'workspace', 'node_modules',
-      '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js'),
-  ];
+  // 候选 3：按 DSH 常见的 workspace 布局，从用户家目录推断
+  const homes = [process.env.USERPROFILE, process.env.HOME].filter(Boolean);
+  const guesses = homes.map((home) => path.join(
+    home, '.workbuddy', 'binaries', 'node', 'workspace', 'node_modules',
+    '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js',
+  ));
   for (const g of guesses) if (g && existsSync(g)) return g;
 
   return null;
