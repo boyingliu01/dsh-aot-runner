@@ -5,72 +5,93 @@
 >
 > 仓库：https://github.com/boyingliu01/dsh-aot-runner
 
-## 已达成（v1.0.0）
+## 当前性能（真实 IPC 协议，2026-11-02 实测）
 
-| 指标 | node runner | AOT runner | 改善 |
-|---|---|---|---|
-| p50 | 413ms | **199ms** | 净省 214ms |
-| p95 | 673ms | **342ms** | |
-| 开销消除比例 | — | **59.6%** | |
+| 实现 | p50 | p95 |
+|---|---|---|
+| 原生地板（`hostname`） | 116ms | 394ms |
+| node runner（现状） | 796ms | 1175ms |
+| **AOT runner** | **346ms** | **664ms** |
 
-**S4 A/B 验证：24/24 通过**（stdout/stderr/exitCode/错误对象字节级一致）
+**每次调用净省 450ms，消除 66.2% 的 runner 开销。**
+
+> 早先记录的 59.6% 是在旧测试布局下测得的（AOT 走 stdin NDJSON）。
+> Issue #11 对齐协议后重测，数字更有说服力 —— 现在测的是 host 真正会走的路径。
+
+**A/B 验证：28/28 通过**（stdout/stderr/exitCode/错误对象字节级一致）。
+两侧现在使用**相同的真实 host 布局**，这是 A/B 可比的前提。
 
 ## 阶段状态
 
 | 阶段 | 状态 | Issue |
 |---|---|---|
 | S0 可行性验证 | ✅ 完成 | — |
+| S0b Node IPC 协议对齐 | ✅ 完成 | [#11](../../issues/11) 阶段 A |
 | S1 NativeAOT 最小实现 | ✅ 完成 | — |
-| S1b 依赖检查 | ❌ 待做 | [#5](../../issues/5) |
-| S1c 签名分发 | ❌ 待做 | [#8](../../issues/8) |
+| S1b 依赖检查 | ✅ 完成 | [#5](../../issues/5) |
+| S1c 签名分发 | ⏸ 推迟（自用无证书） | [#8](../../issues/8) |
 | S2 功能对齐 | ✅ 完成 | — |
 | S2b 性能实测 | ✅ 完成 | — |
-| S3 语义完备 | ⚠️ ~50% | [#2](../../issues/2) [#4](../../issues/4) |
+| S3 语义完备 | ✅ 完成 | [#2](../../issues/2) [#4](../../issues/4) |
 | S4 A/B 验证 | ✅ 完成 | — |
-| S5 泄漏/混沌 | ❌ 待做 | [#3](../../issues/3) |
-| S6 接入 `ctx.subprocess` | ❌ 待做 | [#6](../../issues/6) [#7](../../issues/7) |
+| S5 泄漏/混沌 | ✅ 完成 | [#3](../../issues/3) |
+| S6 接入 `ctx.subprocess` | ❌ **下一步** | [#11](../../issues/11) 阶段 B |
 
-## 建议执行顺序
+## 已完成（本轮先后顺序）
 
-按「**先修缺陷，再增功能**」重排（2026-11-01）。判据：能否让现有行为出错 >
-能否让错误被掩盖 > 还缺什么能力。详见 [Issue #1 的重排评论](../../issues/1)。
+按「先修缺陷，再增功能」执行，全部已关闭：
 
-| 顺序 | Issue | 分类 | 为什么这个顺序 |
-|---|---|---|---|
-| 1 | [#2](../../issues/2) control pipe | 缺陷 | 已实测 target 拿不到 fd 7，功能直接不可用 |
-| 2 | [#3](../../issues/3) 零泄漏回归 | 可信度 | Job 回收从未被验证，其余结论都建立在假设上 |
-| 3 | [#9](../../issues/9) 收紧测试基线 | 缺陷 | 错误对象缺结构化断言，会持续掩盖其他回归 |
-| 4 | [#4](../../issues/4) terminate 竞态 | 缺陷 | 高频交替无覆盖，泄漏与误杀风险未量化 |
-| 5 | [#5](../../issues/5) 依赖检查 | 验证 | 半小时级，确认分发可行性 |
-| 6 | [#6](../../issues/6) 熔断器 | 新功能 | 接入前的安全网 |
-| 7 | [#7](../../issues/7) 接入 ctx.subprocess | 新功能 | 真正产生价值的一步 |
-| 8 | [#8](../../issues/8) 签名分发 | 新功能 | P2，视是否团队分发 |
+| Issue | 内容 | 关键产出 |
+|---|---|---|
+| [#2](../../issues/2) | control pipe | target 能拿到 fd 7；3 条 A/B 用例 |
+| [#3](../../issues/3) | 零泄漏回归 | 100 次连续调用 + 混沌，7/7 |
+| [#9](../../issues/9) | 收紧测试基线 | 错误对象结构化断言（`code`/`syscall`/`path`）|
+| [#4](../../issues/4) | terminate 竞态 | 5/5，含 60 轮交替 |
+| [#5](../../issues/5) | 依赖检查 | 无 VC++/.NET 运行时依赖 |
+| [#10](../../issues/10) | 正式开发环境 | `build.sh --check/--test`、Trace、文档 |
+| **#11 阶段 A** | **Node IPC 协议对齐** | **runner 首次可被真实 host 调用** |
+
+## 下一步：Issue #11 阶段 B
+
+| 任务 | 说明 |
+|---|---|
+| B-1 插件骨架 | 一个 cordis 插件，`internals.runnerInvocation` 指向 AOT exe |
+| B-2 配置开关 | 可回退到 node runner |
+| B-3 熔断器 | AOT 启动失败/协议错误 → 自动降级（原 #6 内容）|
+| B-4 端到端验证 | 在真实 DSH 会话里跑通，并量化实际收益 |
+
+## 已知盲区
+
+**切帧丢数据类缺陷测不出来。** 见
+[`test/ipc-verify.js`](test/ipc-verify.js) 的注释与 Issue #11：
+
+- 现象：把「切出一帧后丢弃缓冲区剩余数据」注入 `IpcChannel.TryTakeFrame`，
+  IPC 用例仍然全绿。
+- 原因：Node 发送端的排队行为使多条帧很少落在同一次 `ReadFile` 里。
+  试过小帧连发 / 大帧+小帧 / 256KB 噪声帧+terminate+start，都构造不出来。
+- 解法（未实施）：runner 侧加一个测试接缝，可注入「一次读返回多帧」。
 
 ## 依赖关系
 
 ```
-#2 control pipe ──┬── #4 竞态
-                  │
-#3 零泄漏 ────────┤
-#9 测试基线 ──────┤
-#5 依赖检查 ──────┤
-                  ↓
-            #6 熔断器 ──→ #7 接入 ──→ #8 签名分发
+#11 阶段 A（Node IPC 对齐）✅
+        ↓
+#11 阶段 B-1 插件骨架
+        ↓
+#11 阶段 B-2 配置开关 ──→ B-3 熔断器 ──→ B-4 端到端验证
+                                              ↓
+                                    #8 签名分发（推迟，自用无证书）
 ```
-
-- **#4** 依赖 **#2**（竞态用例要覆盖 control 终止路径）
-- **#6** 不依赖 **#2**：它判断的是「启动失败 / 协议错误」，与 control channel 无关
-- **#7** 依赖 #6 + #2/#3/#4/#5/#9 全部关闭
-
-> 线上 #7 原写「依赖 #1 熔断器」是笔误 —— #1 是 Tracker，熔断器是 **#6**。
 
 ## v2.0.0 验收标准
 
-- [ ] 所有 P0/P1 issue 关闭
-- [ ] `npm test` 全绿且用例数 ≥ 24
-- [ ] S5 零泄漏回归 100 次连续通过
+- [x] 所有 P0/P1 issue 关闭（#8 因无证书主动推迟，不计入）
+- [x] `npm test` 全绿且用例数 ≥ 24（现 28）
+- [x] S5 零泄漏回归 100 次连续通过
+- [x] AOT runner 实现与 host 相同的 Node IPC 协议
 - [ ] 已接入 `ctx.subprocess`，可通过配置开关回退到 node runner
 - [ ] 熔断器覆盖「AOT 启动失败自动降级」路径
+- [ ] 在真实 DSH 会话里验证并量化收益
 - [ ] ~~CI 在 GitHub Actions 上跑通构建 + 测试~~ —— **已明确不做**
 
 > **CI 决策（2026-11-01）**：暂不搭建 CI，先把**本地**开发环境做扎实。
@@ -78,36 +99,6 @@
 > 且 A/B 套件需要真实可用的 python/pwsh/bash/git，在托管 runner 上逐个确认成本高。
 >
 > 已用**本地质量门禁**替代（`./build.sh --check`）：C# 格式 + 0 警告静态检查 + JS 语法。
-> 这条验收项在 CI 立项前保持划掉状态，不作为 v2.0.0 阻塞条件。
-
-## 风险与已知限制
-
-1. **复用 DSH 内部契约**
-   `runner.js` 的协议字段、`resolveWindowsExecutable` 语义、
-   `WINDOWS_SPAWN_ERROR_CODES` 映射表都会随 DSH 升级变化。
-   `test/ab-verify.js` 是回归闸门，**DSH 升级后必须重跑**。
-
-2. **`resolveWindowsExecutable` 已逐项核对一致（2026-11-01 复核）**
-   曾一度怀疑 AOT 缺「applicationName 目录作为额外搜索根」的回退。复核
-   `runner-launch-*.js:1485` 源码后确认：**DSH 本身就没有这条回退**，
-   搜索根只有 `[""]`（cwd）+ PATH。实测裸名在两种 runner 下的
-   ENOENT 行为与错误文本完全一致，无缺口。
-   早先观察到的差异是探测脚本把 cwd 传成 glob 模式导致的 runner 启动失败，
-   属测量伪迹。
-
-3. **Low Integrity 目录陷阱**
-   构建产物必须放在 Medium IL 目录，否则 MSYS 程序会崩溃
-   （`NtCreateDirectoryObject(\BaseNamedObjects\...)` → `0xC0000022`）。
-   `build.sh` 已内置自检（`scripts/check-integrity.sh`），命中即中止。
-   详见 README「重要陷阱」章节。
-
-4. **`IlcDisableReflection` + `JsonSerializer` 不兼容**
-   会在运行时崩溃 `MT140696497762168: Reflection_Disabled`。
-   必须保持手写序列化。
-
-## 技术债（未开 issue，记录备查）
-
-- JSON 层用 `JsonDocument`，`Utf8JsonReader` 迁移可再省 ~15ms（体积 +160KB）
-- 双分支语义（受限令牌路径）有意推迟到二期
-- 缺少多硬件/多 Windows 版本的性能基线
-- `LineReader` 逐字节 `ReadByte()` 读 stdin，大 `env` 的 start 请求会有额外系统调用开销
+>
+> **补充（2026-11-02）**：现在有 `test/host-path-verify.js`
+> 直接驱动真实 `LocalSubprocessRuntime`，这比 CI 更能说明「能被 host 用起来」。
