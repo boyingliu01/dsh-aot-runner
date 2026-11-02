@@ -29,7 +29,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 并行时它们互相抢占 CPU/句柄，导致计时失准甚至超时 ——
 // 竞态测试一旦被外部干扰，测的就不再是被测对象的行为。
 // 用 { concurrency: 1 } 把整组钉成顺序执行。
-const RACE = { concurrency: 1 };
+//
+// timeout 也必须在这里给：五条用例串行累计约 120s 以上，
+// 而 node:test 的**文件级**默认超时是 120s —— 不抬高的话最后一条
+// 会被判 "test failed"（即使它自己跑得好好的）。单条 timeout 不解决这个问题，
+// 因为文件级超时是先于单条超时触发的。
+const RACE = { concurrency: 1, timeout: 900000 };
 
 /** 轮询等待条件成立 */
 async function waitUntil(pred, { timeoutMs = 8000, intervalMs = 50 } = {}) {

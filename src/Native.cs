@@ -173,6 +173,25 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetHandleInformation(IntPtr hObject, out uint lpdwFlags);
 
+    // ---- 同步文件/管道 I/O ----
+    // 用于 Node IPC 通道（fd 3）。为什么不用 FileStream：
+    //   FileStream 在 AOT 下会引入额外的运行时 P/Invoke 层，且对「非 seekable 管道」
+    //   的缓冲行为不可控（会做自己的 buffered 读，破坏按帧切分的时序）。
+    //   直接 ReadFile/WriteFile 语义最清晰：一次调用返回多少个字节由 OS 决定。
+    //
+    // lpOverlapped 传 IntPtr.Zero = 同步 I/O（会阻塞调用线程）。
+    // 阻塞是预期行为：调用方用「读线程 + 有界等待」结构把它隔离在后台线程上。
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool ReadFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToRead,
+        out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
+
+    /// <summary>ERROR_NO_DATA —— 管道正在被关闭（Windows 上的另一种 EOF 形态）。</summary>
+    public const int ERROR_NO_DATA = 232;
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe,
         ref SECURITY_ATTRIBUTES lpPipeAttributes, uint nSize);

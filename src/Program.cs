@@ -1,4 +1,4 @@
-// 入口：解析 argv，接线 FD 4/5/6，启动 JobRunner
+// 入口：解析 argv，接线 IPC 通道与 FD 4/5/6，启动 JobRunner
 using System.Text;
 
 namespace DshAotRunner;
@@ -6,6 +6,12 @@ namespace DshAotRunner;
 internal static class Program
 {
     private const string EnvSelector = "DSH_SUBPROCESS_RUNNER";
+
+    /// <summary>Node IPC 通道所在的文件描述符（spawn 的 stdio[3] === 'ipc'）。</summary>
+    private const int IpcFileDescriptor = 3;
+
+    /// <summary>调试开关：改用 NDJSON over stdin，便于手工驱动（不用于生产）。</summary>
+    private const string NdjsonFlag = "--ndjson";
 
     private static int Main(string[] rawArgs)
     {
@@ -29,6 +35,11 @@ internal static class Program
         // 消费私有选择器（对齐 runnerEnvironment 行为）
         try { Environment.SetEnvironmentVariable(EnvSelector, null); } catch { }
 
+        // --ndjson 调试开关：允许手工用管道驱动 runner（见 NdjsonChannel 的注释）。
+        // 必须在 argv 解析**之前**摘掉，否则它会被当成 target 的程序名。
+        var ndjson = rawArgs.Contains(NdjsonFlag);
+        if (ndjson) rawArgs = rawArgs.Where(a => a != NdjsonFlag).ToArray();
+
         // argv 形如：runner.exe -- <target> [args...]
         var argv = rawArgs;
         if (argv.Length > 0 && argv[0] == "--")
@@ -41,7 +52,7 @@ internal static class Program
             if (idx >= 0) argv = argv[(idx + 1)..];
         }
 
-        Trace.Write($"parsed argv=[{string.Join("|", argv)}]");
+        Trace.Write($"parsed argv=[{string.Join("|", argv)}] ndjson={ndjson}");
 
         if (argv.Length == 0 || string.IsNullOrEmpty(argv[0]))
         {
@@ -50,14 +61,26 @@ internal static class Program
             return 127;
         }
 
-        // FD 4/5/6 是 host 在 spawn 时按位号传进来的 target 通道。
-        // 本进程的 stdout(1) 是给 host 的 NDJSON 结果通道。
-        var resultStream = Console.OpenStandardOutput();
-        using var runner = new JobRunner(argv, resultStream);
+        // FD 4/5/6 是 host 在 spawn 时按位号传进来的 target 通道；
+        // FD 3 是与 host 通信的 Node IPC 通道。
+        //
+        // 注意不能用 Console.OpenStandardOutput()：真实 host 布局下 fd 0/1/2
+        // 全是 'ignore'（\\?\NUL 设备），读它只会读到 NUL 的 EOF。
+        using var channel = OpenChannel(ndjson);
+        Trace.Write($"channel: {channel.Diagnostics}");
+
+        using var runner = new JobRunner(argv, channel);
         var rc = runner.Run();
         Trace.Write($"run returned {rc}");
         return rc;
     }
+
+    /// <summary>
+    /// 打开与 host 通信的通道。默认走 Node IPC（生产路径），
+    /// <paramref name="ndjson"/> 为 true 时走 stdin/stdout（调试）。
+    /// </summary>
+    private static IMessageChannel OpenChannel(bool ndjson)
+        => ndjson ? new NdjsonChannel() : new IpcChannel(IpcFileDescriptor);
 
     /// <summary>
     /// 手写 JSON 拼装（不用 JsonSerializer —— AOT 下反射序列化被禁用）。
@@ -67,6 +90,12 @@ internal static class Program
     /// 会产出 <c>{"code":null}</c> —— host 侧 <c>isSerializedRunnerError</c> 的
     /// <c>value.code === undefined || typeof value.code === "string"</c> 校验会判为
     /// 非法（null 既不是 undefined 也不是 string），整条错误结果被丢弃。
+    ///
+    /// 为什么自己开通道：这个函数在 argv 解析阶段就会被调用（那时 JobRunner
+    /// 和主通道都还不存在）。fd 3 在进程启动时就已建立，所以可以随时打开。
+    ///
+    /// 为什么不能写 stdout：真实 host 布局下 fd 1 是 <c>\\?\NUL</c> —— 写入会
+    /// "成功"但内容丢弃，调用方看到的是 runner 静默退出，完全无法定位。
     /// </summary>
     private static void EmitProtocolError(string message, string? code, string? path)
     {
@@ -78,13 +107,24 @@ internal static class Program
             Path = path,
         };
 
-        var bytes = Encoding.UTF8.GetBytes(ProtocolJson.Serialize(new ErrorResult { Error = error }) + "\n");
+        var json = ProtocolJson.Serialize(new ErrorResult { Error = error });
         try
         {
-            var stdout = Console.OpenStandardOutput();
-            stdout.Write(bytes, 0, bytes.Length);
-            stdout.Flush();
+            using var channel = new IpcChannel(IpcFileDescriptor);
+            channel.Send(json);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 通道不可用（例如调试模式下用 --ndjson 手工驱动）时退回 stdout
+            Trace.Write($"EmitProtocolError: ipc unavailable ({ex.GetType().Name}), falling back to stdout");
+            try
+            {
+                var bytes = Encoding.UTF8.GetBytes(json + "\n");
+                var stdout = Console.OpenStandardOutput();
+                stdout.Write(bytes, 0, bytes.Length);
+                stdout.Flush();
+            }
+            catch { }
+        }
     }
 }

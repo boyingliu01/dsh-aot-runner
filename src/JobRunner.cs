@@ -15,7 +15,7 @@ internal sealed class JobRunner : IDisposable
     private const int PollIntervalMs = 10;          // RUNNER-SPEC §7
 
     private readonly string[] _argv;
-    private readonly Stream _out;
+    private readonly IMessageChannel _channel;
     private readonly object _gate = new();
     private bool _disposed;
 
@@ -30,62 +30,64 @@ internal sealed class JobRunner : IDisposable
     private SafeKernelHandle? _thread;
     private int _targetPid;
 
-    public JobRunner(string[] argv, Stream outStream)
+    public JobRunner(string[] argv, IMessageChannel channel)
     {
         _argv = argv;
-        _out = outStream;
+        _channel = channel;
     }
 
-    /// <summary>主循环：读 stdin 的 NDJSON 消息，直到 finished。</summary>
+    /// <summary>主循环：读 Node IPC 通道的消息，直到 finished。</summary>
     public int Run()
     {
-        var stdin = Console.OpenStandardInput();
-        var reader = new LineReader(stdin);
-
         // 主循环必须能被 Finish() 唤醒。
-        // 阻塞在同步 ReadByte() 上时，Dispose 流并不能打断另一个线程的读，
-        // 而真实 host 又不会关闭 stdin 写端 —— 结果就是协议结果已发出、
+        // 阻塞在同步 I/O 上时，没有任何办法从外部打断另一个线程的读，
+        // 而真实 host 在 terminate 后并不会立即关闭通道 —— 结果就是协议结果已发出、
         // 进程却永远挂着（Issue #3 实测：每次 terminate 泄漏一个 runner）。
         //
-        // 做法：读线程 + 有界等待。主线程只做「取一行 / 检查是否该退出」，
+        // 做法：读线程 + 有界等待。主线程只做「取一条消息 / 检查是否该退出」，
         // 等待设了超时，于是 _finished 一旦置位就能在 ≤50ms 内退出。
-        var lines = new BlockingCollection<string?>(new ConcurrentQueue<string?>());
+        //
+        // 这套结构对 IPC 同样必要：Windows 管道上的 ReadFile 会真阻塞，
+        // 且 disconnect 后返回的是 ERROR_BROKEN_PIPE 而非 0 字节。
+        var inbox = new BlockingCollection<string?>(new ConcurrentQueue<string?>());
         var readerThread = new Thread(() =>
         {
             try
             {
                 while (true)
                 {
-                    var l = reader.ReadLine();
-                    lines.Add(l);
-                    if (l is null) break;           // EOF 之后不再产出
+                    var message = _channel.ReadMessage();
+                    inbox.Add(message);
+                    if (message is null) break;      // EOF 之后不再产出
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                lines.Add(null);                     // 读失败等同于流结束
+                // 读失败（帧非法或 I/O 错误）等同于通道结束，但要留下痕迹
+                Trace.Write($"ipc reader stopped: {ex.GetType().Name}: {ex.Message}");
+                inbox.Add(null);
             }
         })
-        { IsBackground = true, Name = "stdin-reader" };
+        { IsBackground = true, Name = "ipc-reader" };
         readerThread.Start();
 
         try
         {
             while (!_finished)
             {
-                if (!lines.TryTake(out var line, 50))
+                if (!inbox.TryTake(out var message, 50))
                     continue;                        // 超时 → 回头看 _finished
 
-                if (line is null)
+                if (message is null)
                 {
                     if (_finished) break;            // Finish 之后的 EOF，正常收尾
                     OnDisconnect();
                     break;
                 }
 
-                if (line.Length == 0) continue;
-                Trace.Timed($"got message: {line}");
-                HandleMessage(line);
+                if (message.Length == 0) continue;
+                Trace.Timed($"got message: {message}");
+                HandleMessage(message);
             }
         }
         finally
@@ -232,6 +234,22 @@ internal sealed class JobRunner : IDisposable
         var hStdIn = IsValid(hIn) ? hIn : Native.GetStdHandle(Native.STD_INPUT_HANDLE);
         var hStdOut = IsValid(hOut) ? hOut : Native.GetStdHandle(Native.STD_OUTPUT_HANDLE);
         var hStdErr = IsValid(hErr) ? hErr : Native.GetStdHandle(Native.STD_ERROR_HANDLE);
+
+        // NUL 陷阱（Issue #11 实测发现）：
+        // 真实 host 布局下本进程的 fd 0/1/2 是 \\?\NUL 字符设备 —— 句柄有效，
+        // 写入永远"成功"但内容丢弃。如果把它们当默认值传给 target，
+        // target 的输出会**静默消失**，调用方拿到空输出却没有任何报错。
+        //
+        // 因此：fd 4/5/6 缺失时只回退到「本进程的标准句柄」，但要记录；
+        // 一旦目标句柄是 NUL（FILE_TYPE_CHAR 且不是控制台），显式告警。
+        Trace.Write($"stdio: fd4=0x{hIn.ToInt64():X} fd5=0x{hOut.ToInt64():X} fd6=0x{hErr.ToInt64():X}"
+                    + $" type4={Native.GetFileType(hIn)} type5={Native.GetFileType(hOut)} type6={Native.GetFileType(hErr)}"
+                    + $" -> in=0x{hStdIn.ToInt64():X} out=0x{hStdOut.ToInt64():X} err=0x{hStdErr.ToInt64():X}");
+
+        if (!IsValid(hIn) || !IsValid(hOut) || !IsValid(hErr))
+        {
+            Trace.Write("stdio: WARNING fd4/5/6 缺失，target 将继承本进程标准句柄（输出可能进入 NUL）");
+        }
 
         // ---- 3a. control channel（Issue #2）----
         // control:"pipe" 时 host 在 stdio[7] 传一个管道，target 会用
@@ -773,13 +791,12 @@ internal sealed class JobRunner : IDisposable
     {
         try
         {
-            var bytes = Encoding.UTF8.GetBytes(json + "\n");
-            _out.Write(bytes, 0, bytes.Length);
-            _out.Flush();
+            _channel.Send(json);
         }
-        catch
+        catch (Exception ex)
         {
-            // host 已断开，忽略
+            // host 已断开，忽略 —— 但留痕，免得「结果发出去了」这种假设永远不被质疑
+            Trace.Write($"send failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
