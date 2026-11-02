@@ -4,13 +4,14 @@ DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文�
 把每次子进程调用的固定开销从约 360ms 降到约 150ms（**消除约 60%**），且行为与 Node 版
 在 24 个用例上字节级一致。
 
+**协议状态**：AOT 版实现的是与 Node 版**相同的 Node IPC 协议**（fd 3），
+可被真实 DSH host 直接调用（Issue #11 已完成协议对齐）。
+
 > 📋 **下一步计划看 [ROADMAP.md](ROADMAP.md)**，任务细节在
 > [Issues](https://github.com/boyingliu01/dsh-aot-runner/issues)（Issue 是唯一事实来源）。
 >
-> 当前状态下最该先做的三件事：
-> [#3 零泄漏回归](https://github.com/boyingliu01/dsh-aot-runner/issues/3) ·
-> [#2 control pipe](https://github.com/boyingliu01/dsh-aot-runner/issues/2) ·
-> [#5 依赖检查](https://github.com/boyingliu01/dsh-aot-runner/issues/5)
+> 当前状态：runner 本体已可被 host 调用；下一步是
+> [#11 阶段 B 插件接入 + 熔断器](https://github.com/boyingliu01/dsh-aot-runner/issues/11)。
 
 ---
 
@@ -62,9 +63,21 @@ spawn(command, [...prefix, "--", ...spec.argv], {
 关键点：`stdio[3]=ipc`、`stdio[4]`=target stdin、`stdio[5]`=target stdout、
 `stdio[6]`=target stderr、`stdio[7]`=control。
 
-AOT 版用 **NDJSON over pipes** 取代 Node IPC，其余语义完全一致。
+**AOT 版实现的是同一个 Node IPC 协议**（`stdio[3]`），不是自定义协议。
+帧格式（实测确认）：
+
+```
+[8 字节 type (LE，恒为 1)][8 字节 payload 长度 (LE)][JSON payload + '\n']
+```
+
+`type` 不是序号 —— Windows 上 Node 走 uv_pipe + 阻塞 I/O，没有 sequence number；
+`1 = NODE_HANDLE_NORMAL`，负值是内部帧（载荷不是 JSON，必须拒绝）。
+
 start 请求字段被 `hasExactKeys` 严格校验为 `{type, cwd, env, control?}` ——
 **多一个字段都会被拒绝**，这一点必须照抄。
+
+> 历史注记：Issue #11 之前 AOT 用的是 NDJSON over stdin，与 host 完全不兼容。
+> 现在 `--ndjson` 仅作为手工调试模式保留，生产路径只走 IPC。
 
 ### 进程创建（`CreateProcessW`）
 

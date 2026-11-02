@@ -9,9 +9,9 @@
  *   ["ignore","ignore","ignore","ipc", stdinCarrier, stdout, stderr, (control?)]
  *     0        1        2        3      4(fd4)         5(fd5)  6(fd6)    7
  *
- * AOT runner 用 NDJSON 取代 Node IPC，所以 stdio 布局：
- *   ["pipe"(协议in), "pipe"(协议out), "pipe"(stderr诊断), "pipe"(fd3占位),
- *    "pipe"(fd4 target stdin), "pipe"(fd5 target stdout), "pipe"(fd6 target stderr)]
+ * AOT runner 使用**完全相同**的布局（Issue #11 起实现了 Node IPC）。
+ * 基准必须测真实协议 —— 早期版本这里用 [pipe×7] + stdin NDJSON，
+ * 测出来的数字对应的是一个 host 根本调不起来的产物。
  */
 const { spawn } = require('child_process');
 const path = require('path');
@@ -106,27 +106,32 @@ function runAotRunner() {
     const env = { ...process.env };
     delete env.DSH_SUBPROCESS_RUNNER;
 
+    // 与 node runner 完全相同的真实 host 布局（Issue #11）：
+    // stdio[3]='ipc' 才是生产路径。基准必须测真实协议，
+    // 否则测出来的数字对应的是一个 host 根本调不起来的产物。
     const c = spawn(AOT_RUNNER, ['--', ...TARGET], {
       cwd: CWD,
       windowsHide: true,
       env,
-      stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc', 'pipe', 'pipe', 'pipe'],
     });
 
     c.on('spawn', () => {
       try {
-        c.stdin.write(JSON.stringify({ type: 'start', cwd: CWD, env: Object.fromEntries(Object.entries(env).filter(([k]) => k === 'PATH' || k === 'SystemRoot' || k === 'TEMP' || k === 'TMP')) }) + '\n');
+        c.send({
+          type: 'start',
+          cwd: CWD,
+          env: Object.fromEntries(Object.entries(env).filter(([k]) => k === 'PATH' || k === 'SystemRoot' || k === 'TEMP' || k === 'TMP')),
+        });
       } catch (e) { fin('send-error', { error: String(e) }); }
+    });
+    c.on('message', (m) => {
+      if (m && (m.type === 'target-exit' || m.type === 'error')) fin('result');
     });
     if (c.stdio[5]) c.stdio[5].on('data', (d) => { stdout += d.toString(); });
     if (c.stdio[6]) c.stdio[6].on('data', (d) => { stderr += d.toString(); });
-    if (c.stdio[4]) c.stdio[4].on('data', () => {});
-    c.stdout.on('data', (d) => {
-      proto += d.toString();
-      if (proto.includes('target-exit') || proto.includes('"error"')) fin('result');
-    });
-    c.on('exit', () => fin('exit'));
     c.on('error', (e) => fin('error', { error: String(e) }));
+    c.on('exit', () => fin('exit'));
     setTimeout(() => fin('timeout'), 15000);
   });
 }

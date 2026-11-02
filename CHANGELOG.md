@@ -59,6 +59,73 @@
   （`runner-launch-*.js:1485`）确认其搜索根只有 cwd + PATH，AOT 实现本就一致；
   早先观察到的差异是探测脚本传了 glob 模式的 cwd 导致的测量伪迹。
 
+### Issue #11 阶段 A：Node IPC 协议对齐（破坏性变更）
+
+**这是项目迄今最重要的修复**：AOT runner 此前**从未能被真实 DSH host 调用**。
+
+#### 问题
+
+AOT 实现的是 NDJSON over stdin，而 DSH host 用 Node IPC（fd 3），
+`stdio[0..2]` 全是 `'ignore'`。实测旧版在真实布局下会立刻因 stdin EOF 退出，
+host 侧 `send()` 抛 `ERR_IPC_CHANNEL_CLOSED`。
+
+过去 40 个用例全绿是**测试假象**：测试客户端自己为 AOT 和 node 实现了两套协议，
+两边各跑各的，从未验证过「同一套 host 布局能否驱动 AOT」。
+
+#### 新增
+
+- **`src/IpcChannel.cs`**：fd 3 上的帧读写。
+  - 帧格式 `[8B type][8B len][JSON]`；`type` 是类型不是序号（Windows 无 seq）
+  - 内部缓冲 + 循环切帧：一次 `ReadFile` 可能返回多帧或半帧
+  - EOF 判定含 `ERROR_BROKEN_PIPE(109)` / `ERROR_NO_DATA(232)`
+  - `type != 1` 报 `EPROTOCOL`；单帧上限 8MB
+- **`src/IMessageChannel.cs`**：消息通道抽象。
+- **`src/NdjsonChannel.cs`**：`--ndjson` 调试模式（手工驱动用，非生产）。
+- **`test/ipc-verify.js`**（6 条）：disconnect 退出、多帧、半帧、后续帧、
+  3MiB env、stdio 映射。
+- **`test/host-path-verify.js`**（1 条）：**真实 `LocalSubprocessRuntime` 路径** ——
+  注入 `internals.runnerInvocation` 后确认 AOT 被选中、执行、结果回流。
+
+#### 变更
+
+- **主循环协议**：`LineReader`(stdin) → `IMessageChannel`(IPC)。
+  保留 Issue #3 的「读线程 + 有界等待」结构，只换底层读取源，
+  因此没有重新引入挂起风险。
+- **`Program.cs` 去掉 stdout 依赖**：`Console.OpenStandardOutput()` → `IpcChannel`；
+  `EmitProtocolError` 也改走 IPC（否则参数错误会静默消失）。
+- **测试客户端统一协议**：`test/runner-client.js` 对 AOT 与 node 使用**相同的真实
+  host 布局**，两侧都走 `c.send()` / `c.on('message')`。这是让 A/B 真正可比的前提。
+- **`CrtDescriptorTable.Encode` 拒绝字符设备**：真实布局下 runner 自己的
+  fd 0/1/2 是 `\\?\NUL`，把它填进 target 标准槽会让输出静默丢失。
+  现在直接抛异常，让问题在启动期暴露。
+
+#### 修复
+
+- `test/race-verify.js` 加**文件级** timeout（900s）：五条用例串行累计 >120s，
+  会被 `node:test` 的文件级默认超时误杀。单条 timeout 不解决这个问题
+  （文件级超时先触发）。
+- 测试客户端对已断开的 IPC 通道调用 `send()` 会抛**异步** error（
+  `ERR_IPC_CHANNEL_CLOSED`），`try/catch` 抓不住、会带崩测试进程；
+  改为先用 `c.connected` 判断。
+
+#### 已知盲区（诚实记录）
+
+「切帧后丢弃缓冲区剩余数据」这类缺陷，现有测试**抓不到**。
+三种构造（小帧连发 / 大帧+小帧 / 256KB 噪声帧+terminate+start）都试过，
+由于 Node 发送端的排队行为，多条帧很少落在同一次 `ReadFile` 里。
+需要 runner 侧可注入「一次读返回多帧」的测试接缝，尚未实现。
+
+#### 验证
+
+| 套件 | 结果 |
+|---|---|
+| IPC 协议回归 | 6/6 |
+| 真实 host 路径 | 1/1（`selectContainmentMode` = `windows-job`）|
+| A/B 一致性 | 28/28（两侧现走同一协议）|
+| 零泄漏 / 混沌 | 7/7 |
+| terminate 竞态 | 5/5 |
+| 质量门禁 | 全绿 |
+
 ## [1.0.0] - 2026-10-31
 
 首个可用版本。DSH 子进程 runner 的 NativeAOT 实现，S4 A/B 验证 24/24 通过。
