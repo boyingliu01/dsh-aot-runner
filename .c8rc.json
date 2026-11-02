@@ -1,0 +1,22 @@
+{
+  "include": [
+    "plugin/lib/**/*.js",
+    "scripts/**/*.mjs",
+    "vendor/*.mjs"
+  ],
+  "exclude": [
+    "**/node_modules/**",
+    "test/**",
+    "bench/**",
+    "vendor/dsh-subprocess-local-*/**"
+  ],
+  "reporter": [
+    "text",
+    "text-summary"
+  ],
+  "check-coverage": true,
+  "lines": 85,
+  "functions": 80,
+  "branches": 65,
+  "statements": 85
+}

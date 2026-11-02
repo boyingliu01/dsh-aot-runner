@@ -1,8 +1,8 @@
 {
   "name": "dsh-aot-runner",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "DSH 子进程 runner 的 NativeAOT 实现：把每次调用固定开销从 ~360ms 降到 ~150ms",
+  "description": "DSH 子进程 runner 的 NativeAOT 实现：每次调用省 92~94ms（约 59%），p99 改善 73~124ms",
   "type": "commonjs",
   "scripts": {
     "build": "dotnet publish -c Release -r win-x64",
@@ -15,9 +15,14 @@
     "test:e2e": "node --test test/e2e-plugin-verify.js",
     "test:plugin": "node --test plugin/test/index.test.js",
     "test:all": "npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:leak && npm run test:race",
-    "bench": "node bench/d1-ab-bench.js"
+    "bench": "node bench/d1-ab-bench.js",
+    "test:coverage": "c8 node --test plugin/test/index.test.js",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "c8": "^12.0.0"
   }
 }

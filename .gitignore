@@ -24,7 +24,8 @@ project.assets.json
 
 # Node
 node_modules/
-package-lock.json
+# package-lock.json 需要提交：项目已有 devDependencies（c8 覆盖率），
+# 忽略 lockfile 会让「装了哪个版本的 c8」变成不可复现的状态。
 
 # 测试/基准输出
 bench-output/

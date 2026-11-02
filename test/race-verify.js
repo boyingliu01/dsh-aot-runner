@@ -22,7 +22,9 @@ const {
 
 assertEnvironment();
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// sleep / waitUntil 与 leak-verify 曾经各有一份完全相同的实现
+// （Gate 2 查出的克隆），统一改为引用 test-utils。
+const { sleep, waitUntil } = require('./test-utils.js');
 
 // 竞态用例**必须串行**。
 // node --test 默认并发跑顶层 test()，而本套件每个用例都会起大量真实进程；
@@ -35,16 +37,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 会被判 "test failed"（即使它自己跑得好好的）。单条 timeout 不解决这个问题，
 // 因为文件级超时是先于单条超时触发的。
 const RACE = { concurrency: 1, timeout: 900000 };
-
-/** 轮询等待条件成立 */
-async function waitUntil(pred, { timeoutMs = 8000, intervalMs = 50 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pred()) return true;
-    await sleep(intervalMs);
-  }
-  return pred();
-}
 
 /** 确认一组 PID 全部退出，返回仍存活者 */
 async function allGone(pids, label) {
@@ -141,6 +133,27 @@ test('竞态：terminate 先于 start 到达', { timeout: 120000, ...RACE }, asy
 // 4. 连续 start/terminate 交替，检查残留
 // ---------------------------------------------------------------------------
 
+// 每多少轮做一次全局进程扫描
+const SWEEP_EVERY_ROUNDS = 15;
+
+/**
+ * 扫描是否有本次运行新产生的残留进程；有则清理并断言失败。
+ *
+ * 提取的原因：这段逻辑嵌在 for + if 里有两层缩进，加上内部的
+ * 循环和 try 就是 5 层嵌套，读起来很费劲，而它本身是独立职责。
+ *
+ * @param {Set<number>} baseline 测试开始前的进程快照
+ * @param {string} where 用于报错定位的描述
+ */
+function assertNoStrayProcesses(baseline, where) {
+  const descendants = listDescendantPids(process.pid);
+  const stray = [...alivePids(descendants)].filter((p) => !baseline.has(p));
+  for (const p of stray) {
+    try { process.kill(p, 'SIGKILL'); } catch { /* 可能已退出 */ }
+  }
+  assert.deepStrictEqual(stray, [], `${where}子进程残留: ${stray.join(',')}`);
+}
+
 test('竞态：start/terminate 交替 60 轮无残留', { timeout: 300000, ...RACE }, async () => {
   const before = new Set(process.pid ? listDescendantPids(process.pid) : []);
   const ROUNDS = 60;
@@ -156,11 +169,8 @@ test('竞态：start/terminate 交替 60 轮无残留', { timeout: 300000, ...RA
     await allGone([h.state.pid].filter(Boolean), `第 ${i} 轮 runner`);
 
     // 每 15 轮做一次全局扫描，尽早发现趋势性泄漏
-    if ((i + 1) % 15 === 0) {
-      const descendants = listDescendantPids(process.pid);
-      const stray = [...alivePids(descendants)].filter((p) => !before.has(p));
-      for (const p of stray) { try { process.kill(p, 'SIGKILL'); } catch { /* ignore */ } }
-      assert.deepStrictEqual(stray, [], `第 ${i + 1} 轮后子进程残留: ${stray.join(',')}`);
+    if ((i + 1) % SWEEP_EVERY_ROUNDS === 0) {
+      assertNoStrayProcesses(before, `第 ${i + 1} 轮后`);
     }
   }
 });
