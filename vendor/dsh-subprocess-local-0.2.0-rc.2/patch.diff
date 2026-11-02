@@ -1,0 +1,11 @@
+--- index.js.orig	2026-11-02 23:32:42.402457000 +0800
++++ index.js.patched	2026-11-02 23:32:45.862374200 +0800
+@@ -1365,7 +1365,7 @@
+ 		if (containmentMode === "fallback") handle = spawnSubprocess(spec, internals);
+ 		else {
+ 			const binding = prepareManagedProcessBinding(internals);
+-			handle = bindManagedProcess(spec, containmentMode === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env), binding);
++			handle = bindManagedProcess(spec, containmentMode === "linux-scope" ? launchLinuxScope(spec, env, internals) : launchWindowsJob(spec, env, internals), binding);
+ 		}
+ 		this.live.add(handle);
+ 		const control = handle.control;
