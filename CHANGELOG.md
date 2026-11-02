@@ -3,6 +3,49 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.0] - 2026-11-02
+
+首个公开发布。NativeAOT runner 可替代 DSH 的 Node.js runner，并通过插件接入。
+
+> **重要前提**：在 DSH 0.2.0-rc.2 上必须配合一行上游补丁才能生效，
+> 详见 [vendor/README.md](vendor/README.md) 与
+> [上游 discussion #11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)。
+> 插件会自检并在这个前提不满足时告警、自动停用。
+
+### 性能（生产路径实测，DSH 真实 launchWindowsJob）
+
+| 指标 | node runner | AOT runner |
+|---|---|---|
+| p50 | 156~158ms | **63~64ms** |
+| p99 | 249~279ms | **142~206ms** |
+| 离散度 | 11.7%~20.5% | **1.9%~4.1%** |
+
+- 每次净省 **92~94ms（约 59%）**，三轮收敛
+- p99 长尾改善 73~124ms
+- 300 次连续调用 0 失败，无内存累积增长
+
+### 新增
+
+- **插件接入**（`plugin/`）：配置开关、熔断降级（连续 3 次失败自动退回 node runner）、
+  启动自检（检测 DSH 缺陷并主动停用，而不是假装工作）
+- **`vendor/` 上游补丁留档**：原始文件 + 补丁工具，支持 status/apply/revert/verify
+- **完整测试套件 60 项**：IPC 协议、真实 host 路径、插件单元、端到端、
+  A/B 对比、泄漏、竞态
+- **性能对比报告**（`docs/性能对比测试报告.md`）三层数据与完整方法论
+
+### 修复
+
+- **测试假阳性**：端到端与 host 路径测试原先只断言「注入字段被赋值」，
+  而 node runner 同样能让调用成功 —— 于是插件完全失效时测试照样全绿。
+  现改为观测实际启动的命令行，断言必须是 AOT exe。
+- **测试依赖本机路径**：硬编码的 `C:/Users/think/...` 改为运行时多候选解析
+
+### 已知限制
+
+- 仅 Windows（Job Object 进程树回收依赖 Win32 API）
+- 依赖 DSH 的 `internals` 接缝，该接缝目前被上游缺陷切断
+- 无设置面板 UI（状态通过日志暴露；需要完整 UI 得写 React 客户端插件）
+
 ## [Unreleased]
 
 正式开发环境基建。不改变对外行为 —— 24 项 A/B 验证保持 24/24 通过，
