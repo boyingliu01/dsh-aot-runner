@@ -37,15 +37,26 @@ dsh plugin add ./plugin        # 从本仓库安装
 }
 ```
 
-然后在 profile 配置里启用：
+然后在 profile 的 `cordis.patch.yml` 里启用：
 
 ```yaml
-# cordis.patch.yml
-- insert:
-    - id: aot-runner
-      name: '@boyingliu01/dsh-aot-runner'
-      config:
-        enabled: true
+# ~/.dsh/profiles/<name>/cordis.patch.yml
+- id: aot-runner
+  config:
+    enabled: true
+```
+
+**注意不要用 `insert:`** —— 插件的 `cordis.patch.yml` 已经注册了这条，
+再用 `insert` 会让同一个 id 出现两次（DSH 不报错，但配置不生效）。
+覆盖已有条目只需写 `id` + 要改的字段，DSH 会显示 `patched by` 表示合并成功。
+
+验证配置是否生效：
+
+```bash
+dsh --profile <name> --dump-config | grep -A 5 aot-runner
+# 期望看到：== @boyingliu01/dsh-aot-runner, patched by .../cordis.patch.yml
+#           config:
+#             enabled: true
 ```
 
 ## 配置
