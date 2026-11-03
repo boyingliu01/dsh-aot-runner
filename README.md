@@ -342,15 +342,56 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 │   └── check-integrity.sh     # Low IL 目录自检
 ├── test/
 │   ├── runner-client.js       # 共享测试工具（真实 DSH 调用契约）
-│   └── ab-verify.js           # 24 项 A/B 验证
+│   ├── ab-verify.js           # 28 项 A/B 字节级一致性验证
+│   ├── ipc-verify.js          # Node IPC 协议回归
+│   ├── host-path-verify.js    # 真实 host 调用路径
+│   ├── e2e-plugin-verify.js   # 插件端到端
+│   ├── leak-verify.js         # 零泄漏 / 混沌 / 探针自校验
+│   ├── race-verify.js         # terminate 竞态
+│   └── aot-observe-verify.js  # 观测器单元测试
+├── plugin/
+│   ├── lib/index.js           # 覆盖 internals.runnerInvocation
+│   ├── lib/circuit-breaker.js # 熔断器（失败自动降级）
+│   ├── bin/                   # 构建产物同步到这里
+│   └── cordis.patch.yml       # 插件自注册
 ├── bench/
-│   └── d1-ab-bench.js         # 交错采样性能基准
+│   ├── d1-ab-bench.js         # 交错采样性能基准
+│   └── aot-observe.js         # 多轮观测 + 双层可信度判据
 └── docs/
-    ├── 开发环境.md             # 本文件：搭环境、跑验证、故障排查
+    ├── 开发环境.md             # 搭环境、跑验证、故障排查
+    ├── 测量方法论-当工具比被测对象更容易出错.md  # ⭐ 踩坑总结
+    ├── 依赖清单.md
+    ├── 方案-AOT接入DSH.md
+    ├── 性能对比测试计划.md
+    ├── 性能对比测试报告.md
     ├── 调研报告-JSON序列化与启动优化.md
     ├── S2b-性能实测报告.md
     └── S2-进展与阻塞.md
 ```
+
+---
+
+## ⭐ 先读这篇：测量方法论
+
+[`docs/测量方法论-当工具比被测对象更容易出错.md`](docs/测量方法论-当工具比被测对象更容易出错.md)
+
+这个项目最贵的两次误判，**都不是代码写错了，而是测量工具的隐含假设错了**：
+
+| # | 假象 | 真实情况 | 发现方式 |
+|---|---|---|---|
+| 1 | JsonSerializer 慢 34× | 慢 2.4× | 严格同源 A/B，只改测量方式 |
+| 2 | 零泄漏测试偶发失败 = runner 泄漏 | 基线竞态误报 | 单跑 vs 串行对比 |
+| 3 | 6 轮全不可信 = 优化无效 | 比例稳定 64%，判据太窄 | 换指标维度 |
+| 4 | bash 崩溃 = runner 缺陷 | 目录 Low Integrity 标签 | 同 md5 exe 换盘符测试 |
+| 5 | npm 解析差异 = AOT 更聪明 | 与 node 行为不一致 | 逐行对照源码 |
+
+> **5 条里有 4 条，第一直觉都指向了错误的方向。**
+
+元规则：**当测量结果反复"不合理"时，把怀疑顺序倒过来 ——
+先怀疑测量工具，再怀疑环境，最后才怀疑被测代码。**
+
+这篇文档还给出了 6 条可复用规则（自校验、拒绝平均不可信的数、
+差值比绝对值更稳、警惕未初始化基线等）和一份反模式清单。
 
 ---
 
