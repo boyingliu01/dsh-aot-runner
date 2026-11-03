@@ -156,3 +156,86 @@ test('pre-commit 扫描到的 JS 文件覆盖 test/bench/plugin 下全部文件'
   );
   assert.ok(onDisk.length >= 10, `扫描范围过小（只找到 ${onDisk.length} 个），检查 find 参数`);
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// 跨轮收益一致性（GAIN_CONSISTENT）—— 2026-11-04 新增
+//
+// 背景：本机常态负载 50~75%，单轮离散度几乎压不到 10% 以下。
+// 但「收益比例」对负载不敏感，多轮一致时仍可下结论。
+//
+// ⚠️ 这条路径最大的风险是「变得太宽松、什么都算可信」，
+// 所以下面专门测它的边界：跨度超限必须拒绝、轮数不够必须拒绝、
+// 且**绝不输出绝对值**。
+// ───────────────────────────────────────────────────────────────────────────
+
+const { crossRoundGain, GAIN_SPREAD_LIMIT } = require('../bench/aot-observe.js');
+
+/** 造一轮只含收益比例的数据。 */
+const mk = (gainPct, extra = {}) => ({ gainPct, fails: 0, ...extra });
+
+test('跨轮收益：比例一致时给出比例，且不带绝对值', () => {
+  const r = crossRoundGain([mk(60.7), mk(63.2), mk(62.9), mk(64.1), mk(61.7), mk(65.0)]);
+  assert.ok(r, '跨度 4.3pp 应当通过');
+  assert.ok(r.gainPct > 60 && r.gainPct < 65, `比例应在区间内，实际 ${r.gainPct}`);
+  assert.equal(r.netMs, undefined, '不得输出 netMs');
+  assert.equal(r.nodeP50, undefined, '不得输出 nodeP50');
+});
+
+test('跨轮收益：跨度超过阈值必须拒绝', () => {
+  // 跨度 20pp，明显不一致 —— 这是噪声主导的信号
+  const r = crossRoundGain([mk(40), mk(50), mk(60)]);
+  assert.equal(r, null, `跨度 20pp > ${GAIN_SPREAD_LIMIT}pp 应被拒绝`);
+});
+
+test('跨轮收益：轮数不足 3 时拒绝', () => {
+  assert.equal(crossRoundGain([mk(60), mk(61)]), null, '2 轮谈不上一致');
+  assert.equal(crossRoundGain([mk(60)]), null, '1 轮谈不上一致');
+});
+
+test('跨轮收益：有失败轮次时不得采信（防止掩盖不稳定）', () => {
+  const r = crossRoundGain([mk(60), mk(61), mk(62), { gainPct: 60, fails: 1 }]);
+  // 有失败那轮被剔除后只剩 3 轮，跨度 2pp —— 仍可信，但必须确实剔除了它
+  assert.ok(r, '剔除失败轮后仍足够');
+  assert.equal(r.rounds, 3, '失败轮必须被剔除，不能计入轮数');
+});
+
+test('跨轮收益：全部轮次都有失败时拒绝', () => {
+  const r = crossRoundGain([
+    { gainPct: 60, fails: 1 },
+    { gainPct: 61, fails: 1 },
+    { gainPct: 62, fails: 1 },
+  ]);
+  assert.equal(r, null, '全失败不能因为比例接近就算可信');
+});
+
+test('聚合：单轮全不可信但跨轮一致时，verdict 为 GAIN_CONSISTENT 且 netMs 为 null', () => {
+  // 模拟真实高负载场景：离散度全部超限，但收益比例稳定在 ~62%
+  const rounds = [60.7, 63.2, 62.9, 64.1, 61.7, 65.0].map((g) => ({
+    gainPct: g, fails: 0, dispNode: 30, dispAot: 40, nodeP50: 250, aotP50: 110, floorP50: 50,
+  }));
+  const agg = aggregate(rounds);
+  assert.equal(agg.verdict, 'GAIN_CONSISTENT');
+  assert.equal(agg.netMs, null, '绝对值不可信时必须为 null');
+  assert.equal(agg.trustworthyRounds, 0, '单轮一个都不可信');
+  assert.ok(agg.gainPct > 60 && agg.gainPct < 65);
+  assert.equal(typeof agg.gainSpread, 'number');
+});
+
+test('聚合：跨轮也不一致时，verdict 必须是 UNRELIABLE', () => {
+  const rounds = [40, 55, 70].map((g) => ({
+    gainPct: g, fails: 0, dispNode: 30, dispAot: 40, nodeP50: 250, aotP50: 110, floorP50: 50,
+  }));
+  const agg = aggregate(rounds);
+  assert.equal(agg.verdict, 'UNRELIABLE');
+  assert.equal(agg.gainPct, null, '不可信时不得给出比例');
+});
+
+test('聚合：有可信轮次时仍优先第一层（给出绝对值）', () => {
+  const rounds = [
+    { gainPct: 62, fails: 0, dispNode: 5, dispAot: 5, nodeP50: 300, aotP50: 110, floorP50: 50 },
+    { gainPct: 63, fails: 0, dispNode: 6, dispAot: 7, nodeP50: 305, aotP50: 112, floorP50: 52 },
+  ];
+  const agg = aggregate(rounds);
+  assert.equal(agg.verdict, 'MEASURED', '有可信轮次时不该降级到跨轮路径');
+  assert.equal(typeof agg.netMs, 'number', 'MEASURED 才给绝对值');
+});
