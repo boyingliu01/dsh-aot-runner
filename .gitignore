@@ -45,3 +45,6 @@ tmp/
 tmp-test/
 *.bak
 *.bak-*
+
+# AOT 长期观测的落盘数据（本地基准结果，不进版本库）
+.aot-observation/

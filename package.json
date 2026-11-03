@@ -17,7 +17,11 @@
     "test:all": "npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:leak && npm run test:race",
     "bench": "node bench/d1-ab-bench.js",
     "test:coverage": "c8 node --test plugin/test/index.test.js",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "observe": "node bench/aot-observe.js run",
+    "observe:report": "node bench/aot-observe.js report",
+    "observe:check": "node bench/aot-observe.js check",
+    "test:observe": "node --test test/aot-observe-verify.js"
   },
   "engines": {
     "node": ">=22"
