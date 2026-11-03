@@ -204,8 +204,28 @@ dotnet publish -c Release -r win-x64 -o dist
 ```bash
 ./build.sh --test          # 构建 + A/B（推荐）
 npm test                   # 只跑 A/B，需先构建
-node bench/d1-ab-bench.js  # 性能对比
+node bench/d1-ab-bench.js  # 性能对比（单次测量）
 ```
+
+#### 长期观测：判断优化值不值得继续投入
+
+单次基准会被机器负载带偏——同一台机器连跑三次，收益比例 58.9% / 65.1% / 67.1%，
+但离散度 48.9% / 22.5% / 25.4%，**三次全部不可信**。
+`bench/aot-observe.js` 跑多轮、只采信可信轮次、把结果落盘成历史趋势：
+
+```bash
+npm run observe:check                    # 先看环境能不能测（CPU 高就别测）
+npm run observe -- --rounds 5 --n 50     # 跑 5 轮 × 50 次，落盘
+npm run observe:report                   # 看历史趋势与汇总
+```
+
+它**拒绝把不可信的数字平均一下当结论**：全部轮次离散度超限时，
+输出 `UNRELIABLE` 且收益字段为 `null`，不会给出一个漂亮但虚假的比例。
+
+> 观测时的一个反直觉现象：系统负载升高时，**node runner 的 p50 会明显漂移
+> （221→249→263ms），而 AOT 的 p50 几乎不动（107→108→108ms）**。
+> 也就是说 AOT 的价值不只是均值更快，更是**尾延迟和稳定性**——
+> 这也解释了为什么收益比例比绝对值更适合作为判断指标。
 
 A/B 需要两个 runner：AOT 产物与 node runner。两者路径自动解析：
 
