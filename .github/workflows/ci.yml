@@ -1,0 +1,134 @@
+name: CI
+
+# 设计原则：**优先省 Actions 额度**
+#
+# 私有仓库免费额度 2000 分钟/月，Windows runner 按 2 倍计费。
+# 所以这里做了区分：
+#   - ubuntu-latest（1x 计费）：跑所有与平台无关的检查，每次 push 都跑
+#   - windows-latest（2x 计费）：只跑构建 + 核心 A/B，且只在手动 / 打 tag 时跑
+#
+# 如果额度耗尽，GitHub 会直接不调度，工作流显示 queued 或失败，
+# 这**不影响本地验证结论** —— 本地 `npm run test:all` 是唯一的发布判据。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_windows:
+        description: '额外跑 Windows 构建 + A/B（消耗 2x 额度）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 与平台无关的静态检查：便宜（1x），每次必跑 ──────────────────
+  lint:
+    name: 静态检查（Linux / 1x 计费）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 语法检查（全部 JS）
+        run: |
+          set -e
+          fail=0
+          while IFS= read -r f; do
+            echo "check $f"
+            node --check "$f" || fail=1
+          done < <(find . -name '*.js' -not -path './node_modules/*' -not -path './bin/*' -not -path './obj/*')
+          exit $fail
+
+      - name: ESLint
+        run: |
+          if [ -f eslint.config.mjs ]; then
+            npx --yes eslint@9 . 2>&1 || echo "::warning::ESLint 未通过（见日志）"
+          else
+            echo "无 eslint 配置，跳过"
+          fi
+
+      - name: 文档与清单一致性
+        run: |
+          set -e
+          echo "VERSION: $(cat VERSION)"
+          node -e "
+            const p=require('./package.json');
+            const v=require('fs').readFileSync('VERSION','utf8').trim();
+            if (p.version !== v) { console.error('package.json 版本 ' + p.version + ' 与 VERSION ' + v + ' 不一致'); process.exit(1); }
+            console.log('版本一致: ' + v);
+          "
+
+      - name: 检查是否误提交构建产物
+        run: |
+          set -e
+          bad=$(git ls-files | grep -E '^(bin|obj|dist|coverage|node_modules)/' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::以下构建产物被误提交："
+            echo "$bad"
+            exit 1
+          fi
+          echo "无构建产物被提交 ✅"
+
+  # ── Windows 构建 + 核心 A/B：贵（2x），手动或打 tag 时才跑 ────────
+  build-windows:
+    name: Windows 构建 + A/B（2x 计费）
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 构建 NativeAOT
+        run: |
+          dotnet publish -c Release -r win-x64 -o dist
+
+      - name: 确认产物存在
+        run: |
+          if (!(Test-Path dist/dsh-aot-runner.exe)) { throw "构建产物缺失" }
+          $s = (Get-Item dist/dsh-aot-runner.exe).Length
+          Write-Host "体积: $s 字节"
+
+      - name: 依赖检查（不得依赖 VC++ 运行时）
+        run: |
+          $out = & dumpbin /DEPENDENTS dist/dsh-aot-runner.exe 2>&1 | Out-String
+          Write-Host $out
+          foreach ($bad in @('vcruntime140','msvcp140','vcruntime140_1')) {
+            if ($out -match $bad) { throw "发现 VC++ 运行时依赖: $bad（分发会失败）" }
+          }
+          Write-Host "无 VC++ 运行时依赖 ✅"
+
+      - name: A/B 一致性验证
+        # 注意：完整套件含 100 次泄漏回归（约 3 分钟）和竞态（约 3 分钟），
+        # 这里只跑核心 A/B 以控制额度消耗。完整套件在本地跑。
+        env:
+          AOT_RUNNER: ${{ github.workspace }}\dist\dsh-aot-runner.exe
+        run: |
+          node --test test/ab-verify.js
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aot-runner-win-x64
+          path: dist/dsh-aot-runner.exe
+          retention-days: 7
