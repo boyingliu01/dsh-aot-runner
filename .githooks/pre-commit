@@ -4,22 +4,34 @@
 #
 # 这里只跑「快、不必构建」的检查；完整回归（含 24 项 A/B）请跑
 # `./build.sh --test` 或 `npm test`。
+#
+# JS 语法检查用扫描而不是逐行列举：原来那份手写清单已经漏掉了
+# test/test-utils.js —— 新加文件只要忘了登记就会静默跳过检查，
+# 而漏检是看不出来的。扫描口径与 npm 的发布范围一致（见 package.json
+# 的 files 字段），因此 dist/obj/bin/node_modules 天然不在其中。
 set -e
 
 echo "[pre-commit] JS 语法检查"
-node --check test/ab-verify.js
-node --check test/leak-verify.js
-node --check test/race-verify.js
-node --check test/ipc-verify.js
-node --check test/host-path-verify.js
-node --check test/e2e-plugin-verify.js
-node --check plugin/lib/index.js
-node --check plugin/lib/circuit-breaker.js
-node --check plugin/test/index.test.js
-node --check test/runner-client.js
-node --check bench/d1-ab-bench.js
-node --check bench/aot-observe.js
-node --check test/aot-observe-verify.js
+JS_FAIL=0
+JS_COUNT=0
+for f in $(find test bench plugin -name '*.js' -not -path '*/node_modules/*' | sort); do
+  JS_COUNT=$((JS_COUNT + 1))
+  if ! node --check "$f"; then
+    echo "  语法错误: $f" >&2
+    JS_FAIL=1
+  fi
+done
+if [ "$JS_FAIL" -ne 0 ]; then
+  echo "[pre-commit] JS 语法检查未通过" >&2
+  exit 1
+fi
+# 扫描到 0 个文件说明启动路径出了问题（例如在错误目录执行），
+# 这时报 OK 等于假装检查过了。
+if [ "$JS_COUNT" -eq 0 ]; then
+  echo "[pre-commit] 没找到任何 JS 文件 —— 检查路径可能不对" >&2
+  exit 1
+fi
+echo "[pre-commit]   $JS_COUNT 个文件通过"
 
 if command -v dotnet >/dev/null 2>&1; then
   echo "[pre-commit] C# 格式检查"
