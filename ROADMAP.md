@@ -242,3 +242,75 @@ node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
   该项不在 `gate-rules` 的阻断清单内，保持现状。
 - **archlint 的 3 处 Dead Code 误报**：`scripts/check-version.mjs` 等由 `build.sh`
   以子进程方式调用，没有 import 关系，被静态分析判为死代码。
+
+---
+
+## 待确认（下次重启 DSH 后验证）
+
+以下项目**代码已完成、单元测试已通过，但没有在真实 DSH 里跑过**。
+原因是当时的 DSH 进程有活跃任务不能重启。
+
+### 1. 插件管理页里的状态卡片能否显示
+
+**验证方式**：重启 DSH → 侧栏「插件」→ 点开 `@boyingliu01/dsh-aot-runner` → 看详情页里有没有状态区。
+
+**预期**：显示配置开关、loader 状态、exe 路径、熔断阈值，
+配置正常时顶部是绿色「已启用」。
+
+#### 已修正的一个错误（重要）
+
+初版把卡片挂在 `settings.plugin.item` 上，**那个 slot 在 DSH 0.1.7-rc.2 之前就废弃了**，
+官方 0.2.0-rc.2 安装里根本不存在它。证据来自两个第三方插件的源码注释：
+
+- `@goodandready/dsh-context-lens/lib/client.js:612`
+  > "settings.plugin.item was retired before DSH 0.1.7-rc.2 — one occurrence
+  > in the whole 0.1.7-rc.2 tree against 54 of plugins.item"
+- `dsh-fonttune/lib/client.js:13835`
+  > "settings.plugin.item — up to 0.1.5-rc.x"
+
+改用官方当前在用的 **`plugins.row.config`**（`dsh-client-ui-plugin-manager`
+自己就在渲染它），key 格式 `<包名>#<行 id>`，与 DSH 的 `rowConfigKey()` 一致。
+
+> 教训：找 DSH 的 slot 名不能只看「某个第三方插件在用」，
+> 要看**官方当前版本有没有在渲染它**。第三方插件里可能残留历史注册。
+
+**如果卡片仍不出现**，按这个顺序排查：
+1. 浏览器控制台有没有 `client-modules:` 开头的报错
+2. `plugins.row.config` 的 key 格式是否为 `@boyingliu01/dsh-aot-runner#aot-runner`
+3. 备选挂载点：`plugins.bundle.config`（按包名，key = 包名）
+
+**影响范围**：**只影响卡片显示，不影响 AOT runner 本身**。
+插件加速功能早就验证过（AOT 子进程父进程确认为 DSH 主进程），
+最坏情况是卡片看不到，加速照常工作。
+
+### 2. 客户端 bundle 的加载路径
+
+`plugin/package.json` 新增了：
+
+```json
+"exports": { "./client": { "default": "./client/index.js" } },
+"dsh": { "client": { "inject": ["@deepseek-ai/dsh-client-ui-settings"], "platform": "web" } }
+```
+
+已静态核对符合 DSH 的 `client-modules` 契约（`exports["./client"]` 需为字符串
+或带 `default` 的对象），但没有实测过 DSH 真的去加载了它。
+
+**验证线索**：重启后若卡片出现，说明整条链路通了；
+若浏览器控制台有 `client-modules: ...` 开头的报错，把报错贴出来。
+
+---
+
+## 归档状态（2026-11-04）
+
+本任务已归档。交付内容：
+
+- NativeAOT runner 替换 DSH 子进程 runner，实测每次省 92~94ms（约 59%）
+- 插件形态接入，带熔断降级与启动自检
+- 71/71 测试通过，本地质量门禁全绿
+- 已发版 `v0.1.0`，仓库 **private**
+
+**归档时的 open issue 只剩 #12**（累积长期观测数据），属于持续性工作，
+不影响使用，择机跑即可。
+
+**遗留的前置依赖**：xp-gate 尚不支持 C#（[issue #717](https://github.com/boyingliu01/xp-gate/issues/717)），
+主体代码缺少自动化的复杂度/测试/构建门禁覆盖。等上游支持后另起任务重构。

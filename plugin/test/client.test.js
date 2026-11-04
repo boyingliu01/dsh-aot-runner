@@ -166,7 +166,7 @@ test('客户端：settingsScope.bind 抛异常时不冒泡', () => {
 // 3. 正常注册路径
 // ---------------------------------------------------------------------------
 
-test('客户端：settingsScope 就绪后注册 settings.plugin.item', () => {
+test('客户端：settingsScope 就绪后注册 plugins.row.config', () => {
   const { exports } = loadClientBundle();
   const { ctx, scoped, registrations } = makeCtx();
   exports.apply(ctx);
@@ -175,7 +175,7 @@ test('客户端：settingsScope 就绪后注册 settings.plugin.item', () => {
 
   assert.strictEqual(registrations.length, 1);
   const { options, component } = registrations[0];
-  assert.strictEqual(options.name, 'settings.plugin.item');
+  assert.strictEqual(options.name, 'plugins.row.config');
   assert.strictEqual(options.key, '@boyingliu01/dsh-aot-runner#aot-runner');
   assert.strictEqual(typeof component, 'function');
 });
