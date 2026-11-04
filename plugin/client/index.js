@@ -361,9 +361,13 @@ window.__ModuleLoader__.load({
     /**
      * 挂载入口。
      *
-     * 注册到 `settings.plugin.item` —— 设置页里属于某个插件的卡片。
-     * 不用 `plugins.row.config` 是因为它是「整页配置」，本页只读、
-     * 内容也很少，卡片更合适。
+     * 注册到 `plugins.row.config` —— 侧栏「插件」页面里，某个 loader 行的
+     * 专属配置区。key 的格式是 `<包名>#<行 id>`（DSH 的 rowConfigKey 就是这么拼的）。
+     *
+     * **不要用 `settings.plugin.item`**：那个 slot 在 DSH 0.1.7-rc.2 之前
+     * 就被废弃了，官方的 0.2.0-rc.2 安装里完全不存在它。
+     * 只有少数第三方插件还留着对它的注册，且注释里明确写了它已退役
+     * （见 @goodandready/dsh-context-lens 与 dsh-fonttune 的源码注释）。
      *
      * @param {object} ctx 客户端根上下文
      */
@@ -382,10 +386,10 @@ window.__ModuleLoader__.load({
         }
         if (!bound || typeof bound.getSnapshot !== 'function' || typeof bound.subscribe !== 'function') return;
 
-        ctx.slots.inject('settings.plugin.item', function () {
+        ctx.slots.inject('plugins.row.config', function () {
           return ctx.slots.register(
             {
-              name: 'settings.plugin.item',
+              name: 'plugins.row.config',
               key: PKG + '#' + ROW_ID,
               inject: function () { return { settingsScope: bound, ctx: ctx }; },
             },
