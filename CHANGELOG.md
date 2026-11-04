@@ -43,8 +43,14 @@
 ### 已知限制
 
 - 仅 Windows（Job Object 进程树回收依赖 Win32 API）
-- 依赖 DSH 的 `internals` 接缝，该接缝目前被上游缺陷切断
+- 依赖 DSH 的 `internals` 接缝，而 DSH 0.2.0-rc.2 的上游缺陷会切断该接缝
+  —— 需要打补丁（`vendor/README.md`），插件已内置自检，检测到未打补丁会自动停用
+  并明确告警，不会出现「看似启用实则无效」
 - 无设置面板 UI（状态通过日志暴露；需要完整 UI 得写 React 客户端插件）
+- **代码尚未达到项目自定的质量标准**：xp-gate 目前不支持 C#，
+  主体代码（`src/*.cs`）的门禁检查是盲区。
+  已在 xp-gate 提 issue（<https://github.com/boyingliu01/xp-gate/issues/717>），
+  待其支持 C# 后另起任务重构。**在此之前仓库保持 private。**
 
 ## [Unreleased]
 
