@@ -3,6 +3,29 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **DSH 设置页状态卡片**（`plugin/client/`）：只读展示 aot-runner 的生效情况 ——
+  配置开关、loader 加载状态、exe 路径、熔断阈值，并在状态不一致时给出原因。
+  启用/停用仍走侧栏「插件」页面的官方开关，本卡片不重复做开关，
+  避免出现两个真相来源。
+
+  只读而非可写是有意的：客户端跑在浏览器里，读不到服务端内存中的熔断状态，
+  硬做一套 remote 通道来显示它，收益抵不上复杂度。运行时降级仍看日志。
+
+### 修复
+
+- **文档错报默认值**：`plugin/README.md` 写 `enabled` 默认 `true`，
+  而插件包自带 `cordis.patch.yml` 实际是 `false`。
+  `false` 是有意的安全设计（装上不自动接管子进程），改文档而不是改代码。
+
+### 说明
+
+- 明确「两个开关」的区别：侧栏开关卸载 loader 行（代码不加载），
+  `config.enabled` 只跳过注入。切换开关不会丢配置。
+
 ## [0.1.0] - 2026-11-02
 
 首个公开发布。NativeAOT runner 可替代 DSH 的 Node.js runner，并通过插件接入。

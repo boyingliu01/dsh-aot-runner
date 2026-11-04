@@ -126,6 +126,41 @@ export default [
     },
   },
 
+  // 客户端 bundle（浏览器）
+  //
+  // 这个文件是给 DSH 的浏览器端模块加载器用的，不是 Node 模块：
+  //   - 走 `window.__ModuleLoader__.load(...)` 注册，所以需要 window
+  //   - 刻意用 var 和 function 而不是 const/箭头函数 —— 它要在
+  //     未知版本的浏览器里跑，且 `var` 的函数作用域在 bundle 里更安全
+  //   - 不能有 import/export，只能靠 loader 注入的 require()
+  {
+    files: ['plugin/client/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'script',
+      globals: {
+        window: 'readonly',
+        console: 'readonly',
+        Promise: 'readonly',
+        Object: 'readonly',
+        Array: 'readonly',
+        String: 'readonly',
+        Error: 'readonly',
+      },
+    },
+    rules: {
+      'no-var': 'off',
+      'prefer-const': 'off',
+      'no-unused-vars': ['error', {
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrorsIgnorePattern: '^_',
+      }],
+      eqeqeq: ['error', 'smart'],
+      'no-empty': ['error', { allowEmptyCatch: true }],
+    },
+  },
+
   // 仓库测试与基准（CJS，且允许更多自由度）
   {
     files: ['test/**/*.js', 'bench/**/*.js'],
