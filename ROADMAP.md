@@ -245,10 +245,18 @@ node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
 
 ---
 
-## 待确认（下次重启 DSH 后验证）
+## 待确认
 
-以下项目**代码已完成、单元测试已通过，但没有在真实 DSH 里跑过**。
-原因是当时的 DSH 进程有活跃任务不能重启。
+**✅ 已于 2026-11-04 重启 DSH 后验证通过。**
+
+用户确认：侧栏「插件」菜单能列出 `@boyingliu01/dsh-aot-runner`，
+点开后下方有对应的状态说明 —— 客户端 bundle 加载成功，
+`plugins.row.config` 挂载点正确。
+
+同时复核了运行态：AOT runner 子进程的父进程是新的 DSH 主进程（PID 5336），
+说明插件在新会话里正常接管了子进程调用。
+
+下面保留排查记录，供将来 DSH 升级后若出现回归时对照。
 
 ### 1. 插件管理页里的状态卡片能否显示
 
@@ -293,10 +301,10 @@ node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
 ```
 
 已静态核对符合 DSH 的 `client-modules` 契约（`exports["./client"]` 需为字符串
-或带 `default` 的对象），但没有实测过 DSH 真的去加载了它。
+或带 `default` 的对象）。
 
-**验证线索**：重启后若卡片出现，说明整条链路通了；
-若浏览器控制台有 `client-modules: ...` 开头的报错，把报错贴出来。
+**✅ 实测确认**：重启后插件管理页出现状态说明，说明 DSH 确实加载了该 bundle，
+`exports["./client"]` 与 `dsh.client` 声明都被正确识别。
 
 ---
 
