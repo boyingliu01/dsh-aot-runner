@@ -22,10 +22,15 @@
   },
   "main": "./lib/index.js",
   "exports": {
-    ".": "./lib/index.js"
+    ".": "./lib/index.js",
+    "./client": {
+      "default": "./client/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "lib/",
+    "client/",
     "bin/",
     "cordis.patch.yml",
     "README.md"
@@ -33,6 +38,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
   },
   "peerDependencies": {

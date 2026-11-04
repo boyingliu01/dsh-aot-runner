@@ -106,7 +106,9 @@ if [ "$CHECK" = "1" ]; then
   node --check test/e2e-plugin-verify.js
   node --check plugin/lib/index.js
   node --check plugin/lib/circuit-breaker.js
+  node --check plugin/client/index.js
   node --check plugin/test/index.test.js
+  node --check plugin/test/client.test.js
   node --check bench/d1-ab-bench.js
   node --check vendor/patch-dsh.mjs
   node --check scripts/check-version.mjs
