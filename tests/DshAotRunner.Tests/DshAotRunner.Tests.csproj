@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- 测试项目不参与 AOT 发布，也不继承主项目的裁剪/分析器设定 -->
+    <PublishAot>false</PublishAot>
+    <EnableAotAnalyzer>false</EnableAotAnalyzer>
+    <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>9999</WarningLevel>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RootNamespace>DshAotRunner.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- coverlet.collector 提供 "XPlat Code Coverage" 数据收集器。
+         xp-gate 的 Gate 5 会以 collect 参数跑 dotnet test 并解析
+         coverage.cobertura.xml；没有这个包时收集器不存在，
+         dotnet test 仍然通过但**不产出覆盖率文件**，Gate 5 随后报
+         "Could not determine csharp coverage percentage" 并 BLOCK。
+         装上它是为了让覆盖率这个指标真的可测，而不是让门禁闭嘴。
+         注意：XML 注释里不能出现连续两个减号，故此处不写完整命令。 -->
+    <PackageReference Include="coverlet.collector" Version="6.0.4">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 直接链接被测源码，而不是 ProjectReference。
+         主项目是 PublishAot 的 Exe：引用它会拖入 AOT/裁剪配置并试图产出
+         原生镜像，单元测试既不需要也不该付这个代价。
+         直接 Compile 源码则与主项目共用同一份文件（不是副本），
+         重构主项目时测试自动跟着重新编译，不存在两份实现漂移。
+         主项目的 Main 入口在测试宿主里不会被调用（入口由 xunit 提供）。 -->
+    <Compile Include="../../src/**/*.cs" LinkBase="src" />
+    <!-- Program.cs 含 Main 入口，测试宿主有自己的入口，两者共存会报 CS0017。
+         它不是被测目标（只是一层 argv 接线），排除掉不影响覆盖其余逻辑。 -->
+    <Compile Remove="../../src/Program.cs" />
+  </ItemGroup>
+</Project>
