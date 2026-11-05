@@ -31,18 +31,6 @@ namespace DshAotRunner;
 /// </summary>
 internal sealed class IpcChannel : IMessageChannel
 {
-    /// <summary>NODE_HANDLE_NORMAL：普通 JSON 消息。host 发给 runner 的帧都是这个类型。</summary>
-    private const long NodeHandleNormal = 1;
-
-    /// <summary>帧头长度：type(8) + 长度(8)。</summary>
-    private const int HeaderLength = 16;
-
-    /// <summary>
-    /// 单帧长度上限。实测 host 的最大消息量级在 MiB 级（3MiB 的 env 是单帧到达），
-    /// 8MB 足够覆盖真实场景，同时防止畸形帧声明一个天文数字把内存吃光。
-    /// </summary>
-    private const long MaxPayloadLength = 8L * 1024 * 1024;
-
     /// <summary>单次 ReadFile 的请求量。实际返回量由 OS 决定，可能多帧也可能半帧。</summary>
     private const int ReadChunkSize = 64 * 1024;
 
@@ -58,10 +46,8 @@ internal sealed class IpcChannel : IMessageChannel
     private readonly IntPtr _handle;
     private readonly object _sendGate = new();
 
-    /// <summary>待切帧的原始字节。索引 [_consumed, _buffered) 是未消费区间。</summary>
-    private byte[] _buffer = new byte[ReadChunkSize];
-    private int _buffered;
-    private int _consumed;
+    /// <summary>帧切分逻辑（纯字节处理），与 I/O 分离以便单独测试。</summary>
+    private readonly IpcFrameDecoder _decoder = new(ReadChunkSize);
 
     /// <summary>通道是否已到 EOF（对端关闭）。</summary>
     public bool IsClosed { get; private set; }
@@ -95,7 +81,7 @@ internal sealed class IpcChannel : IMessageChannel
             if (IsClosed) return null;
 
             // 缓冲区里已经有一帧完整的？
-            if (TryTakeFrame(out var payload)) return payload;
+            if (_decoder.TryTakeFrame(out var payload)) return payload;
 
             // 没读到足够数据，继续读。
             // 注意：即使缓冲区里已有半帧也要继续读，所以这里不区分「部分数据」和「空」。
@@ -104,103 +90,43 @@ internal sealed class IpcChannel : IMessageChannel
     }
 
     /// <summary>
-    /// 尝试从缓冲区切出一帧完整消息。
-    /// </summary>
-    private bool TryTakeFrame(out string payload)
-    {
-        payload = string.Empty;
-        var available = _buffered - _consumed;
-        if (available < HeaderLength) return false;
-
-        var type = BitConverter.ToInt64(_buffer, _consumed);
-        var length = BitConverter.ToInt64(_buffer, _consumed + 8);
-
-        // 负值 = 内部句柄/命令帧，载荷不是 JSON。冒充 JSON 解析只会得到迷惑性错误。
-        if (type != NodeHandleNormal)
-            throw new IpcProtocolException($"非 JSON 帧：type={type}（只支持 NODE_HANDLE_NORMAL=1）");
-
-        if (length < 0 || length > MaxPayloadLength)
-            throw new IpcProtocolException($"帧长度越界：{length}（上限 {MaxPayloadLength}）");
-
-        if (available < HeaderLength + length) return false;   // 半帧，等更多数据
-
-        payload = Encoding.UTF8.GetString(_buffer, _consumed + HeaderLength, (int)length);
-        _consumed += HeaderLength + (int)length;
-        CompactBuffer();
-        return true;
-    }
-
-    /// <summary>
-    /// 从 fd 3 读一批数据进缓冲区。
+    /// 从 fd 3 读一批数据交给解码器。
     /// </summary>
     /// <returns>读到了数据返回 true；通道 EOF 返回 false（并置 <see cref="IsClosed"/>）。</returns>
     private bool Fill()
     {
-        EnsureWritable(ReadChunkSize);
-
-        var space = _buffer.Length - _buffered;
-        if (space == 0)
-        {
-            // 缓冲区满但仍无完整帧 → 帧长度声明超出上限，或者没能切帧
-            throw new IpcProtocolException(
-                $"读缓冲区已满（{_buffer.Length} 字节）仍无法切出完整帧");
-        }
-
-        // 直接读进缓冲区的空闲区间：ReadFile 只写 [0, space)，不会碰已消费区间。
-        // 用一个临时数组是因为 P/Invoke 要从数组起始处写，而我们想写到 _buffered 处，
-        // 所以这里读小批再拷 —— 64KB 一次，代价可忽略。
-        var chunk = new byte[Math.Min(space, ReadChunkSize)];
+        var chunk = new byte[ReadChunkSize];
         var ok = Native.ReadFile(_handle, chunk, (uint)chunk.Length, out var got, IntPtr.Zero);
 
-        if (!ok || got == 0)
+        if (ok && got > 0)
         {
-            // 关键：disconnect 之后是 (ok=false, err=109)，不是 (ok=true, got=0)。
-            // 只判 got==0 会让进程在 detach 后永远挂着（Issue #3 同类问题）。
-            var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-            var isEof = got == 0
-                        || err == Native.ERROR_BROKEN_PIPE
-                        || err == Native.ERROR_NO_DATA;
-
-            if (isEof)
-            {
-                IsClosed = true;
-                Trace.Write($"ipc: EOF (ok={ok} got={got} err={err})");
-                return false;
-            }
-
-            throw new IpcProtocolException($"ReadFile 失败：err={err}");
+            _decoder.Append(chunk.AsSpan(0, (int)got));
+            return true;
         }
 
-        Buffer.BlockCopy(chunk, 0, _buffer, _buffered, (int)got);
-        _buffered += (int)got;
-        return true;
+        // 关键：disconnect 之后是 (ok=false, err=109)，不是 (ok=true, got=0)。
+        // 只判 got==0 会让进程在 detach 后永远挂着（Issue #3 同类问题）。
+        var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        if (IsEndOfStream(got, err))
+        {
+            IsClosed = true;
+            Trace.Write($"ipc: EOF (ok={ok} got={got} err={err})");
+            return false;
+        }
+
+        throw new IpcProtocolException($"ReadFile 失败：err={err}");
     }
 
-    /// <summary>确保缓冲区至少还能容纳 <paramref name="needed"/> 字节（必要时扩容/前移）。</summary>
-    private void EnsureWritable(int needed)
-    {
-        if (_buffer.Length - _buffered >= needed) return;
-
-        // 先把已消费的部分移出去
-        CompactBuffer();
-        if (_buffer.Length - _buffered >= needed) return;
-
-        // 还不够就扩容，但不超过帧上限的两倍（防止被畸形帧撑爆内存）
-        var target = Math.Max(_buffer.Length * 2, _buffered + needed);
-        var cap = (int)(MaxPayloadLength + HeaderLength) * 2;
-        target = Math.Min(target, Math.Max(cap, _buffered + needed));
-        Array.Resize(ref _buffer, target);
-    }
-
-    /// <summary>把未消费区间前移到缓冲区开头。</summary>
-    private void CompactBuffer()
-    {
-        if (_consumed == 0) return;
-        var remaining = _buffered - _consumed;
-        if (remaining > 0) Buffer.BlockCopy(_buffer, _consumed, _buffer, 0, remaining);
-        _buffered = remaining;
-        _consumed = 0;
-    }
+    /// <summary>
+    /// 这批读结果是否代表通道正常结束（对端关闭）。
+    /// </summary>
+    /// <remarks>
+    /// 三种形态都算 EOF：读回 0 字节、ERROR_BROKEN_PIPE(109)、ERROR_NO_DATA(233)。
+    /// 单独成方法是因为它是「哪些 Win32 状态算正常关闭」的知识点，
+    /// 和「读到数据怎么处理」不是同一层关注点。
+    /// </remarks>
+    private static bool IsEndOfStream(uint got, int err) =>
+        got == 0 || err == Native.ERROR_BROKEN_PIPE || err == Native.ERROR_NO_DATA;
 
     /// <summary>
     /// 向 host 发送一条消息。<paramref name="json"/> 是不含换行的 JSON 文本。
@@ -214,10 +140,10 @@ internal sealed class IpcChannel : IMessageChannel
         if (IsClosed) return;
 
         var payload = Encoding.UTF8.GetBytes(json + "\n");
-        var frame = new byte[HeaderLength + payload.Length];
-        BitConverter.GetBytes(NodeHandleNormal).CopyTo(frame, 0);
+        var frame = new byte[IpcFrameDecoder.HeaderLength + payload.Length];
+        BitConverter.GetBytes(IpcFrameDecoder.NodeHandleNormal).CopyTo(frame, 0);
         BitConverter.GetBytes((long)payload.Length).CopyTo(frame, 8);
-        payload.CopyTo(frame, HeaderLength);
+        payload.CopyTo(frame, IpcFrameDecoder.HeaderLength);
 
         lock (_sendGate) WriteAll(frame);
     }
@@ -237,18 +163,29 @@ internal sealed class IpcChannel : IMessageChannel
         {
             // 已写入的部分不需要再拷：首轮直接用原数组，续写时构造剩余片段的副本
             var chunk = offset == 0 ? frame : frame[offset..];
-            var len = offset == 0 ? (uint)frame.Length : (uint)chunk.Length;
-
-            if (!Native.WriteFile(_handle, chunk, len, out var written, IntPtr.Zero))
-            {
-                var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                throw new IpcProtocolException($"WriteFile 失败：err={err}");
-            }
-            if (written == 0)
-                throw new IpcProtocolException("WriteFile 返回 0 字节，通道可能已关闭");
-
-            offset += (int)written;
+            offset += WriteChunk(chunk);
         }
+    }
+
+    /// <summary>
+    /// 写一段并返回实际写入的字节数。
+    /// </summary>
+    /// <remarks>
+    /// 独立成方法是为了把「WriteFile 的两种失败形态」的判断收在一处：
+    /// 返回 false（带 Win32 错误码）和返回 true 但写了 0 字节（通道已关）。
+    /// 循环本身只关心「这轮推进了多少」。
+    /// </remarks>
+    private int WriteChunk(byte[] chunk)
+    {
+        if (!Native.WriteFile(_handle, chunk, (uint)chunk.Length, out var written, IntPtr.Zero))
+        {
+            var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            throw new IpcProtocolException($"WriteFile 失败：err={err}");
+        }
+        if (written == 0)
+            throw new IpcProtocolException("WriteFile 返回 0 字节，通道可能已关闭");
+
+        return (int)written;
     }
 
     /// <summary>

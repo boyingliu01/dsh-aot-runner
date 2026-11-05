@@ -56,4 +56,13 @@
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- tests/ 是独立的测试项目（有自己的 csproj 与 xunit 依赖）。
+         SDK 默认的 **/*.cs 通配会把 tests/ 下的 .cs 一起编进主项目，
+         结果是主项目编译时找不到 xunit 类型（CS0246），
+         而且测试代码会被打进 AOT 产物。这里显式排除。 -->
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
 </Project>

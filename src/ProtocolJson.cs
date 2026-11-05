@@ -133,28 +133,37 @@ internal static class ProtocolJson
         AppendString(sb, value);
     }
 
+    /// <summary>
+    /// 单字符转义表：字符 → 转义序列。
+    /// </summary>
+    /// <remarks>
+    /// 用查表代替 7 分支 switch：这些转义是固定映射，没有判断逻辑，
+    /// 写成 switch 只是让复杂度计数器变高，读起来也更长。
+    /// 表里没有的字符走「可打印则原样、否则 \uXXXX」这条唯一的分支。
+    /// </remarks>
+    private static readonly Dictionary<char, string> EscapeMap = new(7)
+    {
+        ['"'] = "\\\"",
+        ['\\'] = "\\\\",
+        ['\n'] = "\\n",
+        ['\r'] = "\\r",
+        ['\t'] = "\\t",
+        ['\b'] = "\\b",
+        ['\f'] = "\\f",
+    };
+
     /// <summary>最小 JSON 字符串转义（等价于 JavaScriptEncoder.Default 对常见字符的行为）。</summary>
     internal static void AppendString(StringBuilder sb, string s)
     {
         sb.Append('"');
         foreach (var c in s)
         {
-            switch (c)
-            {
-                case '"': sb.Append("\\\""); break;
-                case '\\': sb.Append("\\\\"); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                case '\b': sb.Append("\\b"); break;
-                case '\f': sb.Append("\\f"); break;
-                default:
-                    if (c < 0x20 || c > 0x7E)
-                        sb.Append("\\u").Append(((int)c).ToString("x4"));
-                    else
-                        sb.Append(c);
-                    break;
-            }
+            if (EscapeMap.TryGetValue(c, out var escaped))
+                sb.Append(escaped);
+            else if (c < 0x20 || c > 0x7E)
+                sb.Append("\\u").Append(((int)c).ToString("x4"));
+            else
+                sb.Append(c);
         }
         sb.Append('"');
     }
