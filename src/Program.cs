@@ -35,23 +35,7 @@ internal static class Program
         // 消费私有选择器（对齐 runnerEnvironment 行为）
         try { Environment.SetEnvironmentVariable(EnvSelector, null); } catch { }
 
-        // --ndjson 调试开关：允许手工用管道驱动 runner（见 NdjsonChannel 的注释）。
-        // 必须在 argv 解析**之前**摘掉，否则它会被当成 target 的程序名。
-        var ndjson = rawArgs.Contains(NdjsonFlag);
-        if (ndjson) rawArgs = rawArgs.Where(a => a != NdjsonFlag).ToArray();
-
-        // argv 形如：runner.exe -- <target> [args...]
-        var argv = rawArgs;
-        if (argv.Length > 0 && argv[0] == "--")
-        {
-            argv = argv[1..];
-        }
-        else if (argv.Length > 0 && argv[0].EndsWith(".js", StringComparison.OrdinalIgnoreCase))
-        {
-            var idx = Array.IndexOf(argv, "--");
-            if (idx >= 0) argv = argv[(idx + 1)..];
-        }
-
+        var (argv, ndjson) = ArgParsing.ParseArgs(rawArgs, NdjsonFlag);
         Trace.Write($"parsed argv=[{string.Join("|", argv)}] ndjson={ndjson}");
 
         if (argv.Length == 0 || string.IsNullOrEmpty(argv[0]))

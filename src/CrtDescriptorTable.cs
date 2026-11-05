@@ -76,37 +76,50 @@ internal static class CrtDescriptorTable
             BinaryPrimitives.WriteUInt64LittleEndian(
                 block.AsSpan(handlesOffset + i * HandleBytes, HandleBytes), ulong.MaxValue);
 
-        Fill(0, stdin);
-        Fill(1, stdout);
-        Fill(2, stderr);
-        Fill(ControlFileDescriptor, control);
+        FillSlot(block, flagsOffset, handlesOffset, 0, stdin);
+        FillSlot(block, flagsOffset, handlesOffset, 1, stdout);
+        FillSlot(block, flagsOffset, handlesOffset, 2, stderr);
+        FillSlot(block, flagsOffset, handlesOffset, ControlFileDescriptor, control);
 
         return block;
+    }
 
-        void Fill(int fd, IntPtr handle)
+    /// <summary>
+    /// 把单个句柄写进描述符表的对应槽（flag + 句柄值）。
+    /// </summary>
+    /// <remarks>
+    /// 局部函数改成静态方法是为了让 <see cref="Encode"/> 只表达
+    /// 「先铺无效值、再按 fd 顺序填四个槽」的编排意图；
+    /// 槽位校验与 flag 计算是另一层关注点，放在这里各自独立可读。
+    /// </remarks>
+    private static void FillSlot(byte[] block, int flagsOffset, int handlesOffset, int fd, IntPtr handle)
+    {
+        if (!IsValidHandle(handle)) return;
+
+        var fileType = Native.GetFileType(handle);
+
+        // NUL 陷阱：runner 自己的 fd 0/1/2 在真实 host 布局下是 \\?\NUL
+        // 字符设备。把它填进 target 的标准槽会让 target 输出静默消失。
+        // 这里显式拒绝 —— 宁可启动期报错，也不要一条「成功但没输出」的记录。
+        if (fileType == FILE_TYPE_CHAR && IsStandardSlot(fd))
         {
-            if (!IsValidHandle(handle)) return;
-
-            var fileType = Native.GetFileType(handle);
-
-            // NUL 陷阱：runner 自己的 fd 0/1/2 在真实 host 布局下是 \\?\NUL
-            // 字符设备。把它填进 target 的标准槽会让 target 输出静默消失。
-            // 这里显式拒绝 —— 宁可启动期报错，也不要一条「成功但没输出」的记录。
-            if (fileType == FILE_TYPE_CHAR && IsStandardSlot(fd))
-            {
-                throw new InvalidOperationException(
-                    $"fd {fd} 要填的句柄是字符设备（很可能是 NUL）：这会让 target 的输出静默丢失。"
-                    + " 请检查 host 是否真的传了 fd 4/5/6。");
-            }
-
-            var flags = (byte)FOPEN;
-            if (fileType == FILE_TYPE_PIPE) flags |= FPIPE;
-            else if (fileType == FILE_TYPE_CHAR) flags |= FDEV;
-
-            block[flagsOffset + fd] = flags;
-            BinaryPrimitives.WriteUInt64LittleEndian(
-                block.AsSpan(handlesOffset + fd * HandleBytes, HandleBytes), (ulong)handle.ToInt64());
+            throw new InvalidOperationException(
+                $"fd {fd} 要填的句柄是字符设备（很可能是 NUL）：这会让 target 的输出静默丢失。"
+                + " 请检查 host 是否真的传了 fd 4/5/6。");
         }
+
+        block[flagsOffset + fd] = BuildFlags(fileType);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            block.AsSpan(handlesOffset + fd * HandleBytes, HandleBytes), (ulong)handle.ToInt64());
+    }
+
+    /// <summary>把 Win32 文件类型映射成 CRT 描述符 flag（FOPEN 总是置位）。</summary>
+    private static byte BuildFlags(int fileType)
+    {
+        var flags = (byte)FOPEN;
+        if (fileType == FILE_TYPE_PIPE) flags |= FPIPE;
+        else if (fileType == FILE_TYPE_CHAR) flags |= FDEV;
+        return flags;
     }
 
     /// <summary>判断是否是 target 的三个标准槽（0/1/2）—— control 槽不受此限制。</summary>

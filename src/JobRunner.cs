@@ -50,6 +50,32 @@ internal sealed class JobRunner : IDisposable
         // 这套结构对 IPC 同样必要：Windows 管道上的 ReadFile 会真阻塞，
         // 且 disconnect 后返回的是 ERROR_BROKEN_PIPE 而非 0 字节。
         var inbox = new BlockingCollection<string?>(new ConcurrentQueue<string?>());
+        var readerThread = StartReaderThread(inbox);
+
+        try
+        {
+            PumpMessages(inbox);
+        }
+        finally
+        {
+            ReleaseOwnedJob();
+            // 读线程是后台线程，进程退出不会被它拖住；这里不 Join，
+            // 因为它可能正阻塞在一个永不到来的 ReadFile 上。
+            _ = readerThread;
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// 启动后台读线程，把通道消息（含 EOF 的 null）投进 <paramref name="inbox"/>。
+    /// </summary>
+    /// <remarks>
+    /// 单独抽出的理由：线程体里既有正常读取循环，又有异常转换（读失败等同 EOF），
+    /// 这两件事和主循环的「等待-分发」逻辑互不相干，混在一个方法里
+    /// 会让 <see cref="Run"/> 同时负责线程管理与协议推进。
+    /// </remarks>
+    private Thread StartReaderThread(BlockingCollection<string?> inbox)
+    {
         var readerThread = new Thread(() =>
         {
             try
@@ -70,31 +96,43 @@ internal sealed class JobRunner : IDisposable
         })
         { IsBackground = true, Name = "ipc-reader" };
         readerThread.Start();
+        return readerThread;
+    }
 
-        try
+    /// <summary>
+    /// 主循环：从 <paramref name="inbox"/> 取消息并处理，直到 finished。
+    /// </summary>
+    /// <remarks>
+    /// 等待设了 50ms 超时，于是 <c>_finished</c> 一旦置位就能及时退出 ——
+    /// 这是 Issue #3（terminate 后 runner 泄漏）的修复要点，不要改成无限等待。
+    /// </remarks>
+    private void PumpMessages(BlockingCollection<string?> inbox)
+    {
+        while (!_finished)
         {
-            while (!_finished)
+            if (!inbox.TryTake(out var message, 50))
+                continue;                            // 超时 → 回头看 _finished
+
+            if (message is null)
             {
-                if (!inbox.TryTake(out var message, 50))
-                    continue;                        // 超时 → 回头看 _finished
-
-                if (message is null)
-                {
-                    if (_finished) break;            // Finish 之后的 EOF，正常收尾
-                    OnDisconnect();
-                    break;
-                }
-
-                if (message.Length == 0) continue;
-                Trace.Timed($"got message: {message}");
-                HandleMessage(message);
+                HandleEof();
+                return;
             }
+
+            if (message.Length == 0) continue;
+            Trace.Timed($"got message: {message}");
+            HandleMessage(message);
         }
-        finally
-        {
-            ReleaseOwnedJob();
-        }
-        return 0;
+    }
+
+    /// <summary>
+    /// 通道 EOF 时的收尾：已 Finish 过属正常结束，否则是 host 断开。
+    /// </summary>
+    private void HandleEof()
+    {
+        // Finish 之后到来的 EOF 是预期内收尾（host 收完结果才断开），
+        // 此时不能再走 OnDisconnect —— 那会重复投递一次错误结果。
+        if (!_finished) OnDisconnect();
     }
 
     private void HandleMessage(string line)
@@ -113,32 +151,45 @@ internal sealed class JobRunner : IDisposable
             return;
         }
 
-        if (type == "terminate")
+        switch (type)
         {
-            RequestTermination();
+            case "terminate":
+                RequestTermination();
+                return;
+            case "start":
+                HandleStartMessage(line);
+                return;
+            default:
+                FailProtocol($"unknown message type: {type}");
+                return;
+        }
+    }
+
+    /// <summary>
+    /// 处理 start 消息：校验重复、解析请求、交给 <see cref="HandleStart"/>。
+    /// </summary>
+    /// <remarks>
+    /// 从 <see cref="HandleMessage"/> 分出来，让后者只做「type → 分派」的扁平判断，
+    /// 而 start 自己的三条前置校验（重复 start / 解析失败 / 正常）独立成段。
+    /// </remarks>
+    private void HandleStartMessage(string line)
+    {
+        if (_startSeen)
+        {
+            // RUNNER-SPEC §4.2：重复 start 报错
+            FailProtocol("received more than one Windows start request");
             return;
         }
 
-        if (type == "start")
+        _startSeen = true;
+        var req = ProtocolJson.ParseStart(line, out var parseError);
+        if (req is null)
         {
-            if (_startSeen)
-            {
-                // RUNNER-SPEC §4.2：重复 start 报错
-                FailProtocol("received more than one Windows start request");
-                return;
-            }
-            _startSeen = true;
-            var req = ProtocolJson.ParseStart(line, out var parseError);
-            if (req is null)
-            {
-                FailProtocol($"invalid start request: {parseError ?? "parse failed"}");
-                return;
-            }
-            HandleStart(req);
+            FailProtocol($"invalid start request: {parseError ?? "parse failed"}");
             return;
         }
 
-        FailProtocol($"unknown message type: {type}");
+        HandleStart(req);
     }
 
     // ---------------- start ----------------
@@ -222,7 +273,7 @@ internal sealed class JobRunner : IDisposable
 
         // ---- 3a. control channel（Issue #2）----
         var controlRequested = req.Control == "pipe";
-        var hControl = controlRequested ? Native.CrtGetOsFHandle(CrtDescriptorTable.ControlFileDescriptor) : IntPtr.Zero;
+        var hControl = ResolveControlHandle(controlRequested);
         if (controlRequested && !IsValid(hControl))
         {
             // host 声明了 control 却没传可用的 fd 7：这是 host 侧契约违约，
@@ -232,11 +283,42 @@ internal sealed class JobRunner : IDisposable
         }
 
         // ---- 3b. 精确控制继承：只放行 target 需要的句柄 ----
-        var targetHandles = controlRequested
+        var inheritToggled = EnableInheritanceFor(CollectTargetHandles(stdio, controlRequested, hControl));
+        LaunchWithDescriptorTable(req, job, appName, cmdline, envBlock, stdio, hControl, inheritToggled);
+
+        // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
+        // 那是实验残留 —— runner 是 console 程序，fd 0/1/2 由 host 映射到 target 的
+        // stdout/stderr，动它们会连带关掉输出通道，而抑制继承本来就不依赖这一步。
+        // 真正保证 target 拿不到协议句柄的是：fd 4/5/6 之外不额外打开可继承句柄，
+        // 且 CreateProcessW 返回后立刻在 finally 里恢复所有被改过的标志。
+
+    }
+
+    /// <summary>
+    /// 解析 control channel 句柄；未请求 control 时返回无效值。
+    /// </summary>
+    private static IntPtr ResolveControlHandle(bool controlRequested) =>
+        controlRequested ? Native.CrtGetOsFHandle(CrtDescriptorTable.ControlFileDescriptor) : IntPtr.Zero;
+
+    /// <summary>收集需要放行继承的句柄集合（control 可选）。</summary>
+    private static IntPtr[] CollectTargetHandles(StdioHandles stdio, bool controlRequested, IntPtr hControl) =>
+        controlRequested
             ? new[] { stdio.In, stdio.Out, stdio.Err, hControl }
             : new[] { stdio.In, stdio.Out, stdio.Err };
-        var inheritToggled = EnableInheritanceFor(targetHandles);
 
+    /// <summary>
+    /// 编码 CRT 描述符表并完成进程启动，finally 里释放非托管内存。
+    /// </summary>
+    /// <remarks>
+    /// 单独成方法是为了让 <see cref="SpawnTarget"/> 只表达「准备阶段」，
+    /// 而「分配-启动-释放」这段必须成对出现的生命周期收在一个方法里，
+    /// 减少有人在中间插入 early return 而漏掉 FreeHGlobal 的机会。
+    /// </remarks>
+    private void LaunchWithDescriptorTable(
+        StartRequest req, SafeJobHandle job, string appName, string cmdline,
+        byte[] envBlock, StdioHandles stdio, IntPtr hControl,
+        List<(IntPtr Handle, bool WasInheritable)> inheritToggled)
+    {
         // CRT 描述符表：只有 control 请求时才需要（其余情况走默认标准句柄表）
         var descriptorTable = CrtDescriptorTable.Encode(stdio.In, stdio.Out, stdio.Err, hControl);
         var descriptorPtr = IntPtr.Zero;
@@ -246,14 +328,7 @@ internal sealed class JobRunner : IDisposable
             Marshal.Copy(descriptorTable, 0, descriptorPtr, descriptorTable.Length);
         }
 
-        // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
-        // 那是实验残留 —— runner 是 console 程序，fd 0/1/2 由 host 映射到 target 的
-        // stdout/stderr，动它们会连带关掉输出通道，而抑制继承本来就不依赖这一步。
-        // 真正保证 target 拿不到协议句柄的是：fd 4/5/6 之外不额外打开可继承句柄，
-        // 且 CreateProcessW 返回后立刻在 finally 里恢复所有被改过的标志。
-
         var si = BuildStartupInfo(stdio, descriptorTable, descriptorPtr);
-
         try
         {
             LaunchProcess(req, job, appName, cmdline, envBlock, si, inheritToggled);
@@ -500,18 +575,29 @@ internal sealed class JobRunner : IDisposable
     }
 
     /// <summary>把路径规范化为 Windows 反斜杠格式；空值返回 null（表示继承当前目录）。</summary>
-    private static string? NormalizeWindowsPath(string? path)
+    /// <remarks>
+    /// 三条独立规则依次应用：统一分隔符 → 去掉末尾多余反斜杠 → 裸盘符补根斜杠。
+    /// 每条规则都写成单独一行并在注释里点明「为什么」，比串成一串条件判断更容易核对。
+    /// </remarks>
+    internal static string? NormalizeWindowsPath(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
-        const char Bs = '\\';
-        var normalized = path.Replace('/', Bs);
-        // 去掉末尾多余的反斜杠（但保留根路径如 "C:\"）
-        if (normalized.Length > 3 && normalized.EndsWith(Bs))
-            normalized = normalized.TrimEnd(Bs);
-        if (normalized.Length == 2 && normalized[1] == ':')
-            normalized += Bs;
+
+        // 1) 统一分隔符：Windows API 与 node 侧都用反斜杠
+        var normalized = path.Replace('/', '\\');
+
+        // 2) 去掉末尾多余的反斜杠（但保留根路径如 "C:\"）
+        if (normalized.Length > 3 && normalized.EndsWith('\\'))
+            normalized = normalized.TrimEnd('\\');
+
+        // 3) 裸盘符（"C:"）补成 "C:\"，否则它表示「盘符当前目录」而非根目录
+        if (IsBareDrive(normalized)) normalized += '\\';
+
         return normalized;
     }
+
+    /// <summary>是否是没有任何路径部分的裸盘符（形如 <c>C:</c>）。</summary>
+    private static bool IsBareDrive(string path) => path.Length == 2 && path[1] == ':';
 
     private static bool IsValid(IntPtr h) => h != IntPtr.Zero && h != new IntPtr(-1);
 
@@ -530,7 +616,7 @@ internal sealed class JobRunner : IDisposable
     ///   4. 全部候选都不存在 → 返回 null，由调用方产出 ENOENT 错误，
     ///      而不是把裸名交给 CreateProcessW（那会产生不同的错误文本）。
     /// </summary>
-    private static string? ResolveExecutable(string program, string? cwd, Dictionary<string, string>? env)
+    internal static string? ResolveExecutable(string program, string? cwd, Dictionary<string, string>? env)
     {
         if (string.IsNullOrEmpty(program)) return null;
 
@@ -554,7 +640,7 @@ internal sealed class JobRunner : IDisposable
     /// <summary>
     /// 候选名顺序：自带扩展名的原样名 → .com → .exe（与 libuv 一致）。
     /// </summary>
-    private static List<string> BuildExecutableCandidates(string name)
+    internal static List<string> BuildExecutableCandidates(string name)
     {
         // 扩展名判定：点号存在且不是最后一个字符
         var dot = name.IndexOf('.');
@@ -571,7 +657,7 @@ internal sealed class JobRunner : IDisposable
     /// <summary>
     /// 搜索根：带路径 → 只有该目录；不带路径 → cwd（可禁用）+ 各 PATH 目录。
     /// </summary>
-    private static List<string> BuildSearchRoots(bool hasPath, string directory, Dictionary<string, string>? env)
+    internal static List<string> BuildSearchRoots(bool hasPath, string directory, Dictionary<string, string>? env)
     {
         var roots = new List<string>(8);
         if (hasPath)
@@ -590,7 +676,7 @@ internal sealed class JobRunner : IDisposable
     }
 
     /// <summary>在某个基准路径下依次探测候选名，返回第一个存在的。</summary>
-    private static string? ProbeCandidates(string basePath, List<string> candidates)
+    internal static string? ProbeCandidates(string basePath, List<string> candidates)
     {
         foreach (var candidate in candidates)
         {
@@ -606,21 +692,25 @@ internal sealed class JobRunner : IDisposable
     }
 
     /// <summary>定位文件名在整条路径中的起始索引（跳过 "C:\dir\" 这类前缀）。</summary>
-    private static int WindowsFileNameStart(string command)
+    /// <remarks>
+    /// 从尾部向前扫到第一个分隔符或盘符冒号即可 —— 用 LastIndexOfAny 表达同一意图，
+    /// 比手写递减循环少一层「i 越界 / 提前 return」的状态。
+    /// 盘符特例（"C:name" 这种无目录写法）单独一次判断，语义更直白。
+    /// </remarks>
+    internal static int WindowsFileNameStart(string command)
     {
-        var i = command.Length;
-        while (i > 0)
-        {
-            var c = command[i - 1];
-            if (c == '\\' || c == '/') return i;
-            if (c == ':' && i == 2) return i;   // 盘符，文件名从盘符后开始
-            i--;
-        }
+        var sep = command.LastIndexOfAny(['\\', '/']);
+        if (sep >= 0) return sep + 1;
+
+        // 无分隔符但形如 "C:name"：文件名从盘符后开始
+        // （"C:" 本身也返回 2，与原实现一致：此时 name 为空串）
+        if (command.Length >= 2 && command[1] == ':') return 2;
+
         return 0;
     }
 
     /// <summary>把 PATH 拆成目录列表（分号分隔，去引号与空项）。</summary>
-    private static IEnumerable<string> SplitPath(string pathVar)
+    internal static IEnumerable<string> SplitPath(string pathVar)
     {
         foreach (var raw in pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -630,7 +720,7 @@ internal sealed class JobRunner : IDisposable
     }
 
     /// <summary>按大小写不敏感取环境变量值。</summary>
-    private static string? GetEnvValue(Dictionary<string, string>? env, string key)
+    internal static string? GetEnvValue(Dictionary<string, string>? env, string key)
     {
         if (env is null) return null;
         foreach (var kv in env)
@@ -641,14 +731,14 @@ internal sealed class JobRunner : IDisposable
     }
 
     /// <summary>把搜索根与文件名拼成基路径；根为空时用 cwd（对齐 windowsSearchPathJoin）。</summary>
-    private static string WindowsSearchPathJoin(string root, string name, string cwd)
+    internal static string WindowsSearchPathJoin(string root, string name, string cwd)
     {
         if (root.Length == 0)
             return cwd.Length == 0 ? "" : cwd.TrimEnd('\\', '/') + "\\";
         return root.TrimEnd('\\', '/') + "\\";
     }
 
-    private static string BuildCommandLine(string[] argv)
+    internal static string BuildCommandLine(string[] argv)
     {
         var sb = new StringBuilder();
         for (var i = 0; i < argv.Length; i++)
@@ -663,7 +753,7 @@ internal sealed class JobRunner : IDisposable
     private static readonly char[] QuoteRequiredChars = { ' ', '\t', '"' };
 
     /// <summary>按 Windows 命令行解析规则加引号（CommandLineToArgvW 兼容）。</summary>
-    private static void AppendQuoted(StringBuilder sb, string arg)
+    internal static void AppendQuoted(StringBuilder sb, string arg)
     {
         if (arg.Length > 0 && arg.IndexOfAny(QuoteRequiredChars) < 0)
         {
@@ -691,7 +781,7 @@ internal sealed class JobRunner : IDisposable
         sb.Append('"');
     }
 
-    private static byte[] BuildEnvironmentBlock(Dictionary<string, string> env)
+    internal static byte[] BuildEnvironmentBlock(Dictionary<string, string> env)
     {
         // CREATE_UNICODE_ENVIRONMENT 要求：
         //   每个 "KEY=VALUE" 以 \0 结尾，整块再以一个**额外的** \0 结尾（双 null 终止）。
@@ -755,18 +845,31 @@ internal sealed class JobRunner : IDisposable
 
     private void Poll()
     {
-        var process = _process;
-        var job = _job;
-
         // 先看 target 是否已退出；退出了就不必再管 job
-        if (TryPublishExit(process)) return;
+        if (TryPublishExit(_process)) return;
 
-        if (job is not null && !job.IsInvalid && !job.IsClosed && job.IsEmpty())
-        {
-            job.Dispose();
-            _job = null;
-            if (_resultDelivered) Finish();
-        }
+        // target 还在跑（或已无 process 句柄）时，检查 job 是否已空。
+        // job 空 = 里面没有活着的进程 = 整棵进程树都已回收。
+        if (IsJobEmptiable() && _resultDelivered) Finish();
+    }
+
+    /// <summary>
+    /// job 存在且为空时释放它并返回 true；否则返回 false。
+    /// </summary>
+    /// <remarks>
+    /// 「是否为空」的四个前提（非 null / 有效 / 未关闭 / IsEmpty）本身就是一个复合判断，
+    /// 单独抽出来让 <see cref="Poll"/> 只表达「空了就收尾」这一个意图，
+    /// 而不是把四个句柄状态检查揉进主循环里。
+    /// </remarks>
+    private bool IsJobEmptiable()
+    {
+        var job = _job;
+        if (job is null || job.IsInvalid || job.IsClosed) return false;
+        if (!job.IsEmpty()) return false;
+
+        job.Dispose();
+        _job = null;
+        return true;
     }
 
     /// <summary>
@@ -775,18 +878,30 @@ internal sealed class JobRunner : IDisposable
     /// </summary>
     private bool TryPublishExit(SafeKernelHandle? process)
     {
-        if (process is null || process.IsInvalid || process.IsClosed) return false;
-
-        if (!Native.GetExitCodeProcess(process.DangerousGetHandle(), out var code)) return false;
-        if (code == Native.STILL_ACTIVE) return false;
+        if (!TryReadExitCode(process, out var code)) return false;
 
         Trace.Timed($"target exited code={code}");
 
-        process.Dispose();
+        process!.Dispose();
         _process = null;
         // RUNNER-SPEC §6.1：投递 target-exit
         PublishResult(new TargetExitResult { ExitCode = (int)code });
         return true;
+    }
+
+    /// <summary>
+    /// 读取 target 的退出码；尚未退出（含句柄不可用）时返回 false。
+    /// </summary>
+    /// <remarks>
+    /// 把「句柄是否可读」和「是否仍在运行」这两组前置判断从
+    /// <see cref="TryPublishExit"/> 里分出来，后者就只剩「退出码处理」一个意图。
+    /// </remarks>
+    private static bool TryReadExitCode(SafeKernelHandle? process, out uint code)
+    {
+        code = 0;
+        if (process is null || process.IsInvalid || process.IsClosed) return false;
+        if (!Native.GetExitCodeProcess(process.DangerousGetHandle(), out code)) return false;
+        return code != Native.STILL_ACTIVE;
     }
 
     // ---------------- terminate ----------------
@@ -938,27 +1053,36 @@ internal sealed class JobRunner : IDisposable
     /// RUNNER-SPEC §8 / §9 清理顺序：TerminateJob → CloseJob → CloseProcess
     /// 顺序不可调换（架构专家指出：Job 先关会导致子进程逃逸）
     /// </summary>
+    /// <remarks>
+    /// 三个句柄的释放形状完全一致（终止/关闭 + 置 null + 吞掉异常），
+    /// 所以收敛成 <see cref="ReleaseHandle{T}"/> 一处实现。
+    /// 这样改的是「每个句柄只声明自己的释放动作」，而不是重复三遍
+    /// 同样的 try/catch 骨架 —— 少掉的重复也正好是原先的复杂度来源。
+    /// </remarks>
     private void ReleaseOwnedJob()
     {
         lock (_gate)
         {
-            if (_job is not null)
-            {
-                try { _job.Terminate(1); } catch { }
-                try { _job.Dispose(); } catch { }
-                _job = null;
-            }
-            if (_process is not null)
-            {
-                try { _process.Dispose(); } catch { }
-                _process = null;
-            }
-            if (_thread is not null)
-            {
-                try { _thread.Dispose(); } catch { }
-                _thread = null;
-            }
+            _job = ReleaseHandle(_job, static j => j.Terminate(1));
+            _process = ReleaseHandle(_process, static _ => { });
+            _thread = ReleaseHandle(_thread, static _ => { });
         }
+    }
+
+    /// <summary>
+    /// 释放一个可选句柄：先执行 <paramref name="beforeDispose"/>，再 Dispose，
+    /// 任何异常都吞掉（清理路径不该因为单个句柄失败而中断），最后返回 null。
+    /// </summary>
+    /// <remarks>
+    /// 泛型 + 约束到 IDisposable：Job/Process/Thread 三种句柄走同一条清理路径，
+    /// 调用方只描述「额外要先做什么」，不必再写一遍 try/catch/置 null。
+    /// </remarks>
+    private static T? ReleaseHandle<T>(T? handle, Action<T> beforeDispose) where T : class, IDisposable
+    {
+        if (handle is null) return null;
+        try { beforeDispose(handle); } catch { }
+        try { handle.Dispose(); } catch { }
+        return null;
     }
 
     /// <summary>
@@ -996,33 +1120,51 @@ internal sealed class LineReader
         // 改为整块读入 64KB 缓冲，再从内存里切行。
         while (true)
         {
-            if (_chunkPos >= _chunkLen)
-            {
-                _chunkLen = _stream.Read(_chunk, 0, _chunk.Length);
-                _chunkPos = 0;
-                if (_chunkLen <= 0)
-                {
-                    if (_buffer.Count == 0) return null;
-                    var tail = Encoding.UTF8.GetString(_buffer.ToArray());
-                    _buffer.Clear();
-                    return tail;
-                }
-            }
+            if (_chunkPos >= _chunkLen && !Refill()) return TakeTail();
 
             var span = _chunk.AsSpan(_chunkPos, _chunkLen - _chunkPos);
             var nl = span.IndexOf((byte)'\n');
-            if (nl >= 0)
-            {
-                _buffer.AddRange(span[..nl].ToArray());
-                _chunkPos += nl + 1;
-                var line = Encoding.UTF8.GetString(_buffer.ToArray()).TrimEnd('\r');
-                _buffer.Clear();
-                return line;
-            }
+            if (nl >= 0) return TakeLine(span, nl);
 
             // 缓冲里没有换行：整块吞掉，继续读
             _buffer.AddRange(span.ToArray());
             _chunkPos = _chunkLen;
         }
+    }
+
+    /// <summary>
+    /// 从底层流再读一块。读到 EOF 返回 false。
+    /// </summary>
+    private bool Refill()
+    {
+        _chunkLen = _stream.Read(_chunk, 0, _chunk.Length);
+        _chunkPos = 0;
+        return _chunkLen > 0;
+    }
+
+    /// <summary>
+    /// 切出 <paramref name="nl"/> 位置之前的一行（并消费掉该换行符）。
+    /// </summary>
+    private string TakeLine(ReadOnlySpan<byte> span, int nl)
+    {
+        _buffer.AddRange(span[..nl].ToArray());
+        _chunkPos += nl + 1;
+        var line = Encoding.UTF8.GetString(_buffer.ToArray()).TrimEnd('\r');
+        _buffer.Clear();
+        return line;
+    }
+
+    /// <summary>
+    /// EOF 时把缓冲区里残留的半行交出去；没有残留则返回 null。
+    /// </summary>
+    /// <remarks>
+    /// 最后一行可能不带换行符 —— 直接丢弃会让最后一条消息静默消失。
+    /// </remarks>
+    private string? TakeTail()
+    {
+        if (_buffer.Count == 0) return null;
+        var tail = Encoding.UTF8.GetString(_buffer.ToArray());
+        _buffer.Clear();
+        return tail;
     }
 }
