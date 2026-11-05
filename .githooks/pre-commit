@@ -1,15 +1,25 @@
 #!/bin/sh
-# 本仓库的回归闸门是 `node --test test/ab-verify.js`（node:test），
-# 不是 xp-gate 的 vitest 流程，因此不继承全局 hook。
+# 本仓库的 pre-commit 分两段，缺一不可：
 #
-# 这里只跑「快、不必构建」的检查；完整回归（含 24 项 A/B）请跑
-# `./build.sh --test` 或 `npm test`。
+#   第 1 段（本项目自有快检）
+#     - JS 语法检查（扫描口径与 package.json 的 files 一致）
+#     - C# 格式检查（dotnet format --verify-no-changes）
+#     理由：这两项是「快、不必构建」的阻断式检查，xp-gate 的 Gate 1 对
+#     C# 是 fail-open（适配器返回 1 只打印 "may be non-blocking" 然后 SKIP），
+#     所以 C# 格式必须在本地这一段守住，交给全局 hook 会漏。
 #
-# JS 语法检查用扫描而不是逐行列举：原来那份手写清单已经漏掉了
-# test/test-utils.js —— 新加文件只要忘了登记就会静默跳过检查，
-# 而漏检是看不出来的。扫描口径与 npm 的发布范围一致（见 package.json
-# 的 files 字段），因此 dist/obj/bin/node_modules 天然不在其中。
+#   第 2 段（xp-gate 全局门禁）
+#     直接 exec 全局安装的 xp-gate pre-commit，跑 Gate 0-13。
+#     xp-gate init 只把 hook 装到 .git/hooks/，而本仓库 core.hooksPath=.githooks
+#     会盖掉它 —— 不显式转发的话，xp-gate 在本项目等于完全没生效。
+#
+# 两段是有意组合而非替代：本段在 C# 编译期质量上比全局更严（阻断 vs fail-open），
+# 全局在复杂度/重复/架构/密钥/SAST/文件卫生等维度覆盖面更广。详见
+# docs/QUALITY-GATES.md。
 set -e
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 echo "[pre-commit] JS 语法检查"
 JS_FAIL=0
@@ -43,4 +53,23 @@ else
   echo "[pre-commit] 跳过 C# 检查（未找到 dotnet）"
 fi
 
-echo "[pre-commit] OK（完整回归请跑 ./build.sh --test）"
+# ---- 第 2 段：转交 xp-gate 全局门禁 ----
+# 候选顺序：全局 config 下的 hooks → .git/hooks（xp-gate init 的安装位置）。
+# 都找不到就明确告警而非静默放行 —— 「没跑」不能看起来像「通过」。
+XP_GATE_HOOK=""
+for candidate in \
+  "$HOME/.config/xp-gate/hooks/pre-commit" \
+  "$PROJECT_ROOT/.git/hooks/pre-commit"; do
+  if [ -f "$candidate" ] && [ "$candidate" != "$PROJECT_ROOT/.githooks/pre-commit" ]; then
+    XP_GATE_HOOK="$candidate"
+    break
+  fi
+done
+
+if [ -z "$XP_GATE_HOOK" ]; then
+  echo "[pre-commit] ⚠️  未找到 xp-gate pre-commit，全局质量门禁本次未执行" >&2
+  echo "[pre-commit]    修复: xp-gate init --full  或  xp-gate setup-global" >&2
+else
+  echo "[pre-commit] 转交 xp-gate 全局门禁: $XP_GATE_HOOK"
+  exec sh "$XP_GATE_HOOK" "$@"
+fi

@@ -75,6 +75,33 @@ if [ "$CHECK" = "1" ]; then
   echo "==> 质量门禁：版本一致性"
   node scripts/check-version.mjs
 
+  echo "==> 质量门禁：C# 单元测试"
+  # C# 侧此前完全没有单元测试，重构只能靠 e2e（30s+ 且失败点模糊）。
+  # 这里把 dotnet test 纳入门禁：协议编解码、命令行 quoting、PATH 解析、
+  # 环境块、按行切分等纯逻辑都有断言守着，重构才敢动。
+  #
+  # 顺带收集覆盖率（coverlet + runsettings），因为 xp-gate 的 Gate 5 会问
+  # "覆盖率多少"，而这个数字必须是真量出来的，不能靠门禁闭嘴。
+  if command -v dotnet >/dev/null 2>&1; then
+    if ! dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj \
+         --nologo --verbosity quiet \
+         --collect:"XPlat Code Coverage" \
+         --settings tests/DshAotRunner.Tests/coverage.runsettings \
+         >/tmp/cs-test.log 2>&1; then
+      tail -30 /tmp/cs-test.log >&2
+      echo "C# 单元测试未通过。" >&2
+      exit 1
+    fi
+    grep -E "已通过|Passed!" /tmp/cs-test.log | tail -2 || true
+    # 覆盖率只报告、不设硬门槛：当前生产源码覆盖率是基线，
+    # 立刻卡一个数字会逼着人写凑数的测试。先让它可见，再逐步抬高。
+    if [ -f scripts/coverage-summary.py ]; then
+      python scripts/coverage-summary.py 2>/dev/null | head -6 || true
+    fi
+  else
+    echo "跳过：未找到 dotnet"
+  fi
+
   echo "==> 质量门禁：覆盖率门槛（对应 xp-gate Gate 5）"
   if command -v npx >/dev/null 2>&1; then
     npx --no-install c8 node --test plugin/test/index.test.js >/dev/null || {
@@ -97,21 +124,32 @@ if [ "$CHECK" = "1" ]; then
   fi
 
   echo "==> 质量门禁：JS 语法"
-  node --check test/runner-client.js
-  node --check test/ab-verify.js
-  node --check test/leak-verify.js
-  node --check test/race-verify.js
-  node --check test/ipc-verify.js
-  node --check test/host-path-verify.js
-  node --check test/e2e-plugin-verify.js
-  node --check plugin/lib/index.js
-  node --check plugin/lib/circuit-breaker.js
-  node --check plugin/client/index.js
-  node --check plugin/test/index.test.js
-  node --check plugin/test/client.test.js
-  node --check bench/d1-ab-bench.js
-  node --check vendor/patch-dsh.mjs
-  node --check scripts/check-version.mjs
+  # 用扫描而不是逐行列举：原来那份手写清单已经漏掉过文件
+  # （test/test-utils.js），新加文件忘了登记就会静默跳过检查，
+  # 而漏检是看不出来的。扫描口径与 npm 发布范围一致，
+  # 因此 dist/obj/bin/node_modules 天然不在其中。
+  JS_SYNTAX_FAIL=0
+  JS_SYNTAX_COUNT=0
+  while IFS= read -r jsfile; do
+    jsfile="${jsfile#./}"
+    case "$jsfile" in
+      dist/*|dist-*/*|obj/*|bin/*|node_modules/*|vendor/dsh-subprocess-local-*/*) continue ;;
+    esac
+    JS_SYNTAX_COUNT=$((JS_SYNTAX_COUNT + 1))
+    if ! node --check "$jsfile"; then
+      echo "  语法错误: $jsfile" >&2
+      JS_SYNTAX_FAIL=1
+    fi
+  done < <(find test bench plugin scripts vendor -name '*.js' -o -name '*.mjs' | sort)
+  if [ "$JS_SYNTAX_FAIL" -ne 0 ]; then
+    echo "JS 语法检查未通过。" >&2
+    exit 1
+  fi
+  if [ "$JS_SYNTAX_COUNT" -eq 0 ]; then
+    echo "没找到任何 JS 文件 —— 扫描路径可能不对。" >&2
+    exit 1
+  fi
+  echo "  $JS_SYNTAX_COUNT 个文件通过"
 
   echo "==> 质量门禁：上游补丁留档"
   node vendor/patch-dsh.mjs verify
@@ -140,7 +178,9 @@ fi
 
 if [ "$CLEAN" = "1" ]; then
   echo "==> 清理 obj/ bin/ 与产物目录"
-  rm -rf obj bin "$OUT_ABS"/*
+  # ${OUT_ABS:?} 是必须的：OUT_ABS 若为空（cd 失败或 --out 传了怪值），
+  # 展开会变成 rm -rf /*，把根目录删掉。这里宁可报错中止。
+  rm -rf obj bin "${OUT_ABS:?}"/*
 fi
 
 echo "==> 构建 NativeAOT (输出: $OUT_WIN)"
@@ -168,6 +208,10 @@ echo
 export AOT_RUNNER="$EXE"
 
 if [ "$TEST" = "1" ]; then
+  echo
+  echo "==> C# 单元测试（协议/quoting/PATH/环境块/按行切分）"
+  dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj --nologo --verbosity quiet
+
   echo
   echo "==> S0 Node IPC 协议回归（Issue #11）"
   node --test test/ipc-verify.js

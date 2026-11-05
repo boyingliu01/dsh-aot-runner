@@ -1,0 +1,43 @@
+# 行尾规范化
+#
+# 为什么需要这个文件：
+#   本仓库在 Windows 上开发，而 shell 脚本必须用 LF 才能执行。
+#   core.autocrlf=input 已经会让提交走 LF，但**工作区**仍可能是 CRLF ——
+#   于是 shellcheck 会在每个行尾报 "Literal carriage return"，
+#   bash 也可能在 `set -e` 脚本里因 \r 而行为异常。
+#   实际踩过：build.sh 被编辑器改成 CRLF 后，pre-commit 报出 177 个
+#   shellcheck 错误，而文件内容一个字都没改。
+#
+# 策略：
+#   - 默认交给 Git 自动判断（文本文件存 LF，检出时按平台）
+#   - 脚本类强制 LF：它们是给 bash/sh 执行的，CRLF 必然出问题
+#   - Windows 专有的 .cmd/.bat 保留 CRLF：cmd.exe 对 LF 的处理有坑
+#   - 二进制文件不做任何转换
+
+* text=auto
+
+# ---- 必须 LF：shell 脚本与类 Unix 可执行 ----
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.mjs           text eol=lf diff=javascript
+*.js            text eol=lf diff=javascript
+.gitattributes  text eol=lf
+.githooks/*     text eol=lf
+scripts/*.sh    text eol=lf
+
+# ---- 必须 CRLF：Windows 批处理 ----
+*.cmd           text eol=crlf
+*.bat           text eol=crlf
+
+# ---- 二进制：不做行尾转换 ----
+*.exe           binary
+*.dll           binary
+*.pdb           binary
+*.png           binary
+*.jpg           binary
+*.ico           binary
+*.zip           binary
+*.nupkg         binary
+
+# ---- 语言标记（让 GitHub 统计与 diff 更准确）----
+*.cs            text diff=csharp
