@@ -48,3 +48,40 @@ tmp-test/
 
 # AOT 长期观测的落盘数据（本地基准结果，不进版本库）
 .aot-observation/
+
+# xp-gate 工具产物（xp-gate init 的本机安装副本）
+#
+# 这些是 xp-gate 自己的代码，不是本项目的代码：
+#   .xp-gate/modules/    principles/mutation/mock-policy/build-integrity（约 11M）
+#   githooks/            adapter-*.sh + adapters/（约 580K）
+#   .qoder/ opencode.json  其它 AI 工具的本机配置
+#
+# 不忽略的后果（实测）：principles 的 Gate 6 用 archlint 零容忍模式扫全目录，
+# 会把 githooks/ 与 .git/hooks/ 里的同一份 adapter 判为 CodeClone[High]，
+# 提交被永久 BLOCK —— 报的是工具自己的重复，不是本项目的债。
+#
+# 保留它们在磁盘上供 hook 使用即可；hook 找不到项目内副本时会回落到
+# ~/.config/xp-gate/ 的全局安装，两条路都验证过。
+.xp-gate/modules/
+.xp-gate/node_modules/
+.xp-gate/package.json
+.xp-gate/package-lock.json
+.xp-gate/lint-baseline.json
+githooks/
+.qoder/
+opencode.json
+
+# xp-gate 本机探测到的语言/工具清单（由 detect-languages 生成，随机器变化）
+.xp-gate-config.json
+
+# dotnet test 覆盖率产物（每次跑都会生成新的 GUID 子目录）
+tests/**/TestResults/
+
+# 基准测试生成的数据（用 bench/node-tuning/README.md 里的命令重建）
+bench/node-tuning/files/
+bench/node-tuning/files2/
+bench/node-tuning/tiny/
+bench/node-tuning/results/*.txt
+bench/node-tuning/big/
+bench/node-tuning/sz-*/
+bench/node-tuning/sz2-*/

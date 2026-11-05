@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  coverlet 覆盖率配置
+
+  ## 为什么需要这个文件
+
+  xp-gate 的 Gate 5 会以 collect 参数 "XPlat Code Coverage" 跑 dotnet test，
+  然后解析 coverage.cobertura.xml 判断覆盖率。
+
+  ## 为什么必须 IncludeTestAssembly=true
+
+  本测试项目**不是**通过 ProjectReference 引用主项目，而是把 src/*.cs
+  直接 Compile 进来（理由见 DshAotRunner.Tests.csproj：主项目是 PublishAot
+  的 Exe，引用它会拖入 AOT/裁剪配置，且两份实现会漂移）。
+
+  副作用是：被测代码就在测试程序集里。而 coverlet.collector 默认
+  IncludeTestAssembly 为 false —— 它会主动跳过测试程序集自身，
+  于是收集到的覆盖率恒为 0 行：
+
+      <coverage line-rate="0" lines-valid="0"><packages /></coverage>
+
+  实测就是这个结果：116 个测试全通过，coverage.cobertura.xml 却报 0 行、
+  packages 为空。Gate 5 随后判"覆盖率无法确定"。
+
+  打开 IncludeTestAssembly 之后 coverlet 才会去 instrument 测试程序集，
+  也才量得到 src/*.cs。
+-->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <IncludeTestAssembly>true</IncludeTestAssembly>
+          <!-- 只统计本项目源码：xunit 自身与测试宿主不该进分母 -->
+          <Include>[DshAotRunner*]*</Include>
+          <SkipAutoProps>true</SkipAutoProps>
+          <!-- 生成的代码不参与统计 -->
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
