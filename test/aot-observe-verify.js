@@ -142,7 +142,16 @@ test('pre-commit 扫描到的 JS 文件覆盖 test/bench/plugin 下全部文件'
   const walk = (dir) => {
     const abs = path.join(REPO, dir);
     if (!fs.existsSync(abs)) return [];
-    return fs.readdirSync(abs, { withFileTypes: true }).flatMap((e) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch (err) {
+      // 目录不可读（权限/竞态删除）时跳过，而不是让整个断言崩掉 ——
+      // 这里的目标是「扫描范围够不够」，不是「目录一定能读」
+      assert.ok(false, `目录不可读: ${dir} (${err.message})`);
+      return [];
+    }
+    return entries.flatMap((e) => {
       if (e.name === 'node_modules') return [];
       const rel = path.join(dir, e.name);
       return e.isDirectory() ? walk(rel) : (e.name.endsWith('.js') ? [rel] : []);

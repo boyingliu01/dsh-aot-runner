@@ -57,9 +57,8 @@ function latestTag() {
   }
 }
 
-function main() {
-  const checkTag = process.argv.includes('--tag');
-
+/** 收集所有需要比对版本的来源。 */
+function collectSources(checkTag) {
   const sources = [
     { label: 'VERSION', value: readVersionFile('VERSION') },
     { label: 'package.json', value: readJson('package.json').version },
@@ -69,29 +68,47 @@ function main() {
   if (checkTag) {
     sources.push({ label: 'git tag（最近）', value: latestTag() });
   }
+  return sources;
+}
 
+/** 打印每个来源的当前值。 */
+function printSources(sources) {
   console.log('版本一致性检查');
   console.log('─'.repeat(50));
   for (const { label, value } of sources) {
     console.log(`  ${label.padEnd(20)} ${value ?? '(缺失)'}`);
   }
   console.log('');
+}
 
+/** 检查是否有来源缺失版本号；全部齐全返回 true。 */
+function checkMissing(sources) {
   const missing = sources.filter((s) => !s.value);
-  if (missing.length > 0) {
-    console.error(`❌ 以下来源缺失版本号：${missing.map((s) => s.label).join('、')}`);
-    return 1;
-  }
+  if (missing.length === 0) return true;
 
+  console.error(`❌ 以下来源缺失版本号：${missing.map((s) => s.label).join('、')}`);
+  return false;
+}
+
+/** 检查所有来源是否一致；一致返回 true。 */
+function checkMismatch(sources) {
   const unique = new Set(sources.map((s) => s.value));
-  if (unique.size > 1) {
-    console.error('❌ 版本号不一致，请统一为同一版本：');
-    for (const { label, value } of sources) {
-      console.error(`     ${label} = ${value}`);
-    }
-    console.error('\n修正方式：把四处都改成同一个版本号（通常以 VERSION 为准）。');
-    return 1;
+  if (unique.size === 1) return true;
+
+  console.error('❌ 版本号不一致，请统一为同一版本：');
+  for (const { label, value } of sources) {
+    console.error(`     ${label} = ${value}`);
   }
+  console.error('\n修正方式：把四处都改成同一个版本号（通常以 VERSION 为准）。');
+  return false;
+}
+
+function main() {
+  const sources = collectSources(process.argv.includes('--tag'));
+  printSources(sources);
+
+  if (!checkMissing(sources)) return 1;
+  if (!checkMismatch(sources)) return 1;
 
   console.log(`✅ 全部一致：${sources[0].value}`);
   return 0;

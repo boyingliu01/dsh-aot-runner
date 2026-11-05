@@ -70,22 +70,29 @@ export const inject = ['subprocess'];
  * @returns {{ path: string, source: string } | null}
  */
 export function resolveRunnerPath(configured) {
-  if (configured) {
-    return existsSync(configured)
-      ? { path: configured, source: 'config' }
-      : null;   // 显式配置找不到 → 直接失败，不猜
-  }
+  // 显式配置优先；找不到就直接失败，不猜（见上方注释）。
+  if (configured) return pathIfExists(configured, 'config');
 
   const fromEnv = process.env.DSH_AOT_RUNNER;
-  if (fromEnv) {
-    return existsSync(fromEnv)
-      ? { path: fromEnv, source: 'env' }
-      : null;
-  }
+  if (fromEnv) return pathIfExists(fromEnv, 'env');
 
   // 包内自带：用 fileURLToPath 正确处理 Windows 盘符
   const bundled = fileURLToPath(new URL('../bin/dsh-aot-runner.exe', import.meta.url));
-  return existsSync(bundled) ? { path: bundled, source: 'bundled' } : null;
+  return pathIfExists(bundled, 'bundled');
+}
+
+/**
+ * 路径存在就返回带来源的解析结果，否则返回 null。
+ *
+ * 三个来源（config / env / bundled）的判定是同一件事，抽出来既少一次分支，
+ * 也保证「存在才用、不存在就当没有」这条规则在三处一致。
+ *
+ * @param {string} candidate
+ * @param {string} source
+ * @returns {{ path: string, source: string } | null}
+ */
+function pathIfExists(candidate, source) {
+  return existsSync(candidate) ? { path: candidate, source } : null;
 }
 
 /**
@@ -330,44 +337,18 @@ function makeInvocationSwitch(runtime, originalInvocation, aotInvocation) {
   };
 }
 
-/**
- * 启用 AOT runner 插件。
- *
- * 流程（每步失败都安全退出，不会留下半启用状态）：
- *   1. 前提校验（开关 / 平台 / runner 是否存在）
- *   2. 拿 runtime
- *   3. 自检 DSH 兼容性
- *   4. 注入 runnerInvocation
- *   5. 接熔断器
- *   6. 注册卸载还原
- */
-export function apply(ctx, config = {}) {
-  const { failThreshold = 3, verbose = true } = config;
-
-  // ---- 1. 前提校验 ----
-  const resolved = resolvePreconditions(ctx, config);
-  if (resolved === null) return;
-
-  // ---- 2. 拿 runtime ----
+/** 找 runtime；找不到时告警并返回 null。 */
+function requireRuntime(ctx) {
   const runtime = findRuntime(ctx);
   if (runtime === null) {
     ctx.logger?.warn?.('[aot-runner] 找不到 subprocess 服务，无法注入 runner');
-    return;
   }
+  return runtime;
+}
 
-  // ---- 3. 自检 ----
-  if (runSelfCheck(ctx, verbose) === 'buggy') return;
-
-  // ---- 4. 注入 ----
-  // 保存原值时不假设它一定有值：某些测试环境会把它清空。
-  const originalInvocation = runtime.internals?.runnerInvocation;
-  const { activate, restore } = makeInvocationSwitch(
-    runtime, originalInvocation, [resolved.path],
-  );
-  activate();
-
-  // ---- 5. 熔断器 ----
-  const breaker = new CircuitBreaker({
+/** 建立熔断器，把 open/close 接到注入开关上。 */
+function makeBreaker(ctx, { failThreshold, verbose }, activate, restore) {
+  return new CircuitBreaker({
     threshold: failThreshold,
     onOpen: (reason) => {
       if (verbose) ctx.logger?.warn?.(`[aot-runner] 熔断，降级到 node runner：${reason}`);
@@ -378,15 +359,59 @@ export function apply(ctx, config = {}) {
       activate();
     },
   });
+}
+
+/** 注入 runnerInvocation，返回熔断器与还原入口。 */
+function injectRunner(ctx, runtime, resolved, options) {
+  // 保存原值时不假设它一定有值：某些测试环境会把它清空。
+  const originalInvocation = runtime.internals?.runnerInvocation;
+  const { activate, restore } = makeInvocationSwitch(
+    runtime, originalInvocation, [resolved.path],
+  );
+  activate();
+
+  const breaker = makeBreaker(ctx, options, activate, restore);
   const hook = installBreakerHook(runtime, breaker);
 
-  // ---- 6. 卸载还原 ----
+  return { hook, restore };
+}
+
+/** 跑完 1~4 步，返回可卸载的启用结果；任一步不满足就返回 null。 */
+function setup(ctx, config, options) {
+  const resolved = resolvePreconditions(ctx, config);
+  if (resolved === null) return null;
+
+  const runtime = requireRuntime(ctx);
+  if (runtime === null) return null;
+
+  if (runSelfCheck(ctx, options.verbose) === 'buggy') return null;
+
+  return { resolved, ...injectRunner(ctx, runtime, resolved, options) };
+}
+
+/** 启用 AOT runner 插件。
+ *
+ * 流程（每步失败都安全退出，不会留下半启用状态）：
+ *   1. 前提校验（开关 / 平台 / runner 是否存在）
+ *   2. 拿 runtime
+ *   3. 自检 DSH 兼容性
+ *   4. 注入 runnerInvocation 并接熔断器
+ *   5. 注册卸载还原
+ */
+export function apply(ctx, config = {}) {
+  const options = { failThreshold: config.failThreshold ?? 3, verbose: config.verbose ?? true };
+
+  const active = setup(ctx, config, options);
+  if (active === null) return;
+
   ctx.effect?.(() => () => {
-    hook.restore();
-    restore();
+    active.hook.restore();
+    active.restore();
   }, 'aot-runner restore');
 
-  ctx.logger?.info?.(`[aot-runner] 已启用（来源 ${resolved.source}）：${resolved.path}`);
+  ctx.logger?.info?.(
+    `[aot-runner] 已启用（来源 ${active.resolved.source}）：${active.resolved.path}`,
+  );
 }
 
 export default { name, inject, apply };

@@ -111,99 +111,135 @@ test('探针自校验：泄漏检查会失败', { timeout: 30000 }, async () => 
 test('零泄漏：100 次连续调用', { timeout: 300000 }, async () => {
   const ROUNDS = 100;
 
-  // 基线要**等干净了再取**，不能上来就快照。
-  //
-  // 踩过的坑（2026-11-04，test:all 串行时偶发失败，单跑却总是通过）：
-  // 上一套件（race-verify 等）留下的 runner 可能还在退出过程中。
-  // 这时 if 直接 `new Set(pidsByName(...))` 取基线，那些「正在退出」的
-  // PID 不在基线里，等它们退出前被扫到，就被误判成本轮泄漏。
-  // 单跑不复现正是因为前面没有别的套件。
-  //
-  // 所以：先等目录里没有任何 runner，再取基线。
+  const before = await takeCleanBaseline();
+  const myPids = new Set();
+  const leakedAll = [];
+
+  for (let i = 0; i < ROUNDS; i += 1) {
+    await runOneRound(i, myPids);
+    if ((i + 1) % 10 === 0) {
+      const leak = await scanForLeaks(i, before, myPids);
+      if (leak) leakedAll.push(leak);
+    }
+  }
+
+  await assertNoSurvivors(myPids, ROUNDS);
+  assert.deepStrictEqual(leakedAll, [], `中途发现残留: ${JSON.stringify(leakedAll)}`);
+});
+
+/**
+ * 取「干净」的 runner 基线。
+ *
+ * 基线要**等干净了再取**，不能上来就快照。
+ *
+ * 踩过的坑（2026-11-04，test:all 串行时偶发失败，单跑却总是通过）：
+ * 上一套件（race-verify 等）留下的 runner 可能还在退出过程中。
+ * 这时直接 `new Set(pidsByName(...))` 取基线，那些「正在退出」的
+ * PID 不在基线里，等它们退出前被扫到，就被误判成本轮泄漏。
+ * 单跑不复现正是因为前面没有别的套件。
+ *
+ * 所以：先等目录里没有任何 runner，再取基线。
+ * 等不到干净环境也不硬测 —— 说明确有常驻 runner（比如 DSH 正在用），
+ * 那就把它们全部纳入基线，后续只关心「新增」的。
+ */
+async function takeCleanBaseline() {
   let before = new Set();
   await waitUntil(() => {
     before = new Set(pidsByName('dsh-aot-runner.exe'));
     return before.size === 0;
   }, { timeoutMs: 20000 });
+
   if (before.size) {
-    // 等不到干净环境也不硬测 —— 说明确有常驻 runner（比如 DSH 正在用），
-    // 那就把它们全部纳入基线，后续只关心「新增」的。
     console.error(`  注意：起测时已有 ${before.size} 个常驻 runner，已纳入基线`);
   }
+  return before;
+}
 
-  const leakedAll = [];
-  // 记录本轮自己启动的所有 runner PID —— 精确追踪比「名字差集」可靠
-  const myPids = new Set();
+/**
+ * 跑一轮。三模式混合：
+ *   0 = 正常退出，1 = 非零退出，2 = 派生孙进程后被 terminate
+ */
+async function runOneRound(i, myPids) {
+  const mode = i % 3;
+  const argv = roundArgv(mode);
 
-  for (let i = 0; i < ROUNDS; i += 1) {
-    // 三模式混合：
-    //   0 = 正常退出，1 = 非零退出，2 = 派生孙进程后被 terminate
-    const mode = i % 3;
-    let argv;
-    if (mode === 0) argv = ['cmd.exe', '/c', 'exit 0'];
-    else if (mode === 1) argv = ['cmd.exe', '/c', 'exit 7'];
-    else argv = ['cmd.exe', '/c', 'ping -n 30 127.0.0.1 > nul & ping -n 30 127.0.0.1 > nul'];
-
-    if (mode === 2) {
-      const h = launchRunner('aot', { argv });
-      if (h.state.pid) myPids.add(h.state.pid);
-      await sleep(200);
-      const tree = h.state.pid ? listDescendantPids(h.state.pid) : [];
-      h.terminate();
-      await h.wait(10000);
-      await assertAllGone([...tree, h.state.pid].filter(Boolean), `第 ${i} 轮 terminate`);
-    } else {
-      const r = await runAot({ argv, timeoutMs: 20000 });
-      assert.notStrictEqual(r.error, 'timeout', `第 ${i} 轮超时`);
-    }
-
-    // 每 10 轮做一次扫描，尽早发现趋势性泄漏。
-    //
-    // 判定分两步，**优先信任精确追踪**：
-    //   1. 本轮自己启动过的 PID 是否还活着 —— 这是无歧义的判据
-    //   2. 名字扫描发现的新增 PID —— 只用于「意外情况」报告，不当硬失败
-    //      （基线与扫描之间仍可能有 DSH 自身的 runner 起落，
-    //        那种波动不该算成测试泄漏）
-    if ((i + 1) % 10 === 0) {
-      let mine = [];
-      let unnamed = [];
-      await waitUntil(() => {
-        mine = [...alivePids([...myPids])];
-        const scanned = [...alivePids(pidsByName('dsh-aot-runner.exe'))]
-          .filter((p) => !before.has(p) && !myPids.has(p));
-        unnamed = scanned;
-        return mine.length === 0 && scanned.length === 0;
-      });
-      if (mine.length) {
-        leakedAll.push({ round: i + 1, why: '本轮启动的 runner 未退出', stray: mine });
-      } else if (unnamed.length) {
-        console.error(`  第 ${i + 1} 轮：检测到非本轮启动的 runner ${unnamed.join(',')}`
-          + '（可能是 DSH 正在使用，不计为泄漏）');
-      }
-    }
+  if (mode !== 2) {
+    const r = await runAot({ argv, timeoutMs: 20000 });
+    assert.notStrictEqual(r.error, 'timeout', `第 ${i} 轮超时`);
+    return;
   }
 
-  // 收尾同样优先用精确 PID 判据。
-  //
-  // 踩过的坑（2026-11-04，test:all 串行时偶发失败，单跑却总是通过）：
-  // 原来只看「名字差集」，在 test:all 里会把上一套件残留、正在退出的 runner
-  // 误判成本轮泄漏。改用 myPids 精确比对后，判定不再依赖环境干净程度。
-  let after = [];
-  let rounds = 0;
+  const h = launchRunner('aot', { argv });
+  if (h.state.pid) myPids.add(h.state.pid);
+  await sleep(200);
+  const tree = h.state.pid ? listDescendantPids(h.state.pid) : [];
+  h.terminate();
+  await h.wait(10000);
+  await assertAllGone([...tree, h.state.pid].filter(Boolean), `第 ${i} 轮 terminate`);
+}
+
+/** 每种模式对应的 target 命令。 */
+function roundArgv(mode) {
+  if (mode === 0) return ['cmd.exe', '/c', 'exit 0'];
+  if (mode === 1) return ['cmd.exe', '/c', 'exit 7'];
+  return ['cmd.exe', '/c', 'ping -n 30 127.0.0.1 > nul & ping -n 30 127.0.0.1 > nul'];
+}
+
+/**
+ * 每 10 轮做一次扫描，尽早发现趋势性泄漏。
+ *
+ * 判定分两步，**优先信任精确追踪**：
+ *   1. 本轮自己启动过的 PID 是否还活着 —— 这是无歧义的判据
+ *   2. 名字扫描发现的新增 PID —— 只用于「意外情况」报告，不当硬失败
+ *      （基线与扫描之间仍可能有 DSH 自身的 runner 起落，
+ *        那种波动不该算成测试泄漏）
+ */
+async function scanForLeaks(i, before, myPids) {
+  let mine = [];
+  let unnamed = [];
   await waitUntil(() => {
-    rounds += 1;
+    mine = [...alivePids([...myPids])];
+    unnamed = [...alivePids(pidsByName('dsh-aot-runner.exe'))]
+      .filter((p) => !before.has(p) && !myPids.has(p));
+    return mine.length === 0 && unnamed.length === 0;
+  });
+
+  if (mine.length) {
+    return { round: i + 1, why: '本轮启动的 runner 未退出', stray: mine };
+  }
+  // 非本轮启动的 runner 只提示、不计为泄漏（可能 DSH 正在使用）——
+  // 注意在轮询**结束后**打印一次，否则每次轮询都会刷屏
+  if (unnamed.length) {
+    console.error(`  第 ${i + 1} 轮：检测到非本轮启动的 runner ${unnamed.join(',')}`
+      + '（可能是 DSH 正在使用，不计为泄漏）');
+  }
+  return null;
+}
+
+/**
+ * 收尾断言：本轮启动的 runner 必须全部退出。
+ *
+ * 踩过的坑（2026-11-04，test:all 串行时偶发失败，单跑却总是通过）：
+ * 原来只看「名字差集」，在 test:all 里会把上一套件残留、正在退出的 runner
+ * 误判成本轮泄漏。改用 myPids 精确比对后，判定不再依赖环境干净程度。
+ */
+async function assertNoSurvivors(myPids, rounds) {
+  let after = [];
+  let polls = 0;
+  await waitUntil(() => {
+    polls += 1;
     after = [...alivePids([...myPids])];
     return after.length === 0;
   });
+
   for (const p of after) { try { process.kill(p, 'SIGKILL'); } catch { /* ignore */ } }
 
   assert.deepStrictEqual(
     after, [],
-    `${ROUNDS} 轮后本轮启动的 runner 仍有 ${after.length} 个未退出`
-    + `（轮询 ${rounds} 次后仍在）: ${after.join(',')}`,
+    `${rounds} 轮后本轮启动的 runner 仍有 ${after.length} 个未退出`
+    + `（轮询 ${polls} 次后仍在）: ${after.join(',')}`,
   );
-  assert.deepStrictEqual(leakedAll, [], `中途发现残留: ${JSON.stringify(leakedAll)}`);
-});
+}
 
 // ---------------------------------------------------------------------------
 // 3. 深层进程树
