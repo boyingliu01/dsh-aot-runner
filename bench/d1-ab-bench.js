@@ -282,9 +282,18 @@ function verdict(dispNode, dispAot, acc) {
   if (acc.nodeFail > 0 || acc.aotFail > 0) {
     return { level: 'UNRELIABLE', reason: '存在失败样本，测得的行为不完整' };
   }
-  const worst = Math.max(dispNode ?? 999, dispAot ?? 999);
-  if (worst > 10) return { level: 'UNRELIABLE', reason: `离散度 ${worst.toFixed(1)}% > 10%，系统干扰过大` };
-  if (worst > 5) return { level: 'FAIR', reason: `离散度 ${worst.toFixed(1)}% 在 5~10%，结果仅供参考` };
+  // 两侧取更差的那个：任一侧抖动大，整轮数据就不可信。
+  return dispersionVerdict(Math.max(dispNode ?? 999, dispAot ?? 999));
+}
+
+/** 按离散度给出可信度等级（>10% 不可信 / 5~10% 仅供参考 / <5% 可信）。 */
+function dispersionVerdict(worst) {
+  if (worst > 10) {
+    return { level: 'UNRELIABLE', reason: `离散度 ${worst.toFixed(1)}% > 10%，系统干扰过大` };
+  }
+  if (worst > 5) {
+    return { level: 'FAIR', reason: `离散度 ${worst.toFixed(1)}% 在 5~10%，结果仅供参考` };
+  }
   return { level: 'GOOD', reason: `离散度 ${worst.toFixed(1)}% < 5%，数据可信` };
 }
 

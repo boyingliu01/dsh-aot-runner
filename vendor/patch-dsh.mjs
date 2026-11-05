@@ -46,24 +46,24 @@ const AFTER =
 
 const md5 = (buf) => createHash('md5').update(buf).digest('hex');
 
-/** 找到 DSH 实际加载的那份 dsh-subprocess-local。 */
-function findTarget() {
-  // 候选 1：用 node 自己的模块解析（当前目录能解析到时最准）
+/** 候选 1：用 node 自己的模块解析（当前目录能解析到时最准）。 */
+function fromModuleResolution() {
   try {
     const resolved = execFileSync(
       process.execPath,
       ['-e', "try{console.log(require.resolve('@deepseek-ai/dsh-subprocess-local/package.json'))}catch{process.exit(9)}"],
       { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
     ).trim();
-    if (resolved) {
-      const p = path.join(path.dirname(resolved), 'lib', 'index.js');
-      if (existsSync(p)) return p;
-    }
+    if (!resolved) return null;
+    const p = path.join(path.dirname(resolved), 'lib', 'index.js');
+    return existsSync(p) ? p : null;
   } catch {
-    // 解析不到就走下面的候选
+    return null;  // 解析不到就走下面的候选
   }
+}
 
-  // 候选 2：从正在运行的 DSH 进程命令行里提取安装根
+/** 候选 2：从正在运行的 DSH 进程命令行里提取安装根。 */
+function fromRunningProcess() {
   try {
     const out = execFileSync(
       'powershell.exe',
@@ -74,23 +74,39 @@ function findTarget() {
       { encoding: 'utf8', timeout: 20000, windowsHide: true },
     ).trim();
     const m = out.match(/"?([A-Za-z]:[^"]*?[\\/]node_modules)[\\/]@deepseek-ai[\\/]dsh[\\/]/);
-    if (m) {
-      const p = path.join(m[1], '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js');
-      if (existsSync(p)) return p;
-    }
+    if (!m) return null;
+    const p = path.join(m[1], '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js');
+    return existsSync(p) ? p : null;
   } catch {
-    // 继续下一个候选
+    return null;  // 继续下一个候选
   }
+}
 
-  // 候选 3：按 DSH 常见的 workspace 布局，从用户家目录推断
+/** 候选 3：按 DSH 常见的 workspace 布局，从用户家目录推断。 */
+function fromHomeLayout() {
   const homes = [process.env.USERPROFILE, process.env.HOME].filter(Boolean);
   const guesses = homes.map((home) => path.join(
     home, '.workbuddy', 'binaries', 'node', 'workspace', 'node_modules',
     '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js',
   ));
   for (const g of guesses) if (g && existsSync(g)) return g;
-
   return null;
+}
+
+/** 找到 DSH 实际加载的那份 dsh-subprocess-local（按可靠性顺序试三个候选）。 */
+function findTarget() {
+  return fromModuleResolution() ?? fromRunningProcess() ?? fromHomeLayout();
+}
+
+/** 按「该出现 / 不该出现」两个标记给出补丁状态。
+ *
+ * 两个标记只有四种组合，用「是否一致」分两类读最省：
+ *   不一致 → 恰有一个标记在文件里，在的那个就说明状态（after=已打，before=未打）
+ *   一致   → 要么两个都在（无法判断，ambiguous），要么都不在（上游换了写法，unknown-shape）
+ */
+function classify(hasBefore, hasAfter) {
+  if (hasBefore !== hasAfter) return hasAfter ? 'patched' : 'pristine';
+  return hasAfter ? 'ambiguous' : 'unknown-shape';
 }
 
 function readState(file) {
@@ -100,11 +116,9 @@ function readState(file) {
   const hasAfter = text.includes(AFTER);
   const digest = md5(Buffer.from(text));
 
-  if (hasAfter && !hasBefore) return { kind: 'patched', file, digest };
-  if (hasBefore && !hasAfter) return { kind: 'pristine', file, digest };
-  // 上游可能已经用别的方式修了：函数签名变了但调用点不再匹配
-  if (!hasBefore && !hasAfter) return { kind: 'unknown-shape', file, digest };
-  return { kind: 'ambiguous', file, digest, hasBefore, hasAfter };
+  const kind = classify(hasBefore, hasAfter);
+  if (kind === 'ambiguous') return { kind, file, digest, hasBefore, hasAfter };
+  return { kind, file, digest };
 }
 
 function doStatus() {

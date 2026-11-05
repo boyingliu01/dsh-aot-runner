@@ -147,6 +147,102 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * 合并两个样式对象（后者覆盖前者）。
+     *
+     * React 的 style 不接受数组或展开时保留顺序以外的语义，
+     * 这里显式浅合并，用于「基础样式 + 一个动态属性」这种最常见的组合。
+     */
+    function merge(base, extra) {
+      var out = {};
+      Object.keys(base).forEach(function (k) { out[k] = base[k]; });
+      Object.keys(extra).forEach(function (k) { out[k] = extra[k]; });
+      return out;
+    }
+
+    /**
+     * 卡片内复用到的内联样式。
+     *
+     * 抽成常量而不是散落在各处：这些值在多处重复（尤其 var(--dsw-alias-*)
+     * 的降级色），改主题时只需改一处；也让组件函数只剩结构，读起来是
+     * 「卡片由哪几块组成」而不是一屏 CSS。
+     */
+    var STYLE = {
+      card: { maxWidth: '760px', display: 'flex', flexDirection: 'column', gap: '4px' },
+      title: { margin: '0 0 4px', fontSize: '16px', fontWeight: 600 },
+      intro: { margin: '0 0 12px', fontSize: '13px', color: 'var(--dsw-alias-label-secondary, #8b949e)' },
+      summaryBar: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '10px 12px',
+        marginBottom: '8px',
+        borderRadius: '8px',
+        background: 'var(--dsw-alias-bg-secondary, rgba(128,128,128,0.08))',
+        fontSize: '14px',
+        fontWeight: 600,
+      },
+      dot: { width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 8px' },
+      unavailable: { fontSize: '12px', fontWeight: 400, color: 'var(--dsw-alias-label-tertiary, #8b949e)' },
+      fixes: {
+        marginTop: '12px',
+        padding: '10px 12px',
+        borderRadius: '8px',
+        background: 'var(--dsw-alias-bg-warning, rgba(210,153,34,0.12))',
+        fontSize: '13px',
+        lineHeight: 1.6,
+      },
+      hints: {
+        margin: '12px 0 0',
+        fontSize: '12px',
+        lineHeight: 1.7,
+        color: 'var(--dsw-alias-label-tertiary, #8b949e)',
+      },
+      code: { fontSize: '11px' },
+    };
+
+    /** 状态条：色点 + 状态文本 + 可选的「不可用」标记。 */
+    function SummaryBar(props) {
+      var summary = props.summary;
+      var unavailable = props.unavailable;
+      return React.createElement(
+        'div',
+        { style: STYLE.summaryBar },
+        React.createElement('span', { style: merge(STYLE.dot, { background: summary.tone }) }),
+        React.createElement('span', { style: { color: summary.tone } }, summary.text),
+        unavailable
+          ? React.createElement('span', { style: STYLE.unavailable }, COPY.unavailable)
+          : null,
+      );
+    }
+
+    /** 修复建议块；没有建议时不渲染。 */
+    function FixList(props) {
+      var fixes = props.fixes;
+      if (!fixes.length) return null;
+      return React.createElement(
+        'div',
+        { style: STYLE.fixes },
+        React.createElement('strong', null, COPY.fixTitle),
+        fixes.map(function (fix) {
+          return React.createElement('div', { key: fix }, fix);
+        }),
+      );
+    }
+
+    /** 底部使用提示。 */
+    function Hints() {
+      return React.createElement(
+        'p',
+        { style: STYLE.hints },
+        COPY.hintUseToggle,
+        React.createElement('br'),
+        COPY.hintRuntime,
+        React.createElement('br'),
+        React.createElement('code', { style: STYLE.code }, COPY.hintRuntimeSample),
+      );
+    }
+
     /** 状态卡片。 */
     function StatusCard(props) {
       var summary = props.summary;
@@ -155,82 +251,15 @@ window.__ModuleLoader__.load({
 
       return React.createElement(
         'section',
-        { style: { maxWidth: '760px', display: 'flex', flexDirection: 'column', gap: '4px' } },
-        React.createElement(
-          'h3',
-          { style: { margin: '0 0 4px', fontSize: '16px', fontWeight: 600 } },
-          COPY.title,
-        ),
-        React.createElement(
-          'p',
-          { style: { margin: '0 0 12px', fontSize: '13px', color: 'var(--dsw-alias-label-secondary, #8b949e)' } },
-          COPY.intro,
-        ),
-        React.createElement(
-          'div',
-          {
-            style: {
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '10px 12px',
-              marginBottom: '8px',
-              borderRadius: '8px',
-              background: 'var(--dsw-alias-bg-secondary, rgba(128,128,128,0.08))',
-              fontSize: '14px',
-              fontWeight: 600,
-            },
-          },
-          React.createElement('span', {
-            style: {
-              width: '8px',
-              height: '8px',
-              borderRadius: '50%',
-              background: summary.tone,
-              flex: '0 0 8px',
-            },
-          }),
-          React.createElement('span', { style: { color: summary.tone } }, summary.text),
-          unavailable ? React.createElement('span', { style: { fontSize: '12px', fontWeight: 400, color: 'var(--dsw-alias-label-tertiary, #8b949e)' } }, COPY.unavailable) : null,
-        ),
+        { style: STYLE.card },
+        React.createElement('h3', { style: STYLE.title }, COPY.title),
+        React.createElement('p', { style: STYLE.intro }, COPY.intro),
+        React.createElement(SummaryBar, { summary: summary, unavailable: unavailable }),
         rows.map(function (row) {
           return React.createElement(Row, { key: row.label, label: row.label, value: row.value, tone: row.tone });
         }),
-        summary.fixes.length
-          ? React.createElement(
-              'div',
-              {
-                style: {
-                  marginTop: '12px',
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  background: 'var(--dsw-alias-bg-warning, rgba(210,153,34,0.12))',
-                  fontSize: '13px',
-                  lineHeight: 1.6,
-                },
-              },
-              React.createElement('strong', null, COPY.fixTitle),
-              summary.fixes.map(function (fix) {
-                return React.createElement('div', { key: fix }, fix);
-              }),
-            )
-          : null,
-        React.createElement(
-          'p',
-          {
-            style: {
-              margin: '12px 0 0',
-              fontSize: '12px',
-              lineHeight: 1.7,
-              color: 'var(--dsw-alias-label-tertiary, #8b949e)',
-            },
-          },
-          COPY.hintUseToggle,
-          React.createElement('br'),
-          COPY.hintRuntime,
-          React.createElement('br'),
-          React.createElement('code', { style: { fontSize: '11px' } }, COPY.hintRuntimeSample),
-        ),
+        React.createElement(FixList, { fixes: summary.fixes }),
+        React.createElement(Hints, null),
       );
     }
 
@@ -245,12 +274,8 @@ window.__ModuleLoader__.load({
      */
     async function readLoaderState(ctx) {
       try {
-        var remote = ctx.remote;
-        if (!remote || !remote.pluginInventory || typeof remote.pluginInventory.list !== 'function') return null;
-        var result = await remote.pluginInventory.list();
-        if (!result || !result.ok) return null;
-        var entries = result.value && result.value.entries;
-        if (!Array.isArray(entries)) return null;
+        var entries = await fetchInventoryEntries(ctx);
+        if (!entries) return null;
         var entry = entries.find(function (item) {
           return item && item.moduleName === PKG;
         });
@@ -259,6 +284,31 @@ window.__ModuleLoader__.load({
       } catch {
         return null;
       }
+    }
+
+    /**
+     * 调 pluginInventory.list() 并取出 entries 数组。
+     *
+     * 任何一步不可用都返回 null：这些是「环境没提供该能力」的正常情形，
+     * 由调用方统一按「未知」处理，不必在读取逻辑里层层展开。
+     */
+    async function fetchInventoryEntries(ctx) {
+      if (!isInventoryAvailable(ctx.remote)) return null;
+      return extractEntries(await ctx.remote.pluginInventory.list());
+    }
+
+    /** 从 list() 的返回值里取出 entries 数组；结果不 OK 或形状不对时返回 null。 */
+    function extractEntries(result) {
+      if (!result || !result.ok) return null;
+      var entries = result.value && result.value.entries;
+      return Array.isArray(entries) ? entries : null;
+    }
+
+    /** 当前环境是否提供 pluginInventory.list。 */
+    function isInventoryAvailable(remote) {
+      return Boolean(remote)
+        && Boolean(remote.pluginInventory)
+        && typeof remote.pluginInventory.list === 'function';
     }
 
     /**
@@ -272,23 +322,51 @@ window.__ModuleLoader__.load({
      * @returns {{path: string, known: boolean}} 路径与是否确知存在
      */
     function resolveExe(snapshot) {
-      var user = snapshot && snapshot.user;
-      var value = snapshot && snapshot.value;
-      var configured =
-        (user && typeof user.runnerPath === 'string' && user.runnerPath) ||
-        (value && typeof value.runnerPath === 'string' && value.runnerPath) ||
-        '';
+      var configured = readPathField(snapshot, 'runnerPath');
       if (configured) return { path: configured, known: false };
       return { path: '包内 bin/dsh-aot-runner.exe（默认）', known: false };
     }
 
+    /**
+     * 从快照的 user/value 两层里读一个字符串字段（user 优先）。
+     *
+     * 两层都查是因为 DSH 的设置项可能来自用户覆盖或插件默认值，
+     * 而展示层不关心来源，只关心「最终生效的是什么」。
+     */
+    function readPathField(snapshot, field) {
+      return readTypedField(snapshot, field, 'string', '');
+    }
+
+    /**
+     * 按指定类型从 user/value 两层读字段（user 优先），否则给默认值。
+     *
+     * 两层都查是因为 DSH 的设置项可能来自用户覆盖或插件默认值，
+     * 而展示层只关心「最终生效的是什么」。空字符串视为未设置
+     * （配置里留空等同于没配）。
+     */
+    function readTypedField(snapshot, field, type, fallback) {
+      var found = findTypedField([snapshot && snapshot.user, snapshot && snapshot.value], field, type);
+      return found === undefined ? fallback : found;
+    }
+
+    /**
+     * 在若干候选对象里找第一个指定类型且非空的字段值；找不到返回 undefined。
+     *
+     * 与 fallback 分离是为了区分「没找到」和「找到的恰好是 falsy」——
+     * 直接返回 fallback 会让调用方分不清这两种情况。
+     */
+    function findTypedField(candidates, field, type) {
+      for (var i = 0; i < candidates.length; i += 1) {
+        var src = candidates[i];
+        if (!src || typeof src[field] !== type) continue;
+        if (src[field]) return src[field];
+      }
+      return undefined;
+    }
+
     /** 从配置快照读一个布尔字段，未设置时给默认值。 */
     function readBool(snapshot, field, fallback) {
-      var user = snapshot && snapshot.user;
-      var value = snapshot && snapshot.value;
-      if (user && typeof user[field] === 'boolean') return user[field];
-      if (value && typeof value[field] === 'boolean') return value[field];
-      return fallback;
+      return readTypedField(snapshot, field, 'boolean', fallback);
     }
 
     /** 状态卡片的数据读取与渲染。 */
@@ -326,10 +404,24 @@ window.__ModuleLoader__.load({
         });
       }
 
+      var view = buildStatusView(snapshot, loader);
+      return React.createElement(StatusCard, {
+        summary: view.summary,
+        rows: view.rows,
+        unavailable: loader === null,
+      });
+    }
+
+    /**
+     * 从快照与 loader 状态算出卡片需要的 summary 与 rows。
+     *
+     * 从 <see cref="StatusEntry"/> 分出来的理由：组件函数必须保持
+     * 「读 hook → 渲染」的单一职责，而「读哪些字段、怎么映射成行」
+     * 是一段纯计算，放在组件里既拉长函数，也让这段映射无法单独推理。
+     */
+    function buildStatusView(snapshot, loader) {
       var configEnabled = readBool(snapshot, 'enabled', false);
-      var failThreshold = (typeof snapshot.value === 'object' && snapshot.value && typeof snapshot.value.failThreshold === 'number')
-        ? snapshot.value.failThreshold
-        : 3;
+      var failThreshold = readFailThreshold(snapshot);
       var verbose = readBool(snapshot, 'verbose', true);
       var exe = resolveExe(snapshot);
 
@@ -339,23 +431,51 @@ window.__ModuleLoader__.load({
         runnerPath: exe.path,
       });
 
-      var rows = [
-        { label: COPY.rowConfig, value: configEnabled ? COPY.yes : COPY.no, tone: configEnabled ? TONE.ok : TONE.warn },
-        {
-          label: COPY.rowLoader,
-          value: loader === null ? COPY.unknown : (loader.enabled ? COPY.on : COPY.off),
-          tone: loader === null ? TONE.idle : (loader.enabled ? TONE.ok : TONE.idle),
-        },
+      return {
+        summary: summary,
+        rows: buildStatusRows(configEnabled, loader, exe, failThreshold, verbose),
+      };
+    }
+
+    /** 失败阈值：优先取用户设置里的数值，缺失时回落到默认 3 次。 */
+    function readFailThreshold(snapshot) {
+      var value = snapshot.value;
+      return (typeof value === 'object' && value && typeof value.failThreshold === 'number')
+        ? value.failThreshold
+        : 3;
+    }
+
+    /** 卡片明细行。 */
+    function buildStatusRows(configEnabled, loader, exe, failThreshold, verbose) {
+      return [
+        { label: COPY.rowConfig, value: yesNo(configEnabled), tone: configEnabled ? TONE.ok : TONE.warn },
+        loaderRow(loader),
         { label: COPY.rowExe, value: exe.path, tone: undefined },
         { label: COPY.rowFailure, value: String(failThreshold) + ' 次', tone: undefined },
-        { label: COPY.rowVerbose, value: verbose ? COPY.yes : COPY.no, tone: undefined },
+        { label: COPY.rowVerbose, value: yesNo(verbose), tone: undefined },
       ];
+    }
 
-      return React.createElement(StatusCard, {
-        summary: summary,
-        rows: rows,
-        unavailable: loader === null,
-      });
+    /** boolean → 是/否 文案。 */
+    function yesNo(flag) {
+      return flag ? COPY.yes : COPY.no;
+    }
+
+    /**
+     * loader 行：三态（未知 / 开 / 关）。
+     *
+     * 单独成函数是因为它是唯一有「未知」状态的行 ——
+     * loader === null 表示读不到（不是「关着」），混进 yes/no 里会丢掉这个区别。
+     */
+    function loaderRow(loader) {
+      if (loader === null) {
+        return { label: COPY.rowLoader, value: COPY.unknown, tone: TONE.idle };
+      }
+      return {
+        label: COPY.rowLoader,
+        value: loader.enabled ? COPY.on : COPY.off,
+        tone: loader.enabled ? TONE.ok : TONE.idle,
+      };
     }
 
     /**
@@ -372,32 +492,66 @@ window.__ModuleLoader__.load({
      * @param {object} ctx 客户端根上下文
      */
     module.exports.apply = function apply(ctx) {
-      if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function') return;
+      if (!isMountableCtx(ctx)) return;
 
       ctx.inject(['settingsScope'], function (scoped) {
-        var service = scoped && scoped.settingsScope;
-        if (!service || typeof service.bind !== 'function') return;
-
-        var bound;
-        try {
-          bound = service.bind({ namespace: NS });
-        } catch {
-          return;
-        }
-        if (!bound || typeof bound.getSnapshot !== 'function' || typeof bound.subscribe !== 'function') return;
-
-        ctx.slots.inject('plugins.row.config', function () {
-          return ctx.slots.register(
-            {
-              name: 'plugins.row.config',
-              key: PKG + '#' + ROW_ID,
-              inject: function () { return { settingsScope: bound, ctx: ctx }; },
-            },
-            StatusEntry,
-          );
-        });
+        var bound = bindSettings(scoped);
+        if (!bound) return;
+        registerRowConfig(ctx, bound);
       });
     };
+
+    /** ctx 是否具备挂载所需的最小能力。 */
+    function isMountableCtx(ctx) {
+      return Boolean(ctx) && Boolean(ctx.slots) && typeof ctx.slots.inject === 'function';
+    }
+
+    /**
+     * 绑定 settingsScope 命名空间。
+     *
+     * 任何一步不满足都返回 null，由调用方静默跳过 —— 这些失败都是
+     * 「运行环境不支持该面板」的预期形态（例如纯内存模式），
+     * 不是本插件的错误，不该打扰用户。
+     */
+    function bindSettings(scoped) {
+      var service = scoped && scoped.settingsScope;
+      if (!service || typeof service.bind !== 'function') return null;
+
+      var bound = tryBind(service);
+      return isBoundShape(bound) ? bound : null;
+    }
+
+    /** 调 service.bind；抛异常时视为不可用。 */
+    function tryBind(service) {
+      try {
+        return service.bind({ namespace: NS });
+      } catch {
+        return null;
+      }
+    }
+
+    /** 绑定结果是否具备读取与订阅能力。 */
+    function isBoundShape(bound) {
+      return Boolean(bound)
+        && typeof bound.getSnapshot === 'function'
+        && typeof bound.subscribe === 'function';
+    }
+
+    /** 把状态行注册进 plugins.row.config 槽位。 */
+    function registerRowConfig(ctx, bound) {
+      ctx.slots.inject('plugins.row.config', function () {
+        return ctx.slots.register(rowConfigEntry(ctx, bound), StatusEntry);
+      });
+    }
+
+    /** 槽位注册项的描述符（key 由包名与行 id 拼成）。 */
+    function rowConfigEntry(ctx, bound) {
+      return {
+        name: 'plugins.row.config',
+        key: PKG + '#' + ROW_ID,
+        inject: function () { return { settingsScope: bound, ctx: ctx }; },
+      };
+    }
 
     /** 本插件依赖的客户端服务。 */
     module.exports.inject = ['slots'];
