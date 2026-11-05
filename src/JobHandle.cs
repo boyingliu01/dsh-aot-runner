@@ -47,10 +47,22 @@ internal sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
     }
 
     /// <summary>Job 是否已无活跃进程。</summary>
+    /// <remarks>
+    /// 查询失败时返回 false（保守：当作「可能还有进程」），这个选择本身没问题；
+    /// 问题在于查询曾**总是**失败，于是 IsEmpty() 恒为 false、
+    /// <see cref="JobRunner"/> 里「job 空了就收尾」那条路径从未生效过。
+    /// 两处成因都已修好：
+    ///   1. 传的是裸数字 8（BasicAndIoAccountingInformation，要 96 字节缓冲区）
+    ///      而非 BasicAccountingInformation(1)，每次都返回 ERROR_BAD_LENGTH；
+    ///   2. <see cref="Native.QueryInformationJobObject"/> 的声明漏了
+    ///      lpReturnLength 参数，调用恒定失败。
+    /// 由 <c>JobHandleTests</c> 用「有活进程时不为空 / 退出后变空」两端守住。
+    /// </remarks>
     public bool IsEmpty()
     {
-        if (!Native.QueryInformationJobObject(handle, 8 /* BasicAccountingInformation */,
-                out var acct, (uint)Marshal.SizeOf<Native.JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>()))
+        if (!Native.QueryInformationJobObject(handle, Native.JobObjectBasicAccountingInformation,
+                out var acct, (uint)Marshal.SizeOf<Native.JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>(),
+                out _))
             return false;
         return acct.ActiveProcesses == 0;
     }

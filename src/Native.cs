@@ -17,6 +17,13 @@ internal static class Native
     public const uint WAIT_TIMEOUT = 258;
     public const uint WAIT_OBJECT_0 = 0;
 
+    // JOBOBJECTINFOCLASS 编号（winnt.h）。
+    // 这两个值曾被写错：BasicAccountingInformation 是 **1**，不是 8。
+    // 8 是 BasicAndIoAccountingInformation，要求 96 字节的输出缓冲区；
+    // 只传 48 字节时 QueryInformationJobObject 返回 ERROR_BAD_LENGTH(24)，
+    // 调用方把「查询失败」当成「job 非空」，于是 IsEmpty() 永远返回 false。
+    // 用命名常量而不是裸数字，避免同一个坑再踩第二次。
+    public const int JobObjectBasicAccountingInformation = 1;
     public const int JobObjectExtendedLimitInformation = 9;
     public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
 
@@ -120,9 +127,18 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
 
+    // QueryInformationJobObject 的第 5 个参数 lpReturnLength **不可省略**。
+    //
+    // 这不只是「规范上应该有」—— 实测（Windows 11 / .NET 8）省略它时
+    // 调用恒定返回 FALSE, GetLastError=998(ERROR_NOACCESS)；补上（哪怕是
+    // IntPtr.Zero）就成功。原生 API 里它确实是指针参数，但 Win32 的实现
+    // 会按 5 参数 ABI 读取它，4 参数声明把栈/寄存器布局错开了一位。
+    //
+    // 这个错误曾被上层 IsEmpty() 掩盖成「job 永远非空」，功能上是静默失效。
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool QueryInformationJobObject(IntPtr hJob, int jobObjectInformationClass,
-        out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION lpJobObjectInformation, uint cbJobObjectInformationLength);
+        out JOBOBJECT_BASIC_ACCOUNTING_INFORMATION lpJobObjectInformation,
+        uint cbJobObjectInformationLength, out uint lpReturnLength);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
