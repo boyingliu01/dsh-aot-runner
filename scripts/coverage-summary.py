@@ -12,6 +12,8 @@
 单独为它写测试只会测「格式化字符串是否等于我写的字符串」，没有回归价值。
 """
 import glob
+import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -89,13 +91,60 @@ def print_per_class(per_class):
         print("  %5.1f%%  %-40s %d/%d" % (pct(hit, valid), name, hit, valid))
 
 
-def main():
+def is_empty_report(path):
+    """报告是否为空（根元素 lines-valid="0"）。
+
+    只扫文件头部而不是完整解析 XML：这一步用于过滤候选，
+    不需要结构信息，也不想为一份损坏的文件抛异常。
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return True
+    match = re.search(r'lines-valid="(\d+)"', head)
+    return match is not None and int(match.group(1)) == 0
+
+
+def pick_latest_report():
+    """挑出最新的一份**非空**覆盖率报告。
+
+    这里踩过的坑（2026-11-06 修复）：原实现是 `per_class = collect(files[0])`，
+    而 `glob.glob` 返回的是**文件系统顺序**，不是时间序。
+    `tests/**/TestResults/` 下会累积历史报告（每次 `dotnet test` 生成一个新 GUID 目录），
+    其中还有 `lines-valid="0"` 的空报告。实测 `files[0]` 恰好命中一份空报告，
+    脚本输出 `0.0% (0/0 行)` —— 真实值是 41.3%。
+
+    更糟的是这个错误**看起来像真的**：数字格式正确、表格也打出来了，只是全是 0。
+    覆盖率门禁因此长期处于「有输出但无意义」的状态。
+
+    选取规则：先丢弃空报告，再按 mtime 取最新。
+
+    @returns {(str|None, str|None)} (路径, 错误信息)，二者恰有一个为 None
+    """
     files = glob.glob("tests/**/coverage.cobertura.xml", recursive=True)
     if not files:
-        print("no coverage.cobertura.xml found（先跑 dotnet test 收集覆盖率）")
+        return None, "no coverage.cobertura.xml found（先跑 dotnet test 收集覆盖率）"
+
+    nonempty = [f for f in files if not is_empty_report(f)]
+    if not nonempty:
+        return None, (
+            "找到 %d 份报告，但全部是 lines-valid=0 的空报告。\n"
+            "这通常意味着 coverlet 数据收集器没有正确注入 ——\n"
+            "检查 tests/DshAotRunner.Tests/coverage.runsettings 是否生效。" % len(files)
+        )
+
+    return max(nonempty, key=os.path.getmtime), None
+
+
+def main():
+    path, error = pick_latest_report()
+    if path is None:
+        print(error)
         return 1
 
-    per_class = collect(files[0])
+    per_class = collect(path)
+    print("报告: %s" % norm(path))
     print_summary(per_class)
     print_per_class(per_class)
     return 0

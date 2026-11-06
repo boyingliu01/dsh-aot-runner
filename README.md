@@ -1,21 +1,28 @@
 # dsh-aot-runner
 
 DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文件替换 Node.js 版 runner，
-每次子进程调用**省 92~94ms（约 59%）**，且行为与 Node 版在 28 个用例上字节级一致。
+**消除约 63~67% 的 runner 开销**，且行为与 Node 版在 28 个用例上字节级一致。
 
-> ## ⚠️ 当前需要上游补丁才能生效
+> ## ⚠️ 安装前必读（两步，缺一不可）
 >
-> 在 DSH **0.2.0-rc.2** 上，本插件**必须配合一个 1 行的上游补丁**才能工作。
+> **1. 需要一行上游补丁。** 在 DSH **0.2.0-rc.2** 上，本插件**必须配合一个 1 行的上游补丁**才能工作。
 >
 > 原因是 DSH 的一个传参缺陷：`LocalSubprocessRuntime.spawn()` 调用
 > `launchWindowsJob()` / `launchLinuxScope()` 时漏传 `internals` 参数，
 > 导致所有基于 `internals` 的注入被静默忽略。
 >
 > - 缺陷报告：[deepseek-ai/deepseek-harness#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)
-> - 补丁与说明：**[`vendor/README.md`](vendor/README.md)**
+> - 补丁与说明：**[`vendor/README.md`](vendor/README.md)**（`node vendor/patch-dsh.mjs apply`）
 > - 插件会**自动检测**这个缺陷：命中时明确告警并停用自己，而不是假装在工作
+> - 上游修复后，删掉整个 `vendor/` 目录即可
 >
-> 上游修复后，删掉整个 `vendor/` 目录即可。
+> **2. 从源码构建需要 C++ 工具链。** NativeAOT 在 Windows 上**强制要求 MSVC 链接器**：
+>
+> - ✅ .NET 8+ SDK
+> - ✅ **Visual Studio Build Tools 的 C++ 工作负载**（或 VS 的「使用 C++ 的桌面开发」）
+>
+> 只装 .NET SDK 会报 `error : Platform linker not found`。
+> 不想装工具链的话，直接从 CI artifact 下载预编译的 exe。
 
 **协议状态**：AOT 版实现的是与 Node 版**相同的 Node IPC 协议**（fd 3），
 可被真实 DSH host 直接调用。
@@ -49,7 +56,8 @@ profile 显示它单独贡献 **200–220ms** 的固定延迟 —— 比真正�
 | node runner（现状） | 156~158ms | 249~279ms | 11.7%~20.5% |
 | **AOT runner** | **63~64ms** | **142~206ms** | **1.9%~4.1%** |
 
-- **每次净省 92~94ms，比例稳定在 59.1%~59.6%**（三轮收敛，0 失败、0 输出不一致）
+- **收益比例稳定在 63%~67%**（多次独立测量收敛，0 失败、0 输出不一致）
+- 每次净省 **92~197ms**（随系统负载变化，见下方口径说明）
 - **p99 长尾改善 73~124ms**
 - 真实命令（`hostname` / `whoami` / `cmd /c echo`）每次省 **77~155ms**
 - 稳定性：300 次连续调用 **0 失败**，RSS 53~61MB 有涨有落、非单调增长
@@ -57,13 +65,14 @@ profile 显示它单独贡献 **200–220ms** 的固定延迟 —— 比真正�
 
 > **波动收窄也是收益**：node runner 的 IQR/中位数离散度是 11.7%~20.5%，
 > AOT 是 1.9%~4.1%。对交互式场景来说，减少抖动比降低均值更重要。
-> 更早的手工驱动测试（不经过 DSH 的 launch 路径）测得 64.8%~66.0%，
-> 生产路径略低是因为多了 `bindManagedProcess`、Job Object、IPC 解析等
-> 两侧都要付的固定开销 —— **绝对差值 92ms 比比例更有说服力**。
 
-> **关于口径**：绝对值随系统负载波动很大（同一台机器连跑三次可得到
-> 40.5% / 64.0% / 65.6%）。基准已内置**自动可信度判定**（离散度 > 10%
-> 直接标 UNRELIABLE），**收益比例是稳定指标，绝对值不是**。
+> **关于口径（重要）**：绝对值随系统负载波动很大 —— 同一台机器不同时段实测
+> 得到过 92ms / 116ms / 168ms / 197ms 的净差值。
+> **收益比例才是稳定指标**：独立测量结果为 64.1%（5 轮可信观测）、
+> 66.6%（3 轮跨轮一致）、63.5%（单次 30 样本）。
+>
+> 因此本文统一表述为「**约 63~67%**」，而不再引用某个具体的毫秒数。
+> 基准已内置**自动可信度判定**（离散度 > 10% 直接标 UNRELIABLE，不给出结论）。
 > 完整数据与方法见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md)。
 
 ---
@@ -158,7 +167,7 @@ node 的 `resolveWindowsExecutable` 规则（`runner-launch-*.js`）：
 ./build.sh                 # 增量构建
 ./build.sh --check         # 只跑质量门禁（格式 + 静态检查 + JS 语法）
 ./build.sh --clean         # 清理后重建
-./build.sh --test          # 构建 + 跑完整回归（60 项）
+./build.sh --test          # 构建 + 跑回归（JS 77 项 + C# 139 项）
 ./build.sh --all           # 质量门禁 + 清理重建 + 测试 + 基准
 ./build.sh --out <目录>    # 指定产物目录
 ```
@@ -442,7 +451,20 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 | S6 插件接入 | ✅ | 插件 + 熔断器（[#11](https://github.com/boyingliu01/dsh-aot-runner/issues/11) 阶段 B）|
 | S7 性能对比验证 | 🔄 | 第一层 + 第二层 ✅，第三层进行中 |
 
-**全套件 60/60 通过**：`npm run test:all`。
+**全套件 216 项通过**：`npm run test:all`（77 项 JS）+ `dotnet test`（139 项 C#）。
+
+| 层 | 套件 | 项数 |
+|---|---|---|
+| C# 单元 | `tests/DshAotRunner.Tests` | 139 |
+| A/B 一致性 | `test/ab-verify.js` | 28 |
+| 观测器逻辑 | `test/aot-observe-verify.js` | 17 |
+| 插件单元 | `plugin/test/index.test.js` | 11 |
+| 泄漏/混沌 | `test/leak-verify.js` | 7 |
+| IPC 协议 | `test/ipc-verify.js` | 6 |
+| terminate 竞态 | `test/race-verify.js` | 5 |
+| 插件端到端 | `test/e2e-plugin-verify.js` | 2 |
+| 真实 host 路径 | `test/host-path-verify.js` | 1 |
+| **合计** | | **216** |
 
 ### 已知待办
 
@@ -497,4 +519,7 @@ runner 协议与 `resolveWindowsExecutable` 语义）。**DSH 升级时需要重
 
 ## License
 
-Private / internal use.
+[MIT](LICENSE) © boyingliu01
+
+可以自由使用、修改、分发（含商业用途），唯一要求是保留版权声明与许可声明。
+本软件按「原样」提供，不附带任何明示或暗示的担保。

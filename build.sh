@@ -180,6 +180,18 @@ if [ "$CLEAN" = "1" ]; then
   echo "==> 清理 obj/ bin/ 与产物目录"
   # ${OUT_ABS:?} 是必须的：OUT_ABS 若为空（cd 失败或 --out 传了怪值），
   # 展开会变成 rm -rf /*，把根目录删掉。这里宁可报错中止。
+  #
+  # ⚠️ 但不能把现有 exe 一起删掉（2026-11-06 踩过）：
+  #    构建可能因为缺链接器 / 缺依赖 / 网络失败而中止，此时唯一的可用产物
+  #    已经被删了，而它通常**不在版本库里**（*.exe 被 .gitignore 排除），
+  #    于是「清理重建」这一步直接把项目变成了不可运行状态。
+  #    做法：先把 exe 挪到临时位置，构建成功后再丢弃；失败则还原。
+  EXE_TMP="$OUT_ABS/dsh-aot-runner.exe"
+  if [ -f "$EXE_TMP" ]; then
+    EXE_BACKUP=$(mktemp -t aot-runner-backup.XXXXXX.exe)
+    cp "$EXE_TMP" "$EXE_BACKUP"
+    echo "    已备份现有产物 -> $EXE_BACKUP"
+  fi
   rm -rf obj bin "${OUT_ABS:?}"/*
 fi
 
@@ -190,6 +202,12 @@ dotnet publish -c Release -r win-x64 -o "$OUT_ABS" -p:RunnerOutDir="$OUT_WIN" 2>
 EXE="$OUT_ABS/dsh-aot-runner.exe"
 if [ ! -f "$EXE" ]; then
   echo "构建失败：找不到 $EXE" >&2
+  # 把备份还原回去，让项目保持可运行 —— 「清理重建失败」不该顺带毁掉旧产物。
+  if [ -n "${EXE_BACKUP:-}" ] && [ -f "$EXE_BACKUP" ]; then
+    cp "$EXE_BACKUP" "$EXE"
+    echo "已还原上次构建的产物: $EXE" >&2
+    echo "（本次构建未产生新 exe，旧产物仍可继续使用）" >&2
+  fi
   exit 1
 fi
 
@@ -252,6 +270,22 @@ echo "完成。runner 路径: $EXE"
 
 # 把产物同步到插件包内，让 @boyingliu01/dsh-aot-runner 开箱即用。
 # plugin/bin/ 被 .gitignore 排除（构建产物不入库），所以每次构建都要重放。
+#
+# ⚠️ 这一段必须能失败时报错（2026-11-06 修复）：
+#    DSH 会话本身就在通过 AOT runner 跑子进程，于是 plugin/bin/*.exe 正被占用，
+#    `cp` 报 "Device or resource busy" —— 但脚本此前仍然打印「完成」并以 0 退出，
+#    结果是**插件包里躺着上一版 exe**，而构建日志看起来一切正常。
+#    这类「静默不同步」最危险：发布出去的包和刚构建的源码不是一回事。
 mkdir -p plugin/bin
-cp "$EXE" plugin/bin/
-echo "已同步到插件包: plugin/bin/$(basename "$EXE")"
+PLUGIN_EXE="plugin/bin/$(basename "$EXE")"
+if cp "$EXE" "$PLUGIN_EXE" 2>/dev/null && cmp -s "$EXE" "$PLUGIN_EXE"; then
+  echo "已同步到插件包: $PLUGIN_EXE"
+else
+  echo
+  echo "⚠️  无法同步到插件包: $PLUGIN_EXE（文件被占用或复制失败）" >&2
+  echo "    原因通常是 DSH 正在通过该 exe 跑子进程。" >&2
+  echo "    这不影响 dist/ 下的新产物，但 plugin/bin/ 里仍是旧版本 ——" >&2
+  echo "    **打包发布前必须解决**，否则 npm 包会带上旧 exe。" >&2
+  echo "    处理办法：关掉 DSH 会话后重跑构建，或手动 cp 覆盖。" >&2
+  exit 3
+fi
