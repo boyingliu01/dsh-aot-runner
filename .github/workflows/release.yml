@@ -178,12 +178,22 @@ jobs:
           Compress-Archive -Path release/* -DestinationPath "release/dsh-aot-runner-$tag-win-x64.zip"
 
           # 校验和（对裸 exe 和 zip 都算）
+          #
+          # 必须写 LF 行尾：PowerShell 的 Set-Content 默认写 CRLF，而
+          # Linux/macOS 的 `sha256sum -c SHA256SUMS` 会把行尾的 \r 当作
+          # 文件名的一部分，报 "'dsh-aot-runner.exe'$'\r': No such file"。
+          # 0.2.1 实测踩到了 —— Windows 用户用 certutil 手动比对没事，
+          # 但照着 README 在 Linux 上跑一行校验命令就会失败。
+          # 用 WriteAllText + "`n" 强制 LF；用无 BOM 的 UTF8 避免校验工具
+          # 把 BOM 当成首个哈希的一部分。
           $lines = @()
           foreach ($f in @("release/dsh-aot-runner.exe", "release/dsh-aot-runner-$tag-win-x64.zip")) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             $lines += "$h  $(Split-Path $f -Leaf)"
           }
-          $lines | Set-Content -Path release/SHA256SUMS -Encoding ascii
+          $sumPath = Join-Path (Get-Location) "release/SHA256SUMS"
+          $text = ($lines -join "`n") + "`n"
+          [System.IO.File]::WriteAllText($sumPath, $text, (New-Object System.Text.UTF8Encoding($false)))
           Get-Content release/SHA256SUMS
           Get-ChildItem release | Select-Object Name, Length
 
