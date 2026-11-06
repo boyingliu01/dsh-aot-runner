@@ -3,6 +3,45 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-11-06
+
+**runner 行为无任何变化** —— 本次只动发布与门禁基建。二进制与 0.2.0 逐字节相同
+（同一份源码、同一套工具链），升级不会改变运行时行为。
+
+### 发布
+
+- **npm 发布改用 OIDC Trusted Publishing**（优先），保留 granular token 回退。
+  零密钥、无泄露风险、无需定期轮换。
+  之所以要回退路径：npm 的硬限制是**全新包的首个版本无法用 OIDC 发布**，
+  0.2.0 必须先走 token，OIDC 从本版开始才生效。
+
+- 修掉 Release 工作流的一个真实风险（被 Gate 7 / checkov `CKV_GHA_7` 拦下）：
+  原设计用 `workflow_dispatch` 的 `tag` 输入决定发布名，而这个自由填写的字符串
+  会进入 zip 文件名、Release 标题和**版本一致性断言** —— 后者是唯一的版本闸门。
+  等于说谁能手动触发 workflow，谁就能用自造的 tag 名绕过它。
+  改为不接受任何输入，只认 `github.ref_name`，权限收敛到「只能重发已存在的 tag」。
+
+- README 增加 npm / license / platform 徽章。
+
+### 质量门禁
+
+- **补上 `.archlint.yaml`，让 Gate 6（架构验证）真正生效。** 之前一直缺这份配置，
+  Gate 6 每次 BLOCK。写配置前先跑了原始分析：53 个 smell、2.9/10，
+  其中 47 个来自 `bench/node-tuning/`（一次性实验脚本，重复是刻意的）、
+  3 个来自 `.git/`、3 个是入口脚本被误判为死代码，
+  **`src/` 与 `plugin/` 是 0 个**。忽略项基于「这些代码本就不该用架构规则衡量」，
+  不是为了让门禁变绿而放水。配置后 53 → 0，10.0/10。
+
+  已知限制：archlint 0.16.0 不解析 C#，所以 `src/*.cs` 仍是盲区（非本次引入）。
+
+- `.gitignore` 补 `*.exe.old`、`.xp-gate/reports/`、`.xp-gate/quality-status/`、
+  `.quality-history.jsonl`。
+
+### 其他
+
+- `bench/node-tuning/` 的 5 个脚本不再硬编码作者本机路径，改为 `path.resolve(__dirname, ...)`。
+- 清理 npm 包里混入的 `bin/dsh-aot-runner.exe.old` 残留（多 1.4MB 无意义体积）。
+
 ## [0.2.0] - 2026-11-06
 
 本次为**公开发布版本**：在 0.1.0 基础上完成了大规模重构、建立了 C# 回归测试基线，
