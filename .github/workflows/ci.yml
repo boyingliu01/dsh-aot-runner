@@ -110,8 +110,21 @@ jobs:
           Write-Host "体积: $s 字节"
 
       - name: 依赖检查（不得依赖 VC++ 运行时）
+        shell: pwsh
         run: |
-          $out = & dumpbin /DEPENDENTS dist/dsh-aot-runner.exe 2>&1 | Out-String
+          # 用 vswhere 定位 dumpbin，而不是裸调 `dumpbin` 或硬编码 Program Files 路径。
+          # windows-latest 上的 VS 装在 Enterprise 版路径下，硬编码会误报"找不到"；
+          # 裸调则依赖 PATH 里恰好有 MSVC bin（不保证）。vswhere 与 NativeAOT
+          # 找链接器用的是同一套机制，口径一致才不会出现"构建成功但检查失败"。
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "找不到 vswhere.exe" }
+          $vsRoot = & $vswhere -latest -products * -property installationPath
+          if (-not $vsRoot) { throw "vswhere 未能定位 Visual Studio" }
+          $dumpbin = (Get-ChildItem $vsRoot -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1).FullName
+          if (-not $dumpbin) { throw "在 $vsRoot 下找不到 dumpbin.exe" }
+
+          $out = & $dumpbin /DEPENDENTS dist/dsh-aot-runner.exe 2>&1 | Out-String
           Write-Host $out
           foreach ($bad in @('vcruntime140','msvcp140','vcruntime140_1')) {
             if ($out -match $bad) { throw "发现 VC++ 运行时依赖: $bad（分发会失败）" }
