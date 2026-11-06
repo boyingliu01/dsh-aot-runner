@@ -17,7 +17,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const REPO = 'D:/projects/dsh-aot-runner';
+const REPO = path.resolve(__dirname, '..', '..');
 const AOT = path.join(REPO, 'dist', 'dsh-aot-runner.exe');
 
 const VARIANTS = ['default', '16', '32'];

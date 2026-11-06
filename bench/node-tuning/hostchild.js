@@ -4,7 +4,7 @@ const { stat, readFile } = require('node:fs/promises');
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = 'D:/projects/dsh-aot-runner/src';
+const ROOT = path.join(path.resolve(__dirname, '..', '..'), 'src');
 const FILES = fs.readdirSync(ROOT).filter(f => f.endsWith('.cs')).map(f => path.join(ROOT, f));
 const PARALLEL = 10;
 
