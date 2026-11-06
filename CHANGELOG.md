@@ -8,6 +8,28 @@
 本次为**公开发布版本**：在 0.1.0 基础上完成了大规模重构、建立了 C# 回归测试基线，
 并修掉了一批由发布前评估发现的工程缺陷。
 
+### 发布
+
+- **新增 Release 工作流**（`.github/workflows/release.yml`）：打 `v*` tag 后自动构建、
+  验证并发布 **GitHub Release（含编译好的二进制）** 与 npm 包。
+  产出 `dsh-aot-runner-<tag>-win-x64.zip`、裸 `dsh-aot-runner.exe`、
+  `SHA256SUMS` 与 `LICENSE`。
+
+  为什么二进制必须进 Release 而不只是塞在 npm 包里：
+  1. **从 git clone 的人拿不到 exe** —— 构建产物不入库，而自建需要约 8GB 的
+     C++ 工具链（NativeAOT 强制要求 MSVC 链接器）。为了"用一个快 60% 的 runner"
+     而装整套 Visual Studio 是不合理的门槛。
+  2. **可校验** —— Release 资产有独立 SHA256，且由 CI 从 tag 对应 commit 构建，
+     比本机产物更可审计、更可复现。
+  3. **只想要二进制、不装插件的场景**（自定义部署、丢进 PATH）此前无处获取。
+
+  发布前跑完整门禁（版本一致性 → C# 单测 → 构建 → 体积哨兵 → 依赖检查 → A/B + IPC），
+  任一失败即中止 —— 宁可不发，不发错的。
+
+- **README 新增「下载」章节**：说明三种获取方式（Release / npm / 源码构建）及适用场景。
+
+- 修掉 npm 包里混入的 `bin/dsh-aot-runner.exe.old` 残留（多出 1.4MB 无意义体积）。
+
 ### 测试
 
 - **C# 回归测试基线 0 → 139 用例**，配套可测的覆盖率收集。

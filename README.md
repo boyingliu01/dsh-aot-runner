@@ -21,11 +21,29 @@ DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文�
 > - ✅ .NET 8+ SDK
 > - ✅ **Visual Studio Build Tools 的 C++ 工作负载**（或 VS 的「使用 C++ 的桌面开发」）
 >
-> 只装 .NET SDK 会报 `error : Platform linker not found`。
-> 不想装工具链的话，直接从 CI artifact 下载预编译的 exe。
+> 只装 .NET SDK 会报 `error : Platform linker not found`（C++ 工具链约 8GB）。
+> **不想装工具链就直接用预编译产物 —— 见下方「下载」。**
 
 **协议状态**：AOT 版实现的是与 Node 版**相同的 Node IPC 协议**（fd 3），
 可被真实 DSH host 直接调用。
+
+## 下载
+
+三种获取方式，按需要选：
+
+| 方式 | 适合谁 | 得到什么 |
+|---|---|---|
+| [**GitHub Releases**](https://github.com/boyingliu01/dsh-aot-runner/releases/latest) | 只想拿原生 exe，不想装工具链 | `dsh-aot-runner.exe` + `.zip` + `SHA256SUMS` |
+| **npm** `@boyingliu01/dsh-aot-runner` | 要接入 DSH（推荐） | 插件 + 包内自带的 exe |
+| **从源码构建** | 要改代码 / 审计构建过程 | 自己编译的 exe（需 C++ 工具链） |
+
+Release 里的二进制由 CI 从 tag 对应的 commit 构建，**无 VC++ 运行时依赖、无 .NET 运行时依赖**
+（CI 中已验证）。下载后建议核对校验和：
+
+```powershell
+Get-FileHash dsh-aot-runner.exe -Algorithm SHA256   # 对照 SHA256SUMS
+```
+
 
 > 📋 计划看 [ROADMAP.md](ROADMAP.md) ｜ 性能数据见 [docs/性能对比测试报告.md](docs/性能对比测试报告.md)
 >

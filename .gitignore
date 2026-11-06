@@ -7,6 +7,7 @@ dist-opt/
 dist-final/
 publish/
 *.exe
+*.exe.old
 *.dll
 *.pdb
 *.obj

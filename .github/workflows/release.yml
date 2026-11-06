@@ -1,0 +1,198 @@
+name: Release
+
+# 发布流程：打 tag → 构建 → 验证 → 发布 GitHub Release（含二进制）+ npm 包
+#
+# 为什么二进制必须随 Release 发布（而不是只在 npm 包里）：
+#
+#   1. **从 git clone 的人拿不到 exe**。`*.exe` 被 .gitignore 排除（构建产物不入库），
+#      而 NativeAOT 构建需要 .NET SDK + **MSVC 链接器**（VS C++ 工作负载，约 8GB）。
+#      要求每个用户为「用一个快 60% 的 runner」装一整套 C++ 工具链是不合理的。
+#      Release 附件是这些人唯一的获取途径。
+#
+#   2. **可审计**。Release 资产有独立的 SHA256 校验和，用户能在下载后核对，
+#      不依赖 npm 的 tarball 完整性；同时 CI 构建比本机构建更可信（环境可复现）。
+#
+#   3. **npm 包把 exe 塞在 tarball 里**，用户看不到单独的文件、也没法只下二进制
+#      而不装插件（比如手动丢进 PATH 或做 PATH 之外的自定义部署）。
+#
+# 触发：推 v* tag。发布前会跑完整门禁，任一失败即中止 —— 宁可不发，不发错的。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布/重发的 tag（如 v0.2.0）'
+        required: true
+        type: string
+      skip_npm:
+        description: '跳过 npm 发布（只发 GitHub Release）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    name: 构建 · 验证 · 发布
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ---- 0. 版本一致性：tag 与三个版本号文件必须完全对齐 ----
+      # 这一项放在最前面，是因为「tag 是 v0.2.0 但包里写 0.1.0」这种事故
+      # 一旦发到 npm 就**无法撤回**（只能 unpublish 或发新版本掩盖）。
+      - name: 版本一致性校验
+        shell: bash
+        run: |
+          node scripts/check-version.mjs
+          EXPECTED="${{ inputs.tag || github.ref_name }}"
+          ACTUAL="v$(cat VERSION)"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::tag ($EXPECTED) 与 VERSION ($ACTUAL) 不一致"
+            exit 1
+          fi
+          echo "版本一致: $ACTUAL"
+
+      # ---- 1. C# 单元测试（构建前跑，快速失败）----
+      - name: C# 单元测试
+        run: dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj
+
+      # ---- 2. 构建 NativeAOT ----
+      - name: 构建 NativeAOT (win-x64)
+        run: dotnet publish -c Release -r win-x64 -o dist
+
+      - name: 确认产物存在
+        shell: pwsh
+        run: |
+          if (!(Test-Path dist/dsh-aot-runner.exe)) { throw "构建产物缺失" }
+          $item = Get-Item dist/dsh-aot-runner.exe
+          Write-Host "体积: $($item.Length) 字节"
+          Write-Host "SHA256: $((Get-FileHash $item.FullName -Algorithm SHA256).Hash)"
+          # 体积哨兵：AOT 产物应在 1.2~1.8MB。异常膨胀通常是误引入了反射/裁剪失效。
+          if ($item.Length -lt 1MB -or $item.Length -gt 3MB) {
+            throw "产物体积异常: $($item.Length) 字节（预期 1.2~1.8MB）"
+          }
+
+      # ---- 3. 依赖检查：不得依赖 VC++ / .NET 运行时 ----
+      # 这是「能不能分发给陌生人」的硬条件：一旦有 vcruntime140 依赖，
+      # 没装 VC++ 可再发行组件的机器会直接启动失败。
+      - name: 依赖检查
+        shell: pwsh
+        run: |
+          $dumpbin = (Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1).FullName
+          if (-not $dumpbin) { throw "找不到 dumpbin.exe" }
+          $out = & $dumpbin /DEPENDENTS dist/dsh-aot-runner.exe 2>&1 | Out-String
+          Write-Host $out
+          foreach ($bad in @('vcruntime140', 'msvcp140', 'vcruntime140_1', 'coreclr', 'hostpolicy')) {
+            if ($out -match $bad) { throw "发现运行时依赖: $bad（分发会失败）" }
+          }
+          Write-Host "✅ 无 VC++ / .NET 运行时依赖"
+
+      # ---- 4. 回归：A/B 字节级一致性 + IPC 协议 ----
+      - name: A/B 一致性 + IPC 回归
+        env:
+          AOT_RUNNER: ${{ github.workspace }}\dist\dsh-aot-runner.exe
+        run: |
+          node --test test/ab-verify.js
+          node --test test/ipc-verify.js
+
+      # ---- 5. 打包二进制资产 ----
+      # 同时给 .zip（Windows 用户双击就能解压）和裸 .exe（脚本/CI 直接取用），
+      # 外加 SHA256SUMS 供校验。
+      - name: 打包发布资产
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.tag || github.ref_name }}"
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item dist/dsh-aot-runner.exe release/dsh-aot-runner.exe
+
+          # 附带许可证与说明，避免二进制单独流出时丢失授权信息
+          Copy-Item LICENSE release/LICENSE
+          Copy-Item README.md release/README.md
+
+          Compress-Archive -Path release/* -DestinationPath "release/dsh-aot-runner-$tag-win-x64.zip"
+
+          # 校验和（对裸 exe 和 zip 都算）
+          $lines = @()
+          foreach ($f in @("release/dsh-aot-runner.exe", "release/dsh-aot-runner-$tag-win-x64.zip")) {
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            $lines += "$h  $(Split-Path $f -Leaf)"
+          }
+          $lines | Set-Content -Path release/SHA256SUMS -Encoding ascii
+          Get-Content release/SHA256SUMS
+          Get-ChildItem release | Select-Object Name, Length
+
+      # ---- 6. 发布 GitHub Release ----
+      # 无论是否跳过 npm，GitHub Release 都要发 —— 它是二进制的**主**交付渠道。
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            **方式 A：只想要原生 exe**（不经插件）
+            下载 `dsh-aot-runner-${{ inputs.tag || github.ref_name }}-win-x64.zip`，解压即得
+            `dsh-aot-runner.exe`。校验完整性：
+
+            ```powershell
+            Get-FileHash dsh-aot-runner.exe -Algorithm SHA256   # 对照 SHA256SUMS
+            ```
+
+            **方式 B：接入 DSH**（推荐）
+            ```bash
+            npm install -g @boyingliu01/dsh-aot-runner
+            ```
+            ⚠️ 在 DSH 0.2.0-rc.2 上还需一行上游补丁才能生效，见 README 顶部说明。
+
+            ## 构建信息
+
+            - 目标：`win-x64`，NativeAOT 自包含
+            - 无 VC++ 运行时依赖、无 .NET 运行时依赖（已验证）
+            - 由 CI 从 tag 对应 commit 构建，可复现
+          files: |
+            release/dsh-aot-runner-${{ inputs.tag || github.ref_name }}-win-x64.zip
+            release/dsh-aot-runner.exe
+            release/SHA256SUMS
+            release/LICENSE
+
+      # ---- 7. 发布 npm 包 ----
+      # 放在最后：GitHub Release 是主要交付物，npm 失败不该回滚已发布的开源版本。
+      # 但如果 npm 成功而 Release 失败，用户会找不到二进制 —— 所以顺序不能反。
+      - name: 发布 npm 包
+        if: ${{ !inputs.skip_npm }}
+        working-directory: plugin
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # 确认包内带的正是刚构建的 exe，避免「发出去的包是旧二进制」
+          Copy-Item ../dist/dsh-aot-runner.exe bin/dsh-aot-runner.exe -Force
+          $built = (Get-FileHash bin/dsh-aot-runner.exe -Algorithm SHA256).Hash
+          $fresh = (Get-FileHash ../dist/dsh-aot-runner.exe -Algorithm SHA256).Hash
+          if ($built -ne $fresh) { throw "bin/ 内的 exe 与本次构建不一致" }
+
+          npm config set //registry.npmjs.org/:_authToken $env:NODE_AUTH_TOKEN
+          npm publish --access public
