@@ -94,12 +94,28 @@ jobs:
       # ---- 3. 依赖检查：不得依赖 VC++ / .NET 运行时 ----
       # 这是「能不能分发给陌生人」的硬条件：一旦有 vcruntime140 依赖，
       # 没装 VC++ 可再发行组件的机器会直接启动失败。
+      #
+      # 定位 dumpbin 不能硬编码 Program Files 路径（2026-11-06 CI 实测踩到）：
+      # GitHub windows-latest 上的 VS 装在 Enterprise 版路径下，
+      # 而第一版脚本只在 ${env:ProgramFiles(x86)} 里递归找，于是"找不到 dumpbin"
+      # 误报成构建问题。改用 vswhere —— 它是 VS 官方的定位工具，
+      # 也是 NativeAOT 自己找链接器的方式，两边口径一致才不会出现
+      # "构建成功但检查失败"这种自相矛盾。
       - name: 依赖检查
         shell: pwsh
         run: |
-          $dumpbin = (Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "找不到 vswhere.exe" }
+
+          $vsRoot = & $vswhere -latest -products * -property installationPath
+          if (-not $vsRoot) { throw "vswhere 未能定位 Visual Studio" }
+          Write-Host "VS 安装路径: $vsRoot"
+
+          $dumpbin = (Get-ChildItem $vsRoot -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1).FullName
-          if (-not $dumpbin) { throw "找不到 dumpbin.exe" }
+          if (-not $dumpbin) { throw "在 $vsRoot 下找不到 dumpbin.exe" }
+          Write-Host "dumpbin: $dumpbin"
+
           $out = & $dumpbin /DEPENDENTS dist/dsh-aot-runner.exe 2>&1 | Out-String
           Write-Host $out
           foreach ($bad in @('vcruntime140', 'msvcp140', 'vcruntime140_1', 'coreclr', 'hostpolicy')) {
