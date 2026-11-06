@@ -1,11 +1,26 @@
 # @boyingliu01/dsh-aot-runner
 
 把 DSH 的 Node.js 子进程 runner 换成 **NativeAOT 原生可执行文件**，
-每次子进程调用省约 **130~141ms**。
+消除约 **63~67%** 的 runner 开销。
+
+> ## ⚠️ 安装前必读：需要一行上游补丁
+>
+> 在 DSH **0.2.0-rc.2** 上，本插件**必须配合一个 1 行的上游补丁**才能生效。
+>
+> 原因是 DSH 的传参缺陷：`LocalSubprocessRuntime.spawn()` 调用
+> `launchWindowsJob()` / `launchLinuxScope()` 时漏传 `internals` 参数，
+> 导致所有基于 `internals` 的注入被静默忽略 —— **包括本插件**。
+>
+> **不打补丁的后果**：插件会自检到该缺陷，明确告警并**主动停用自己**（不会假装在工作）。
+> 此时子进程仍走 node runner，功能正常，只是没有加速。
+>
+> **怎么做**：见仓库 [`vendor/README.md`](../vendor/README.md)，
+> 核心命令是 `node vendor/patch-dsh.mjs apply`。
+> 上游修复（[discussion #11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)）后，删除整个 `vendor/` 目录即可。
 
 ## 效果
 
-分两层实测（2026-11-02，真实 IPC 协议），只报**离散度 < 10% 的可信轮次**：
+分两层实测，只报**离散度 < 10% 的可信轮次**：
 
 | 实现 | p50 | p99 | runner 开销 |
 |---|---|---|---|
@@ -13,29 +28,58 @@
 | node runner（默认） | 238~250ms | 331~393ms | 198~217ms |
 | **AOT runner（本插件）** | **109ms** | **173~220ms** | **69~76ms** |
 
-消除 **65.0%** 的 runner 开销，**p99 长尾改善 131~206ms**，
+消除约 **63~67%** 的 runner 开销，**p99 长尾改善 131~206ms**，
 行为与 node 版一致（28 项 A/B 用例逐字节对齐）。
 
 稳定性：120 次连续调用 0 失败，RSS 52.6 → 54.7MB 无累积增长。
 
-> 绝对值随系统负载波动很大，**收益比例（59.1%~59.6%，生产路径三轮收敛）才是稳定指标**。
+> **关于口径**：绝对值随系统负载波动很大（同一台机器不同时段实测得到过
+> 92ms / 116ms / 168ms / 197ms 的净差值）。**收益比例才是稳定指标** ——
+> 独立测量结果为 64.1%、66.6%、63.5%，因此统一表述为「约 63~67%」。
 > 完整数据见仓库 [`docs/性能对比测试报告.md`](../docs/性能对比测试报告.md)。
 
 ## 安装
 
+### 第 1 步：确认已有 AOT 可执行文件
+
+本包按 npm 发布时**自带** `bin/dsh-aot-runner.exe`（Windows x64），安装后即可用。
+
+如果你是**从 git 仓库 clone 的**，`bin/` 不在版本库里（构建产物不入库），
+需要先构建，或从 CI 的 artifact 下载：
+
 ```bash
-dsh plugin add ./plugin        # 从本仓库安装
+./build.sh                     # 需要 .NET SDK + MSVC C++ 工具链
 ```
 
-或在 profile 的 `package.json` 里加：
+> 构建依赖：`.NET 8+ SDK` + **Visual Studio Build Tools 的 C++ 工作负载**
+> （NativeAOT 在 Windows 上强制要求 MSVC 链接器 `link.exe`）。
+> 只装 .NET SDK 是不够的 —— 这是最容易踩的坑。
+
+### 第 2 步：打上游补丁（必读，见顶部说明）
+
+```bash
+node vendor/patch-dsh.mjs status   # 先看当前状态
+node vendor/patch-dsh.mjs apply    # 需要时打补丁
+```
+
+### 第 3 步：安装插件
+
+```bash
+dsh plugin add <插件所在目录>
+```
+
+或在 profile 的 `package.json` 里用 **link 指向你本机的绝对路径**
+（把下面的路径换成你实际 clone 的位置）：
 
 ```json
 {
   "dependencies": {
-    "@boyingliu01/dsh-aot-runner": "link:D:/projects/dsh-aot-runner/plugin"
+    "@boyingliu01/dsh-aot-runner": "link:C:/path/to/dsh-aot-runner/plugin"
   }
 }
 ```
+
+> 从 npm 安装时直接写版本号即可：`"@boyingliu01/dsh-aot-runner": "^0.2.0"`
 
 然后在 profile 的 `cordis.patch.yml` 里启用：
 
@@ -123,7 +167,22 @@ AOT runner 实现了与 node runner **相同的 Node IPC 协议**（fd 3），
 
 - 仅 Windows（x64）
 - 需要 DSH ≥ 0.2.0（依赖 `internals.runnerInvocation` 这个测试接缝）
+- **在 DSH 0.2.0-rc.2 上必须打上游补丁**（见顶部说明与 `vendor/README.md`），
+  否则插件会自检到缺陷并主动停用
 - 熔断降级的端到端验证尚未覆盖（见仓库 `test/e2e-plugin-verify.js` 的说明）
+
+## 排查：装上但没生效？
+
+按顺序检查：
+
+1. **`config.enabled` 是否为 `true`** —— 包内默认是 `false`（装上不自动接管）
+2. **上游补丁是否已打**：
+   ```bash
+   node vendor/patch-dsh.mjs status
+   # 期望：状态: ✅ 已打补丁
+   ```
+3. **DSH 是否加载了插件**：`dsh --profile <name> --dump-config | grep -A5 aot-runner`
+4. **exe 是否存在**：`runnerPath` 显式配置了错误路径时，插件会告警并不生效（不静默回退）
 
 ## 许可
 

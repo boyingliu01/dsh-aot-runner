@@ -86,7 +86,7 @@
 ```json
 {
   "dependencies": {
-    "@boyingliu01/dsh-aot-runner": "link:D:/projects/dsh-aot-runner/plugin"
+    "@boyingliu01/dsh-aot-runner": "link:C:/path/to/dsh-aot-runner/plugin"
   },
   "dsh": {
     "profile": {

@@ -17,10 +17,10 @@
 用**全局安装**的 xp-gate `0.36.0`（用户明确要求不依赖本地源码副本）：
 
 ```
-/c/Users/think/AppData/Roaming/npm/node_modules/@boyingliu01/xp-gate
-/c/Users/think/AppData/Roaming/npm/xp-gate            # CLI
-/c/Users/think/.config/xp-gate/hooks/                 # hook（实际执行入口）
-/c/Users/think/.config/xp-gate/adapters/              # 语言适配器（含 csharp.sh）
+$APPDATA/npm/node_modules/@boyingliu01/xp-gate
+$APPDATA/npm/xp-gate            # CLI
+~/.config/xp-gate/hooks/                 # hook（实际执行入口）
+~/.config/xp-gate/adapters/              # 语言适配器（含 csharp.sh）
 ```
 
 ### 0.2 hook 链式结构
