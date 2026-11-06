@@ -45,8 +45,19 @@ Release 里的二进制由 CI 从 tag 对应的 commit 构建，**无 VC++ 运�
 （CI 中已验证）。下载后建议核对校验和：
 
 ```powershell
+# Windows PowerShell
 Get-FileHash dsh-aot-runner.exe -Algorithm SHA256   # 对照 SHA256SUMS
 ```
+
+```bash
+# Linux / macOS / Git Bash
+sha256sum -c SHA256SUMS
+```
+
+> `SHA256SUMS` 用 LF 行尾，上面这条命令在三个平台都能直接用。
+> （0.2.1 及更早的 Release 里这份文件是 CRLF，Linux 上 `sha256sum -c` 会报
+> `'dsh-aot-runner.exe'$'\r': No such file`；遇到就用 `tr -d '\r' < SHA256SUMS | sha256sum -c -`。
+> 该问题已在发布流程中修复。）
 
 
 > 📋 计划看 [ROADMAP.md](ROADMAP.md) ｜ 性能数据见 [docs/性能对比测试报告.md](docs/性能对比测试报告.md)
