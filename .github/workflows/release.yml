@@ -218,19 +218,38 @@ jobs:
             release/LICENSE
 
       # ---- 7. 发布 npm 包 ----
-      # 放在最后：GitHub Release 是主要交付物，npm 失败不该回滚已发布的开源版本。
-      # 但如果 npm 成功而 Release 失败，用户会找不到二进制 —— 所以顺序不能反。
+      # 放在最后：GitHub Release 是主要交付物（二进制），npm 失败不该回滚已发布的开源版本。
+      # 但顺序不能反 —— 若 npm 先成功而 Release 失败，用户会在 npm 上找不到二进制的说明。
+      #
+      # 两个坑（2026-11-06 实测踩到）：
+      #   1. plugin/bin/ 被 .gitignore 排除（构建产物不入库），CI 里 checkout 之后
+      #      这个目录根本**不存在**，`Copy-Item ... bin/` 直接报错。
+      #      必须先 New-Item -ItemType Directory。
+      #   2. NPM_TOKEN secret 没配时 NODE_AUTH_TOKEN 是空串，npm 会报
+      #      ENEEDAUTH，而日志里看不出来「是没配 secret」。所以显式判空并给出提示。
       - name: 发布 npm 包
         if: ${{ !inputs.skip_npm }}
         working-directory: plugin
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: pwsh
         run: |
-          # 确认包内带的正是刚构建的 exe，避免「发出去的包是旧二进制」
+          if (-not $env:NODE_AUTH_TOKEN) {
+            Write-Host "::warning::未配置 NPM_TOKEN secret —— 跳过 npm 发布。"
+            Write-Host "  GitHub Release（含二进制）已正常发布，不受影响。"
+            Write-Host "  需要发 npm 时，在仓库 Settings → Secrets 里加 NPM_TOKEN（npm 的 Automation Token）。"
+            exit 0
+          }
+
+          # bin/ 不入库，CI 上必须显式创建
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
           Copy-Item ../dist/dsh-aot-runner.exe bin/dsh-aot-runner.exe -Force
+
+          # 确认包内带的正是刚构建的 exe，避免「发出去的包是旧二进制」
           $built = (Get-FileHash bin/dsh-aot-runner.exe -Algorithm SHA256).Hash
           $fresh = (Get-FileHash ../dist/dsh-aot-runner.exe -Algorithm SHA256).Hash
           if ($built -ne $fresh) { throw "bin/ 内的 exe 与本次构建不一致" }
+          Write-Host "bin/ 内 exe 校验通过: $built"
 
           npm config set //registry.npmjs.org/:_authToken $env:NODE_AUTH_TOKEN
           npm publish --access public
