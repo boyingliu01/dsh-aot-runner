@@ -75,6 +75,11 @@ opencode.json
 # xp-gate 本机探测到的语言/工具清单（由 detect-languages 生成，随机器变化）
 .xp-gate-config.json
 
+# xp-gate 每次跑门禁生成的报告与历史（随机器/时间变化，不是项目状态）
+.xp-gate/reports/
+.xp-gate/quality-status/
+.quality-history.jsonl
+
 # dotnet test 覆盖率产物（每次跑都会生成新的 GUID 子目录）
 tests/**/TestResults/
 
