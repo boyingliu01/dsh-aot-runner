@@ -22,7 +22,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const CHILD = path.join(__dirname, 'real-glob.js');
-const TARGET = 'D:/projects/dsh-aot-runner';
+const TARGET = path.resolve(__dirname, '..', '..');
 const ROUNDS = parseInt(process.argv[2], 10) || 30;
 
 function median(xs) {

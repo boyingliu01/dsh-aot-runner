@@ -17,7 +17,7 @@ const { spawn } = require('child_process');
 const { stat, readFile } = require('node:fs/promises');
 const path = require('path');
 
-const REPO = 'D:/projects/dsh-aot-runner';
+const REPO = path.resolve(__dirname, '..', '..');
 const AOT = path.join(REPO, 'dist', 'dsh-aot-runner.exe');
 const FILE = path.join(__dirname, 'files', 'f000.js');
 
