@@ -124,9 +124,31 @@ jobs:
           Write-Host "✅ 无 VC++ / .NET 运行时依赖"
 
       # ---- 4. 回归：A/B 字节级一致性 + IPC 协议 ----
+      # ---- 4. 取自 DSH 的 node runner 作为 A/B 基线 ----
+      # A/B 验证要有**对照物**：AOT 的输出必须与 node 版逐字节一致。
+      # node 版来自 @deepseek-ai/dsh-subprocess-local/lib/runner.js。
+      #
+      # 这个包没有（也不该）写进本仓库的 dependencies —— 它是被测环境的一部分，
+      # 不是本项目的依赖。所以 CI 上必须显式装一份，否则
+      # runner-client.js 找不到基线，A/B 直接以"测试环境未就绪"失败。
+      # （首轮 Release run 42221500055 就是这么挂的：本机有 DSH 全局安装所以本地永远绿。）
+      - name: 安装 DSH subprocess-local（A/B 基线）
+        run: |
+          # 固定到与开发环境一致的版本，避免上游改动让 A/B 结论漂移
+          $ver = "0.2.0-rc.2"
+          New-Item -ItemType Directory -Force -Path baseline | Out-Null
+          Push-Location baseline
+          npm init -y | Out-Null
+          npm install "@deepseek-ai/dsh-subprocess-local@$ver" --no-audit --no-fund
+          Pop-Location
+          $runner = "baseline/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js"
+          if (!(Test-Path $runner)) { throw "基线 runner.js 缺失: $runner" }
+          Write-Host "基线 runner: $runner"
+
       - name: A/B 一致性 + IPC 回归
         env:
           AOT_RUNNER: ${{ github.workspace }}\dist\dsh-aot-runner.exe
+          DSH_RUNNER: ${{ github.workspace }}\baseline\node_modules\@deepseek-ai\dsh-subprocess-local\lib\runner.js
         run: |
           node --test test/ab-verify.js
           node --test test/ipc-verify.js
