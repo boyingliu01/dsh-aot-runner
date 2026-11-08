@@ -46,14 +46,12 @@
     <!-- 本项目零反射，可安全禁用 -->
     <IlcDisableReflection>true</IlcDisableReflection>
 
-    <!-- ===== 编译期质量门禁 =====
-         把「警告」当错误处理，避免实验期的宽松编译把问题带进正式代码。
-         TreatWarningsAsErrors 只对确定性规则生效；NativeAOT 的裁剪/AOT 分析器
-         输出仍走 warning，这里一并升级，任何新增告警都会挡住构建。 -->
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <WarningLevel>9999</WarningLevel>
-    <AnalysisLevel>latest-recommended</AnalysisLevel>
-    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <!-- ===== 编译期严格度：不在项目里声明 =====
+         值由 XP-Gate Gate 13 适配器统一定义，构建脚本、CI、提交门禁三处都向它索取，
+         所以这里、build.sh、workflow 里都不重复写参数（写死就会有两份来源）。
+
+         想调整严格度：改适配器，或设 XP_GATE_COMPILER_STRICTNESS=balanced|strict|warn-only。
+         不要在项目文件里加回 TreatWarningsAsErrors 之类的属性。 -->
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 

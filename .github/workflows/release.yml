@@ -64,6 +64,27 @@ jobs:
           # npm publish 才知道往哪发。OIDC 模式下 authToken 实际不用。
           registry-url: 'https://registry.npmjs.org'
 
+      # 编译严格度由 Gate 13 适配器统一提供，发布流程同样不另抄一份参数。
+      - name: 安装 XP-Gate（提供唯一的编译严格度定义）
+        shell: bash
+        run: |
+          npm install -g @boyingliu01/xp-gate
+          xp-gate --version
+
+      - name: 解析编译严格度参数
+        shell: bash
+        run: |
+          set -e
+          ADAPTER="$HOME/.config/xp-gate/adapters/gate-13-compiler-strictness.sh"
+          if [ ! -f "$ADAPTER" ]; then
+            echo "::error::找不到 Gate 13 适配器：$ADAPTER"
+            exit 1
+          fi
+          source "$ADAPTER"
+          FLAGS=$(gate13_csharp_flags balanced)
+          echo "STRICT_FLAGS=$FLAGS" >> "$GITHUB_ENV"
+          echo "严格度: $FLAGS"
+
       # ---- 0. 版本一致性：tag 与三个版本号文件必须完全对齐 ----
       # 这一项放在最前面，是因为「tag 是 v0.2.0 但包里写 0.1.0」这种事故
       # 一旦发到 npm 就**无法撤回**（只能 unpublish 或发新版本掩盖）。
@@ -81,11 +102,17 @@ jobs:
 
       # ---- 1. C# 单元测试（构建前跑，快速失败）----
       - name: C# 单元测试
-        run: dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj
+        shell: bash
+        run: |
+          # 编译测试项目时也要带严格度参数，否则测试代码的告警会被忽略。
+          dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj $STRICT_FLAGS
 
       # ---- 2. 构建 NativeAOT ----
       - name: 构建 NativeAOT (win-x64)
-        run: dotnet publish -c Release -r win-x64 -o dist
+        shell: bash
+        run: |
+          # 必须指定 .csproj 而不是 sln：sln + --output 会触发 NETSDK1194。
+          dotnet publish DshAotRunner.csproj -c Release -r win-x64 -o dist $STRICT_FLAGS
 
       - name: 确认产物存在
         shell: pwsh
