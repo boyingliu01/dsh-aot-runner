@@ -69,6 +69,23 @@ jobs:
           # npm publish 才知道往哪发。OIDC 模式下 authToken 实际不用。
           registry-url: 'https://registry.npmjs.org'
 
+      # Trusted Publishing（OIDC）要求 npm >= 11.5.1，而 Node 22 自带的是 npm 10.x。
+      # 不升级的话，即使 npm 网站上配好了 Trusted Publisher，发布仍会以
+      # ENEEDAUTH 失败 —— 报错完全不提版本，排查起来毫无线索。
+      - name: 升级 npm（Trusted Publishing 需要 >= 11.5.1）
+        shell: bash
+        run: |
+          set -e
+          npm install -g npm@latest
+          # 断言版本足够，避免以后 setup-node 换了镜像又悄悄退回去
+          NPM_MAJOR=$(npm --version | cut -d. -f1)
+          NPM_MINOR=$(npm --version | cut -d. -f2)
+          echo "npm $(npm --version)"
+          if [ "$NPM_MAJOR" -lt 11 ] || { [ "$NPM_MAJOR" -eq 11 ] && [ "$NPM_MINOR" -lt 5 ]; }; then
+            echo "::error::npm $(npm --version) 低于 11.5.1，Trusted Publishing 无法工作"
+            exit 1
+          fi
+
       # 编译严格度由 Gate 13 适配器统一提供，发布流程同样不另抄一份参数。
       #
       # 与 ci.yml 用同一个 ref（见 workflow 顶部的 XP_GATE_ADAPTER_REF）：
