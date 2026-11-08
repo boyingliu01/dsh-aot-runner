@@ -12,11 +12,21 @@ internal sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
     // 这里把构造函数开放为 public，实例仍只经 Create() 产生。
     public SafeJobHandle() : base(true) { }
 
-    public static SafeJobHandle Create()
+    public static SafeJobHandle Create() =>
+        FromRawHandle(Native.CreateJobObjectW(IntPtr.Zero, null), Marshal.GetLastWin32Error());
+
+    /// <summary>
+    /// 从 CreateJobObjectW 的返回值构造；无效句柄抛 <see cref="Win32Exception"/>。
+    /// </summary>
+    /// <remarks>
+    /// 抽出这一步是为了让「创建失败」分支可测：Job Object 创建成功与否取决于
+    /// 系统资源与权限，测试里没法稳定复现失败。这个重载只接受原始返回值，
+    /// 测试就能直接传 IntPtr.Zero 验证错误路径，而不必真的耗尽系统句柄。
+    /// </remarks>
+    internal static SafeJobHandle FromRawHandle(IntPtr raw, int lastError)
     {
-        var raw = Native.CreateJobObjectW(IntPtr.Zero, null);
         if (raw == IntPtr.Zero || raw == new IntPtr(-1))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObjectW failed");
+            throw new Win32Exception(lastError, "CreateJobObjectW failed");
         var handle = new SafeJobHandle();
         handle.SetHandle(raw);
         return handle;

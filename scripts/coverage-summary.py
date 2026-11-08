@@ -91,6 +91,37 @@ def print_per_class(per_class):
         print("  %5.1f%%  %-40s %d/%d" % (pct(hit, valid), name, hit, valid))
 
 
+# ---- 覆盖率门槛（ratchet）----
+#
+# 为什么要有门槛：覆盖率只会「一次性拉高、然后慢慢滑落」。
+# 没有硬门槛时，新加的代码很容易悄悄把整体拉低，且没人会注意到。
+#
+# 门槛值取「当前实测值向下取整」，之后再逐步抬高（ratchet）。
+# 加功能时覆盖率可能小幅下降，那就同时补测试 —— 这是有意的摩擦。
+#
+# 与被测代码同源维护：改了阈值必须在本文件里改，评审时一眼能看到。
+THRESHOLDS = {
+    "生产源码": 99.0,
+}
+
+
+def check_thresholds(per_class):
+    """核对覆盖率门槛；未达标返回 False。"""
+    src_hit, src_valid = totals(per_class, want_non_source=False)
+    actual = pct(src_hit, src_valid)
+
+    print()
+    print("=== 覆盖率门槛 ===")
+    ok = True
+    for label, floor in THRESHOLDS.items():
+        got = actual
+        status = "PASS" if got >= floor else "FAIL"
+        if got < floor:
+            ok = False
+        print("  %-8s 实际 %5.1f%%  门槛 %5.1f%%  %s" % (label, got, floor, status))
+    return ok
+
+
 def is_empty_report(path):
     """报告是否为空（根元素 lines-valid="0"）。
 
@@ -147,7 +178,7 @@ def main():
     print("报告: %s" % norm(path))
     print_summary(per_class)
     print_per_class(per_class)
-    return 0
+    return 0 if check_thresholds(per_class) else 1
 
 
 if __name__ == "__main__":

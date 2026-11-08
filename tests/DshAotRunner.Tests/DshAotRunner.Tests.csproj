@@ -10,8 +10,8 @@
     <PublishAot>false</PublishAot>
     <EnableAotAnalyzer>false</EnableAotAnalyzer>
     <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <WarningLevel>9999</WarningLevel>
+    <!-- 编译期严格度由全局 XP-Gate Gate 13 统一注入（见 DshAotRunner.csproj 说明）。
+         本项目不再重复声明。测试代码特有的分析器规则豁免见同目录 .editorconfig。 -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <RootNamespace>DshAotRunner.Tests</RootNamespace>
   </PropertyGroup>

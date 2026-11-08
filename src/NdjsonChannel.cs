@@ -20,10 +20,22 @@ internal sealed class NdjsonChannel : IMessageChannel
     public string Diagnostics { get; }
 
     public NdjsonChannel()
+        : this(Console.OpenStandardInput(), Console.OpenStandardOutput())
     {
-        var stdin = Console.OpenStandardInput();
-        _out = Console.OpenStandardOutput();
-        _reader = new LineReader(stdin);
+    }
+
+    /// <summary>
+    /// 测试专用构造：注入任意输入/输出流。
+    /// </summary>
+    /// <remarks>
+    /// 生产路径固定用 stdin/stdout；但那样一来 Send/ReadMessage 就无法在不劫持
+    /// 真实控制台的前提下测试。DSH 的 --ndjson 是调试入口，恰恰是最容易被随手改坏、
+    /// 又最难被端到端覆盖的一块，所以给它留一条流注入的路径。
+    /// </remarks>
+    internal NdjsonChannel(Stream input, Stream output)
+    {
+        _out = output;
+        _reader = new LineReader(input);
         Diagnostics = "--ndjson mode: stdin/stdout (debug only, NOT for production host)";
     }
 

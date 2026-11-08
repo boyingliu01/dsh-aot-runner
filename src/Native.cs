@@ -29,6 +29,15 @@ internal static class Native
 
     public const uint STILL_ACTIVE = 259;
     public const int ERROR_BROKEN_PIPE = 109;
+    /// <summary>
+    /// ERROR_PIPE_NOT_CONNECTED —— 管道未连接。
+    /// </summary>
+    /// <remarks>
+    /// 这是 <b>host detach 之后读管道真正会拿到</b>的错误码，与
+    /// <see cref="ERROR_NO_DATA"/>(232) 是不同的码。
+    /// 该常量早就存在，但 <see cref="IpcChannel.IsEndOfStream"/> 曾只判 232 而没判它 ——
+    /// 等于守门人认错了人。现已一并纳入，且有单测逐个错误码断言。
+    /// </remarks>
     public const int ERROR_PIPE_NOT_CONNECTED = 233;
 
     /// <summary>ERROR_NOT_SUSPENDED —— 线程本来就处于运行态，不是 ResumeThread 失败。</summary>
@@ -205,8 +214,16 @@ internal static class Native
     public static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite,
         out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
 
-    /// <summary>ERROR_NO_DATA —— 管道正在被关闭（Windows 上的另一种 EOF 形态）。</summary>
+    /// <summary>
+    /// ERROR_NO_DATA(232) —— 管道正在被关闭。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="ERROR_PIPE_NOT_CONNECTED"/>(233) 是两个不同的码，
+    /// 历史上在 <see cref="IpcChannel"/> 里被混用过：注释写 233、常量写 232。
+    /// 两者都表示「对端已不可用」，都必须判成 EOF。
+    /// </remarks>
     public const int ERROR_NO_DATA = 232;
+
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe,
@@ -225,13 +242,45 @@ internal static class Native
     [DllImport("ucrtbase.dll", SetLastError = true)]
     private static extern IntPtr _get_osfhandle(int fd);
 
-    public static IntPtr CrtGetOsFHandle(int fd)
-    {
-        try { return _get_osfhandle(fd); }
-        catch { return IntPtr.Zero; }
-    }
+    public static IntPtr CrtGetOsFHandle(int fd) => _get_osfhandle(fd);
+
+    // ---- 关于「探测 fd 是否有效」的重要限制 ----
+    //
+    // 对**尚未分配**的 fd 调 _get_osfhandle / _dup2，CRT 走的是 _invoke_watson
+    // —— 它直接 abort 进程。这不是 .NET 异常，try/catch 拦不住，
+    // _set_invalid_parameter_handler 也拦不住（已实测确认）。
+    //
+    // 因此本项目的规矩是：**从不主动探测任意编号的 fd**。
+    // 只读 host 明确声明会给的那几个（3/4/5/6/7）；测试里由 FdLayoutHost
+    // 预先把这些槽位占住，让探测落在「已分配但句柄无效」上而不是洞里。
+    //
+    // 曾尝试安装 _set_invalid_parameter_handler 来「挡住」abort，实测无效，
+    // 代码已移除 —— 留一段装不上还会被误以为保护生效的代码，比没有更危险。
+
+    // ---- CRT 文件描述符注入（仅测试宿主使用）----
+    //
+    // 生产路径只有 _get_osfhandle：fd 4/5/6 由 host 的 spawn 布局给定。
+    // 但要在**单元测试**里覆盖 JobRunner 的编排逻辑（CreateProcessW / Job 入队 /
+    // fd 表编码），必须先在自己的进程里造出同样的 fd 4/5/6 布局 ——
+    // 否则那些代码路径只能靠端到端测试间接摸到。
+    //
+    // 仅供 tests/DshAotRunner.Tests/FdLayoutHost.cs 使用。
+    [DllImport("ucrtbase.dll", SetLastError = true)]
+    private static extern int _open_osfhandle(IntPtr osfhandle, int flags);
+
+    [DllImport("ucrtbase.dll", SetLastError = true)]
+    private static extern int _dup2(int fd1, int fd2);
+
+    /// <summary>把 Win32 句柄登记进 CRT 描述符表，返回分配到的 fd（失败 -1）。</summary>
+    /// <remarks>注意：登记成功后该句柄的所有权归 CRT。</remarks>
+    public static int CrtOpenOsFHandle(IntPtr handle, int flags) =>
+        _open_osfhandle(handle, flags);
+
+    /// <summary>把 <paramref name="fd1"/> 复制到 <paramref name="fd2"/> 位置（成功 0）。</summary>
+    public static int CrtDup2(int fd1, int fd2) => _dup2(fd1, fd2);
 
     public const int STD_INPUT_HANDLE = -10;
     public const int STD_OUTPUT_HANDLE = -11;
     public const int STD_ERROR_HANDLE = -12;
 }
+

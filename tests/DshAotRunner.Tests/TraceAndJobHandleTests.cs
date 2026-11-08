@@ -21,7 +21,7 @@ using Xunit;
 
 namespace DshAotRunner.Tests;
 
-[Collection("TraceEnvironment")]
+[Collection("TraceEnv")]
 public sealed class TraceTests : IDisposable
 {
     private readonly string _logPath;
