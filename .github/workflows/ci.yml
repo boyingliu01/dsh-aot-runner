@@ -184,6 +184,17 @@ jobs:
           }
           Write-Host "无 VC++ 运行时依赖 ✅"
 
+      - name: 安装 DSH subprocess-local（A/B 基线）
+        shell: bash
+        run: |
+          # A/B 验证要拿 Node 版 runner 作基线，没装就直接报「测试环境未就绪」。
+          # 固定版本，避免上游改动让 A/B 结论漂移。
+          VER="0.2.0-rc.2"
+          mkdir -p baseline
+          cd baseline
+          npm init -y > /dev/null
+          npm install "@deepseek-ai/dsh-subprocess-local@$VER" --no-audit --no-fund
+
       - name: A/B 一致性验证
         # 注意：完整套件含 100 次泄漏回归（约 3 分钟）和竞态（约 3 分钟），
         # 这里只跑核心 A/B 以控制额度消耗。完整套件在本地跑。
