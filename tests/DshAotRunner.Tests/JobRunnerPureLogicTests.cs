@@ -316,14 +316,20 @@ public class JobRunnerPureLogicTests
     }
 
     [Fact]
-    public void BuildEnvironmentBlock_空env仍有双null()
+    public void BuildEnvironmentBlock_空env必须4字节()
     {
-        // 关键回归：空 env 时若只产出 2 字节，CreateProcessW 返回
-        // ERROR_INVALID_PARAMETER(87)。
+        // 关键回归：CreateProcessW 对空环境块的要求是**两次宽 NULL 终止**。
+        // 实测确认（见 JobRunnerOrchestrationTests 的端到端验证）：
+        //   2 字节 → ERROR_INVALID_PARAMETER(87)
+        //   4 字节 → 成功
+        //
+        // 这条测试原先断言 2 字节，注释却写着「2 字节会返回 87」——
+        // 注释和断言互相矛盾，等于把 bug 锁死了。真实后果是
+        // **host 一旦传空 env，所有 spawn 全部失败**。
         var block = JobRunner.BuildEnvironmentBlock(new Dictionary<string, string>());
 
-        Assert.Equal(2, block.Length);
-        Assert.Equal(new byte[] { 0, 0 }, block);
+        Assert.Equal(4, block.Length);
+        Assert.Equal(new byte[] { 0, 0, 0, 0 }, block);
     }
 
     [Fact]
@@ -348,5 +354,42 @@ public class JobRunnerPureLogicTests
         Assert.Equal(10, block.Length);
         Assert.Equal(0x2D, block[4]);
         Assert.Equal(0x4E, block[5]);
+    }
+    // ============ HasWaitableProcess / 等待策略 ============
+    // 背景：PollLoop 原先是无条件 Thread.Sleep(10)，每次调用白付 5ms 均值 / 10ms 最坏。
+    // 这个 10ms 抄自 node 版 runner.js 的 setInterval(..., 10)，那是 Node 定时器
+    // 分辨率的上限，不是协议要求。C# 可以用 WaitForSingleObject 在 target 退出瞬间返回。
+    //
+    // 下面几条锁住「什么时候能走事件驱动、什么时候必须退化成睡」。
+    // 退化判断一旦错了，要么白等 10ms（性能回归），要么在没句柄时忙等烧 CPU。
+
+    [Fact]
+    public void HasWaitableProcess_null句柄不可等()
+    {
+        // 尚未 start：没有进程句柄，必须退化成定时轮询，不能忙等。
+        Assert.False(JobRunner.HasWaitableProcess(null));
+    }
+
+    [Fact]
+    public void HasWaitableProcess_关闭后的句柄不可等()
+    {
+        // target 已退出并释放：句柄已关闭，再拿去 WaitForSingleObject 会拿到
+        // WAIT_FAILED，然后变成忙循环。必须判成「不可等」。
+        var handle = new SafeKernelHandle();
+        handle.Dispose();
+
+        Assert.False(JobRunner.HasWaitableProcess(handle));
+    }
+
+    [Fact]
+    public void HasWaitableProcess_未初始化句柄不可等()
+    {
+        // SafeHandleZeroOrMinusOneIsInvalid：默认构造 = 零句柄 = 无效，
+        // 不可拿去等待（会立即返回 WAIT_OBJECT_0，让 poll 空转）。
+        var handle = new SafeKernelHandle();
+
+        Assert.True(handle.IsInvalid);
+        Assert.False(JobRunner.HasWaitableProcess(handle));
+        handle.Dispose();
     }
 }

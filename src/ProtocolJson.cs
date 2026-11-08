@@ -4,6 +4,7 @@
 //   - 解析用 JsonDocument 遍历（启动开销 ~33ms，可接受）
 //   - 序列化用 StringBuilder 手工拼装 + 最小转义（唯一用到 JsonDocument 的地方是解析）
 //   - 严格保持与 Node runner 一致的字段名与错误对象形状
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -161,7 +162,7 @@ internal static class ProtocolJson
             if (EscapeMap.TryGetValue(c, out var escaped))
                 sb.Append(escaped);
             else if (c < 0x20 || c > 0x7E)
-                sb.Append("\\u").Append(((int)c).ToString("x4"));
+                sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
             else
                 sb.Append(c);
         }

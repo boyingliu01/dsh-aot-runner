@@ -12,7 +12,25 @@ namespace DshAotRunner;
 /// </summary>
 internal sealed class JobRunner : IDisposable
 {
-    private const int PollIntervalMs = 10;          // RUNNER-SPEC §7
+    /// <summary>
+    /// 等待超时上界（毫秒）。
+    /// </summary>
+    /// <remarks>
+    /// 名字沿用历史，语义已变：它不再是一个「定时睡这么久」的轮询间隔，
+    /// 而是 <see cref="WaitForProgress"/> 里「有可等句柄时」的等待超时，
+    /// 以及「没有可等句柄时」的兜底睡眠时长。
+    /// <para>
+    /// 为什么必须保留 10ms：<see cref="Poll"/> 除了等 target 退出，还要周期性检查
+    /// job 是否已空（整棵进程树回收完）。后者没有可等待句柄，只能靠它驱动。
+    /// target 退出这条主路径已经由 <c>WaitForSingleObject</c> 事件化了，
+    /// 不再受这个数字影响。
+    /// </para>
+    /// <para>
+    /// 10 这个值来自 node 版 <c>setInterval(..., 10)</c>，属于协议对齐的遗留，
+    /// 不要因为「看起来还能调小」而随手改 —— 它现在只影响 job 收尾的复查频率。
+    /// </para>
+    /// </remarks>
+    private const int PollIntervalMs = 10;
 
     private readonly string[] _argv;
     private readonly IMessageChannel _channel;
@@ -139,7 +157,12 @@ internal sealed class JobRunner : IDisposable
     {
         // 注意：这里只用 JsonDocument（启动开销 ~33ms）。
         // 绝不能用 JsonSerializer.Deserialize —— AOT 下会多付 ~1.2s 启动代价。
-        var type = ProtocolJson.PeekType(line, out var jsonError);
+        string? type;
+        string? jsonError;
+        using (Trace.Measure("json-peek-type"))
+        {
+            type = ProtocolJson.PeekType(line, out jsonError);
+        }
         if (jsonError is not null)
         {
             FailProtocol($"invalid JSON: {jsonError}");
@@ -182,17 +205,29 @@ internal sealed class JobRunner : IDisposable
         }
 
         _startSeen = true;
-        var req = ProtocolJson.ParseStart(line, out var parseError);
-        if (req is null)
+        StartRequest? req;
+        string? parseError;
+        using (Trace.Measure("json-parse-start"))
         {
-            FailProtocol($"invalid start request: {parseError ?? "parse failed"}");
-            return;
+            req = ProtocolJson.ParseStart(line, out parseError);
         }
-
-        HandleStart(req);
+        // 这里不需要再判 req is null：
+        // HandleMessage 已经用 PeekType 校验过「JSON 合法 + root 是对象 + type 是字符串」，
+        // 而 ParseStart 只在「JSON 非法」或「root 非对象」时返回 null —— 两者都被前置拦下了。
+        // 保留一个永远进不去的分支比删掉更糟：它会让读者以为还有一条错误路径要维护。
+        HandleStart(req!);
     }
 
     // ---------------- start ----------------
+
+    /// <summary>测试入口：直接走 HandleStart，跳过消息分派与 JSON 解析。</summary>
+    /// <remarks>
+    /// HandleStart 的错误分支（EJOBCREATE / ENOENT / EPROTOCOL-control）
+    /// 都需要 Win32 层失败才能到达，正常环境里几乎不可复现。
+    /// 配合 <see cref="CreateJob"/> 与 <see cref="SpawnTargetHook"/> 注入，
+    /// 就能在没有真实故障的情况下验证这些分支投递的错误是否正确。
+    /// </remarks>
+    internal void HandleStartForTest(StartRequest req) => HandleStart(req);
 
     private void HandleStart(StartRequest req)
     {
@@ -206,37 +241,24 @@ internal sealed class JobRunner : IDisposable
         SafeJobHandle job;
         try
         {
-            job = SafeJobHandle.Create();
+            job = CreateJob();
             job.EnableKillOnClose();                  // RUNNER-SPEC §5.3 步骤 1-2
         }
         catch (Win32Exception ex)
         {
-            PublishResult(new ErrorResult
-            {
-                Error = new SerializedError { Name = "Error", Message = ex.Message, Code = "EJOBCREATE" }
-            });
+            PublishResult(MakeJobCreateError(ex));
             return;
         }
         _job = job;
 
         try
         {
-            SpawnTarget(req, job);
+            (SpawnTargetHook ?? SpawnTarget)(req, job);
         }
         catch (Win32Exception ex)
         {
             // CreateProcessW 失败 → 错误带 path（RUNNER-SPEC §6.2）
-            PublishResult(new ErrorResult
-            {
-                Error = new SerializedError
-                {
-                    Name = "Error",
-                    Message = ex.Message,
-                    Code = "ENOENT",
-                    Syscall = "spawn",
-                    Path = _argv.Length > 0 ? _argv[0] : null
-                }
-            });
+            PublishResult(MakeSpawnError(ex));
             return;
         }
 
@@ -251,8 +273,16 @@ internal sealed class JobRunner : IDisposable
         // CreateProcessW 的第一个参数为 NULL 时，用命令行首 token 查找可执行文件。
         // 若该 token 不含路径分隔符且不在 PATH 中，会返回 ERROR_FILE_NOT_FOUND(2)。
         // 这里先用 .NET 的查找逻辑解析成绝对路径，避免依赖 CreateProcessW 的搜索策略。
-        var cmdline = BuildCommandLine(_argv);
-        var appName = ResolveExecutable(_argv[0], req.Cwd, req.Env);
+        string cmdline;
+        using (Trace.Measure("build-cmdline"))
+        {
+            cmdline = BuildCommandLine(_argv);
+        }
+        string? appName;
+        using (Trace.Measure("resolve-exe"))
+        {
+            appName = ResolveExecutable(_argv[0], req.Cwd, req.Env);
+        }
         if (appName is null)
         {
             // 与 node 一致：候选全部不存在 → ENOENT，文本对齐 libuv/Node 的 spawn 错误
@@ -266,10 +296,18 @@ internal sealed class JobRunner : IDisposable
         // targetEnvironment / controlEnvironment），随 start 请求的 env 一起送达，
         // runner 只负责原样透传。runner 自己再注入一次会造成与 node 的分歧 ——
         // 那时 target 会看到一个 host 并没有设置的标记。
-        var envBlock = BuildEnvironmentBlock(req.Env);
+        byte[] envBlock;
+        using (Trace.Measure("env-block"))
+        {
+            envBlock = BuildEnvironmentBlock(req.Env);
+        }
 
         // ---- 3. 把 target 的 stdio 接到 host 传入的通道 ----
-        var stdio = ResolveStdioHandles();
+        StdioHandles stdio;
+        using (Trace.Measure("resolve-stdio"))
+        {
+            stdio = ResolveStdioHandles();
+        }
 
         // ---- 3a. control channel（Issue #2）----
         var controlRequested = req.Control == "pipe";
@@ -298,7 +336,31 @@ internal sealed class JobRunner : IDisposable
     /// 解析 control channel 句柄；未请求 control 时返回无效值。
     /// </summary>
     private static IntPtr ResolveControlHandle(bool controlRequested) =>
-        controlRequested ? Native.CrtGetOsFHandle(CrtDescriptorTable.ControlFileDescriptor) : IntPtr.Zero;
+        controlRequested
+            ? (ResolveControlHook ?? DefaultResolveControl)(CrtDescriptorTable.ControlFileDescriptor)
+            : IntPtr.Zero;
+
+    private static IntPtr DefaultResolveControl(int fd) => Native.CrtGetOsFHandle(fd);
+
+    /// <summary>
+    /// control 句柄解析钩子；默认读 fd 7。
+    /// </summary>
+    /// <remarks>
+    /// host 声明了 control 却没传 fd 7 属于契约违约，必须投递 EPROTOCOL。
+    /// 但测试进程里 fd 7 总是被 FdLayoutHost 占着，无法自然产生「无效」状态；
+    /// 用钩子返回 IntPtr.Zero 即可稳定验证这条分支。
+    /// </remarks>
+    internal static Func<int, IntPtr>? ResolveControlHook { get; set; }
+
+    /// <summary>
+    /// fd → 句柄的解析钩子；默认就是 CRT 的 _get_osfhandle。
+    /// </summary>
+    /// <remarks>
+    /// fd 4/5/6 缺失时的降级告警（NUL 陷阱，Issue #11）很难在测试进程里自然触发：
+    /// FdLayoutHost 总会把它们占住。用钩子返回无效句柄即可验证
+    /// 这条路径确实会走「回退到本进程标准句柄 + 打 WARNING」，而不是静默丢输出。
+    /// </remarks>
+    internal static Func<int, IntPtr>? StdioResolveHook { get; set; }
 
     /// <summary>收集需要放行继承的句柄集合（control 可选）。</summary>
     private static IntPtr[] CollectTargetHandles(StdioHandles stdio, bool controlRequested, IntPtr hControl) =>
@@ -356,9 +418,10 @@ internal sealed class JobRunner : IDisposable
     /// </summary>
     private static StdioHandles ResolveStdioHandles()
     {
-        var hIn = Native.CrtGetOsFHandle(4);
-        var hOut = Native.CrtGetOsFHandle(5);
-        var hErr = Native.CrtGetOsFHandle(6);
+        var resolve = StdioResolveHook ?? Native.CrtGetOsFHandle;
+        var hIn = resolve(4);
+        var hOut = resolve(5);
+        var hErr = resolve(6);
 
         // 各句柄独立判断：位号不可用时退回本进程对应标准句柄
         var hStdIn = IsValid(hIn) ? hIn : Native.GetStdHandle(Native.STD_INPUT_HANDLE);
@@ -385,18 +448,43 @@ internal sealed class JobRunner : IDisposable
     }
 
     /// <summary>emit 「control 通道未继承」的 EPROTOCOL 错误（host 侧契约违约）。</summary>
-    private void PublishControlMissingError()
+    internal void PublishControlMissingError() =>
+        PublishResult(MakeControlMissingError());
+
+    /// <summary>「control 通道未继承」的错误结果（host 侧契约违约）。</summary>
+    /// <remarks>
+    /// 这条错误必须存在且文案明确：host 声明了 control 却没传 fd 7 时，
+    /// 若静默降级成「无 control」，target 会永远等一条不存在的通道 ——
+    /// 表现为随机挂起，比明确报错难查得多。
+    /// </remarks>
+    internal static ErrorResult MakeControlMissingError() => new()
     {
-        PublishResult(new ErrorResult
+        Error = new SerializedError
         {
-            Error = new SerializedError
-            {
-                Name = "Error",
-                Message = "subprocess control channel was not inherited",
-                Code = "EPROTOCOL",
-            },
-        });
-    }
+            Name = "Error",
+            Message = "subprocess control channel was not inherited",
+            Code = "EPROTOCOL",
+        },
+    };
+
+    /// <summary>Job Object 创建失败的错误结果。</summary>
+    internal static ErrorResult MakeJobCreateError(Win32Exception ex) => new()
+    {
+        Error = new SerializedError { Name = "Error", Message = ex.Message, Code = "EJOBCREATE" },
+    };
+
+    /// <summary>CreateProcessW 抛异常时的错误结果（带 path）。</summary>
+    internal ErrorResult MakeSpawnError(Win32Exception ex) => new()
+    {
+        Error = new SerializedError
+        {
+            Name = "Error",
+            Message = ex.Message,
+            Code = "ENOENT",
+            Syscall = "spawn",
+            Path = _argv.Length > 0 ? _argv[0] : null,
+        },
+    };
 
     /// <summary>
     /// 精确控制继承：只放行 target 需要的句柄。
@@ -560,12 +648,28 @@ internal sealed class JobRunner : IDisposable
     /// 永远挂起，target 静默不执行，而我们却在等一个永远不会出现的退出码，
     /// 外部表现为「调用卡住」。
     /// </summary>
-    private bool ResumeTargetThread(Native.PROCESS_INFORMATION pi)
+    private bool ResumeTargetThread(Native.PROCESS_INFORMATION pi) =>
+        ResumeTargetThread(pi.hThread);
+
+    /// <summary>
+    /// ResumeThread 的判定逻辑，接缝版本。
+    /// </summary>
+    /// <remarks>
+    /// 单独拆出来是因为「ResumeThread 失败」在实际环境里几乎无法复现
+    /// （需要线程句柄被外部破坏），但这段逻辑一旦写错后果很严重：
+    /// 线程永远挂起 → target 静默不执行 → 调用方卡在一个永不出现的退出码上。
+    /// 通过传入 <paramref name="resumeThread"/> 与 <paramref name="lastError"/>
+    /// 就能把两条失败支路都测到，而不必真的去制造 Win32 失败。
+    /// </remarks>
+    internal bool ResumeTargetThread(
+        IntPtr hThread,
+        Func<IntPtr, uint>? resumeThread = null,
+        Func<int>? lastError = null)
     {
-        var suspendCount = Native.ResumeThread(pi.hThread);
+        var suspendCount = (resumeThread ?? Native.ResumeThread)(hThread);
         if (suspendCount != Native.RESUME_THREAD_FAILED) return true;
 
-        var resumeError = Marshal.GetLastWin32Error();
+        var resumeError = (lastError ?? Marshal.GetLastWin32Error)();
         // ERROR_NOT_SUSPENDED 说明线程已经是运行态，不是失败
         if (resumeError == Native.ERROR_NOT_SUSPENDED) return true;
 
@@ -681,12 +785,12 @@ internal sealed class JobRunner : IDisposable
         foreach (var candidate in candidates)
         {
             var full = basePath.Length == 0 ? candidate : basePath + candidate;
-            try
-            {
-                // executableCandidateExists：存在且不是目录
-                if (File.Exists(full)) return full;
-            }
-            catch { }
+            // executableCandidateExists：存在且不是目录
+            //
+            // 不需要 try/catch：实测 .NET 8 的 File.Exists 对非法字符、
+            // 超长路径、无权限路径都只返回 false，不抛异常。
+            // （.NET Framework 时代它会抛，所以老代码里常见这个兜底。）
+            if (File.Exists(full)) return full;
         }
         return null;
     }
@@ -807,15 +911,33 @@ internal sealed class JobRunner : IDisposable
             AppendWide(kv.Value);
             bytes.Add(0);
             bytes.Add(0);
+            // 注意：每个变量的    是「宽字符终止符」，不是块终止符。
         }
-        // 块终止符
+
+        // 块终止符：额外再补一个宽  （双 NUL 收尾）。
+        //
+        // 空 env 时整个块就是这 2 字节 —— 但 CreateProcessW 会返回
+        // ERROR_INVALID_PARAMETER(87)。实测确认：
+        //   2 字节 → err=87，4 字节 → 成功。
+        // 所以空 env 必须补两次宽  （4 字节）。
+        //
+        // 这个分支此前产出 2 字节，意味着 **host 一旦传空 env，所有 spawn 都失败**。
+        // 现有单测当时写的是「断言 2 字节」，注释却写着「2 字节会返回 87」——
+        // 注释与断言互相矛盾，测试反而把 bug 锁住了。
         bytes.Add(0);
         bytes.Add(0);
+        if (bytes.Count == 2)
+        {
+            // 只有块终止符、没有任何变量 → 再补一对，凑成 4 字节。
+            bytes.Add(0);
+            bytes.Add(0);
+        }
         return bytes.ToArray();
     }
 
     // ---------------- poll ----------------
 
+    /// <summary>轮询线程主体：等进展 → 处理，直到 finished。</summary>
     private void PollLoop()
     {
         while (true)
@@ -826,22 +948,76 @@ internal sealed class JobRunner : IDisposable
                 if (_resultDelivered) return;
             }
 
-            Thread.Sleep(PollIntervalMs);
+            WaitForProgress();
 
             try
             {
-                Poll();
+                (PollHook ?? Poll)();
             }
             catch (Exception ex)
             {
-                PublishResult(new ErrorResult
-                {
-                    Error = new SerializedError { Name = "Error", Message = ex.Message, Code = "EPOLL" }
-                });
+                PublishResult(MakePollError(ex));
                 return;
             }
         }
     }
+
+    /// <summary>
+    /// 等一个「可能有进展」的时刻：target 退出、job 变空、或超时。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 原实现是无条件 <c>Thread.Sleep(10)</c>，每轮固定睡满 10ms。这个 10ms 的来历是
+    /// node 版 <c>lib/runner.js</c> 的 <c>setInterval(..., 10)</c>：Node 的定时器分辨率
+    /// 决定了它做不到更细，于是把轮询间隔当成了「协议的一部分」抄了过来。
+    /// <b>但 C# 没有这个限制。</b>
+    /// <para>
+    /// <b>关于收益的诚实记录</b>：改成事件等待后，端到端耗时<b>测不出可测量的改善</b>。
+    /// trace 显示 target 从 ResumeThread 到退出本身就要几十毫秒（<c>cmd.exe</c> 的启动成本），
+    /// 原来那 10ms 的睡眠被这段时间完全掩盖了。收益只在「target 在 poll 线程就绪之前
+    /// 就已退出」时才会显现，属少数场景。保留此实现是因为它<b>语义更正确</b>
+    /// （不无条件睡满一个周期），而不是因为测到了提速 —— 不要据此宣称性能提升。
+    /// </para>
+    /// </para>
+    /// <para>
+    /// target 的 process 句柄是可等待对象，<c>WaitForSingleObject</c> 会在它退出的瞬间返回，
+    /// 不必等满一个轮询周期。这就是本方法存在的原因：
+    /// <b>有句柄可等就等句柄，没句柄可等才睡</b>。
+    /// </para>
+    /// <para>
+    /// 保留 <see cref="PollIntervalMs"/> 作为超时上界，是因为 <see cref="Poll"/>
+    /// 还有第二个职责 —— 检查 job 是否已空（整棵进程树回收完）。「job 变空」没有对应的
+    /// 可等待句柄，只能靠周期性复查。所以超时不是遗留物，是 job 收尾路径的唯一驱动。
+    /// </para>
+    /// </remarks>
+    internal void WaitForProgress()
+    {
+        var process = _process;
+        if (!HasWaitableProcess(process))
+        {
+            // 没有可等的进程句柄（未 start / 已退出 / 已释放）时，
+            // 只能靠超时驱动 job 收尾检查。
+            Thread.Sleep(PollIntervalMs);
+            return;
+        }
+
+        // 返回值无需判别：WAIT_OBJECT_0（已退出）与 WAIT_TIMEOUT（仍在跑）
+        // 之后都走同一个 Poll()，它自己会用 GetExitCodeProcess 判定。
+        // WAIT_FAILED 同理 —— 等错了句柄不值得让 runner 崩溃，
+        // 退化成「睡满一个周期再查」即可。
+        _ = Native.WaitForSingleObject(process!.DangerousGetHandle(), (uint)PollIntervalMs);
+    }
+
+    /// <summary>
+    /// 该句柄是否值得用于等待。不可用时退化成定时轮询。
+    /// </summary>
+    /// <remarks>
+    /// 单独成静态方法的理由：这是「能否用事件驱动」的判断，与「怎么等」无关，
+    /// 因此可以在没有真实进程句柄的单元测试里直接覆盖三个边界
+    /// （null / 无效 / 已关闭），而不必构造真实进程。
+    /// </remarks>
+    internal static bool HasWaitableProcess(SafeKernelHandle? process) =>
+        process is not null && !process.IsInvalid && !process.IsClosed;
 
     private void Poll()
     {
@@ -861,7 +1037,42 @@ internal sealed class JobRunner : IDisposable
     /// 单独抽出来让 <see cref="Poll"/> 只表达「空了就收尾」这一个意图，
     /// 而不是把四个句柄状态检查揉进主循环里。
     /// </remarks>
-    private bool IsJobEmptiable()
+    /// <summary>
+    /// 注入一个 job 句柄 —— 仅供测试。
+    /// </summary>
+    /// <remarks>
+    /// 生产路径的 job 只能由 HandleStart 创建，但那要求真的 spawn 一个 target。
+    /// 为了单独验证 <see cref="IsJobEmptiable"/> 的四种句柄状态判断
+    /// （null / 无效 / 已关闭 / 非空），必须能直接放一个 job 进去。
+    /// </remarks>
+    internal void SetJobForTest(SafeJobHandle job) => _job = job;
+
+    /// <summary>是否已有进程句柄（target 已启动）—— 仅供测试断言。</summary>
+    internal bool HasProcessForTest => _process is not null;
+
+    /// <summary>当前 job 句柄 —— 仅供测试清理。</summary>
+    internal SafeJobHandle? JobForTest => _job;
+
+    /// <summary>创建 job 的钩子；测试可替换为「必失败」实现以覆盖 EJOBCREATE 分支。</summary>
+    internal Func<SafeJobHandle> CreateJob { get; set; } = SafeJobHandle.Create;
+
+    /// <summary>spawn 的钩子；默认就是真实的 <see cref="SpawnTarget"/>。</summary>
+    /// <remarks>
+    /// 默认值必须指向真实实现 —— 否则一旦有人忘记设置，生产路径会静默不 spawn，
+    /// 表现为「runner 起来了但 target 从未执行」。测试只在需要模拟
+    /// CreateProcessW 抛异常时才替换它。
+    /// </remarks>
+    internal Action<StartRequest, SafeJobHandle>? SpawnTargetHook { get; set; }
+
+    /// <summary>轮询钩子；默认就是真实的 <see cref="Poll"/>。</summary>
+    /// <remarks>
+    /// 主循环的异常兜底需要「Poll 抛异常」才能触发，而真实的 Poll
+    /// 只在句柄被外部破坏等极端情况下才抛。用钩子替换后即可验证：
+    /// 异常必须变成 EPOLL 错误投递给 host，而不是让 runner 静默死掉。
+    /// </remarks>
+    internal Action? PollHook { get; set; }
+
+    internal bool IsJobEmptiable()
     {
         var job = _job;
         if (job is null || job.IsInvalid || job.IsClosed) return false;
@@ -896,7 +1107,7 @@ internal sealed class JobRunner : IDisposable
     /// 把「句柄是否可读」和「是否仍在运行」这两组前置判断从
     /// <see cref="TryPublishExit"/> 里分出来，后者就只剩「退出码处理」一个意图。
     /// </remarks>
-    private static bool TryReadExitCode(SafeKernelHandle? process, out uint code)
+    internal static bool TryReadExitCode(SafeKernelHandle? process, out uint code)
     {
         code = 0;
         if (process is null || process.IsInvalid || process.IsClosed) return false;
@@ -906,16 +1117,48 @@ internal sealed class JobRunner : IDisposable
 
     // ---------------- terminate ----------------
 
-    private void RequestTermination()
+    internal void RequestTermination()
     {
         lock (_gate)
         {
             if (_terminateRequested) return;      // 幂等（RUNNER-SPEC §4.2）
             _terminateRequested = true;
         }
+        TryTerminateJob(_job);
+    }
+
+    /// <summary>终止 job；失败静默吞掉。</summary>
+    /// <remarks>
+    /// terminate 与 target 正常退出天然存在竞态：target 可能刚好在这一刻退出，
+    /// 于是 TerminateJobObject 失败（job 已空）。这不是错误，
+    /// 但也不能让它把 runner 的收尾流程打断 —— 否则已经拿到的结果都投递不出去。
+    /// </remarks>
+    /// <summary>把轮询异常包装成 EPOLL 错误结果。</summary>
+    /// <remarks>
+    /// 主循环里任何未预料的异常都必须变成一条**明确的错误结果**投递给 host，
+    /// 而不是让 runner 静默死掉。host 收到 EPOLL 能立刻知道「runner 内部出错了」，
+    /// 否则只会看到子进程退出，误判成 target 自己的问题。
+    /// </remarks>
+    internal static ErrorResult MakePollError(Exception ex) => new()
+    {
+        Error = new SerializedError { Name = "Error", Message = ex.Message, Code = "EPOLL" },
+    };
+
+    internal static void TryTerminateJob(SafeJobHandle? job) =>
+        TryTerminateJob(job, h => h.Terminate(1));
+
+    /// <summary>TryTerminateJob 的接缝版本：终止动作可注入。</summary>
+    /// <remarks>
+    /// 「TerminateJobObject 抛异常」需要 target 恰好在同一刻退出，是竞态，
+    /// 无法稳定复现。这里注入一个必抛的动作来验证兜底确实吞掉了异常 ——
+    /// 兜底写错（比如漏了 catch）会让 runner 在收尾阶段崩溃，
+    /// 连已经拿到的结果都投递不出去。
+    /// </remarks>
+    internal static void TryTerminateJob(SafeJobHandle? job, Action<SafeJobHandle> terminate)
+    {
         try
         {
-            _job?.Terminate(1);
+            if (job is not null) terminate(job);
         }
         catch
         {
@@ -943,7 +1186,7 @@ internal sealed class JobRunner : IDisposable
     // A/B 要求字节级一致，所以这张表必须逐条对齐，不能自创文本。
 
     /// <summary>Win32 错误码 → Node errno 字符串（对应 WINDOWS_SPAWN_ERROR_CODES）。</summary>
-    private static readonly Dictionary<int, string> WindowsSpawnErrorCodes = new()
+    internal static readonly Dictionary<int, string> WindowsSpawnErrorCodes = new()
     {
         [2] = "ENOENT",     // ERROR_FILE_NOT_FOUND
         [3] = "ENOENT",     // ERROR_PATH_NOT_FOUND
@@ -954,13 +1197,13 @@ internal sealed class JobRunner : IDisposable
     };
 
     /// <summary>需要把程序名写入 syscall 和 path 的错误码（对应 NODE_SPAWN_DETAIL_CODES）。</summary>
-    private static readonly HashSet<string> NodeSpawnDetailCodes = new(StringComparer.Ordinal)
+    internal static readonly HashSet<string> NodeSpawnDetailCodes = new(StringComparer.Ordinal)
     {
         "EACCES", "ENOENT",
     };
 
     /// <summary>构造与 node 完全一致的 spawn 错误对象。</summary>
-    private static SerializedError MakeNodeSpawnError(string syscall, string code, string? path)
+    internal static SerializedError MakeNodeSpawnError(string syscall, string code, string? path)
     {
         return new SerializedError
         {
@@ -984,6 +1227,7 @@ internal sealed class JobRunner : IDisposable
     /// <summary>CreateProcessW 失败 —— 对应 node 的 asSpawnError。</summary>
     private void EmitCreateProcessError(int win32Code, string program)
     {
+        Trace.Write($"CreateProcessW failed: win32Code={win32Code}");
         var code = WindowsSpawnErrorCodes.TryGetValue(win32Code, out var mapped) ? mapped : "UNKNOWN";
         // 详情型错误码把程序名带进 syscall/path；其余只保留 "spawn"
         PublishResult(new ErrorResult
@@ -994,6 +1238,22 @@ internal sealed class JobRunner : IDisposable
         });
     }
 
+    /// <summary>
+    /// 把终态结果对象序列化成协议 JSON。
+    /// </summary>
+    /// <remarks>
+    /// 抽成 internal static 是为了能直接断言「未知类型不会把 runner 带崩」：
+    /// 兜底分支返回 "{}" 而不是抛异常。runner 在收到无法识别的结果对象时
+    /// 仍然必须给 host 一个**合法 JSON**，否则 host 侧的解析会失败，
+    /// 表现为「调用挂住而不是报错」—— 比明确报错更难排查。
+    /// </remarks>
+    internal static string SerializeResult(object result) => result switch
+    {
+        TargetExitResult r => ProtocolJson.Serialize(r),
+        ErrorResult r => ProtocolJson.Serialize(r),
+        _ => "{}",
+    };
+
     private void PublishResult(object result)
     {
         lock (_gate)
@@ -1002,20 +1262,14 @@ internal sealed class JobRunner : IDisposable
             _resultDelivered = true;
         }
 
-        var json = result switch
-        {
-            TargetExitResult r => ProtocolJson.Serialize(r),
-            ErrorResult r => ProtocolJson.Serialize(r),
-            _ => "{}"
-        };
-        WriteLine(json);
+        WriteLine(SerializeResult(result));
 
         // RUNNER-SPEC §6.1 / 源码 publishTerminalResult(result, 0)：
         // 投递 terminal result 后立即 finish(0) —— runner 不应继续等待新消息。
         Finish();
     }
 
-    private void WriteLine(string json)
+    internal void WriteLine(string json)
     {
         try
         {
@@ -1024,9 +1278,19 @@ internal sealed class JobRunner : IDisposable
         catch (Exception ex)
         {
             // host 已断开，忽略 —— 但留痕，免得「结果发出去了」这种假设永远不被质疑
-            Trace.Write($"send failed: {ex.GetType().Name}: {ex.Message}");
+            OnSendFailed(ex);
         }
     }
+
+    /// <summary>发送失败的处理：只留痕，不抛出。</summary>
+    /// <remarks>
+    /// 独立成方法便于直接测试：真实场景里要制造「Send 抛异常」需要 host 断开，
+    /// 而那是竞态，难以稳定复现。这里要守的行为很简单也很重要 ——
+    /// **吞掉异常但留痕**。若改成直接吞掉不留痕，排查时会完全失去线索；
+    /// 若改成重新抛出，runner 会在收尾阶段崩掉，连已有结果都丢了。
+    /// </remarks>
+    internal static void OnSendFailed(Exception ex) =>
+        Trace.Write($"send failed: {ex.GetType().Name}: {ex.Message}");
 
     private void FailProtocol(string message)
     {

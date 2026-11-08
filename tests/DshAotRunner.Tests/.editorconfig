@@ -1,0 +1,28 @@
+# 测试项目的分析器规则豁免
+#
+# 背景：全局 XP-Gate 的 Gate 13 用命令行 -warnaserror + AnalysisLevel=latest-recommended
+# 构建整个解决方案，测试项目因此会跑全套 .NET 分析器规则。
+# 但测试代码有自己的合理惯例，与生产代码的规则冲突：
+#
+#   CA1707 标识符不应包含下划线  —— xUnit 方法名普遍写成 中文_条件_期望，
+#                                  这是测试可读性的主流做法，不是缺陷
+#   CA1861 常量数组参数           —— 测试里内联数组字面量比抽成字段更清晰
+#   CA1310/CA1305 区域性          —— 测试断言固定字符串，不需要 CultureInfo
+#   CA1711 类型名后缀             —— xUnit 的 [Collection] 类习惯以 Collection 结尾
+#   CA1822 可标记 static          —— 测试类实例方法由 xUnit 反射调用，不能改 static
+#
+# 注意：这里**只**豁免「测试代码写法惯例」类规则。
+# 编译器警告（CS 系列）与真正的正确性规则仍然保持「警告即错误」，
+# 不因为这段豁免而放松。
+
+# 只作用于本测试目录，不影响被一起编译进来的 src/ 源码。
+# （测试项目用 Compile Include 引入 ../../src/**/*.cs。.editorconfig 的
+#   section 路径是相对「本文件所在目录」的，所以 [*.cs] 正好只覆盖本目录下的
+#   测试文件，src/ 下的源码不在此列，仍受全套严格规则约束。）
+[*.cs]
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.CA1861.severity = none
+dotnet_diagnostic.CA1310.severity = none
+dotnet_diagnostic.CA1305.severity = none
+dotnet_diagnostic.CA1711.severity = none
+dotnet_diagnostic.CA1822.severity = none
