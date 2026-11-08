@@ -198,7 +198,13 @@ jobs:
 
           # 测试只在仓库根和 DSH_HOME 下找 runner.js，装到 baseline/ 是找不到的。
           # 用 DSH_RUNNER 显式指过去 —— 这是测试自己文档里给出的扩展点。
+          # 必须转成 Windows 原生路径：Git Bash 的 $PWD 是 /d/a/... 这种形式，
+          # Node.js 在 Windows 上不认，会当成相对路径从而还是找不到。
+          # cygpath -w 在 Windows runner 上可用；Linux 上没有这个命令，退回原值。
           RUNNER_JS="$PWD/baseline/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js"
+          if command -v cygpath >/dev/null 2>&1; then
+            RUNNER_JS=$(cygpath -w "$RUNNER_JS")
+          fi
           if [ ! -f "$RUNNER_JS" ]; then
             echo "::error::基线 runner 未安装成功：$RUNNER_JS"
             exit 1
