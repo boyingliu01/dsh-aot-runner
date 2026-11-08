@@ -1,0 +1,198 @@
+name: Watch upstream & listing PR
+
+# 目的：盯着两件会改变本项目状态的外部事件，状态变了才通知。
+#
+#   1. 上游修复 deepseek-harness#11893 —— spawn() 漏传 internals。
+#      修好之前，本插件「装了也不生效」，README 顶部必须一直挂着补丁警告。
+#   2. awesome-dsh-plugin 的收录 PR 有了结论。
+#
+# 为什么是自动检测源码，而不是盯着讨论区：
+# 上游完全可能改好代码但不回讨论、也不发版。讨论区要人看，代码不会说谎。
+# 所以这里直接下载最新版包，检查那行调用到底传没传 internals。
+#
+# 为什么只在「结论变化」时开 issue：
+# 每天开一个新 issue 等于每天制造一个待处理噪音，几次之后这个工作流就会被
+# 静音 —— 那还不如不做。判定标准是「与上次记录的结论不同」。
+#
+# 额度：ubuntu-latest 按 1x 计费，单次约 30 秒，每天一次 ≈ 15 分钟/月。
+
+on:
+  schedule:
+    # 每天 01:00 UTC = 09:00 北京时间
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      LISTING_PR: '13369'
+      UPSTREAM_PKG: '@deepseek-ai/dsh-subprocess-local'
+    steps:
+      - name: 准备 label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 必须先建 label：后面要用它找历史状态 issue。
+          # 放在末尾会让首次运行失败，而首次运行恰恰最需要它成功。
+          gh label create upstream-watch \
+            --repo "${{ github.repository }}" \
+            --description "上游状态跟踪（由 watch-upstream 工作流自动维护）" \
+            --color "0E8A16" 2>/dev/null || true
+
+      - name: 检查上游是否已修复 11893
+        id: upstream
+        run: |
+          set -euo pipefail
+
+          # 不能信 dist-tags：这个包的 latest 停在 0.0.1-rc.1，
+          # 真正的新版本挂在 next/alpha 下。必须按语义版本排序取最高。
+          META=$(curl -fsSL --retry 3 --retry-delay 5 --max-time 60 \
+            "https://registry.npmjs.org/${UPSTREAM_PKG//\//%2F}")
+          LATEST=$(printf '%s' "$META" | node -e '
+            let s = "";
+            process.stdin.on("data", (d) => { s += d; });
+            process.stdin.on("end", () => {
+              const vs = Object.keys(JSON.parse(s).versions);
+              const rank = { alpha: 1, beta: 2, rc: 3 };
+              const key = (v) => {
+                const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-([a-z]+)\.(\d+))?$/);
+                if (!m) return [0, 0, 0, 0, 0];
+                return [+m[1], +m[2], +m[3], m[4] ? (rank[m[4]] || 0) : 9, +(m[5] || 0)];
+              };
+              const cmp = (a, b) => {
+                const A = key(a), B = key(b);
+                for (let i = 0; i < A.length; i += 1) if (A[i] !== B[i]) return A[i] - B[i];
+                return 0;
+              };
+              vs.sort(cmp);
+              process.stdout.write(vs[vs.length - 1]);
+            });
+          ')
+          echo "上游最新版本: $LATEST"
+
+          # 判断 spawn() 调 launch* 时传没传第三个参数。
+          # 命中=仍然漏传；不命中=已修，或那段代码被重写了（同样需要人看一眼）。
+          SRC="https://unpkg.com/${UPSTREAM_PKG}@${LATEST}/lib/index.js"
+          if curl -fsSL --retry 3 --retry-delay 5 --max-time 60 "$SRC" -o upstream.js; then
+            LEAKS=$(grep -cE 'launch(WindowsJob|LinuxScope)\(spec, env\)' upstream.js || true)
+          else
+            echo "::warning::拉取 $SRC 失败，本轮跳过判断（不覆盖已有结论）"
+            LEAKS="unknown"
+          fi
+          echo "漏传 internals 的调用点数: $LEAKS"
+
+          case "$LEAKS" in
+            0) STATE="fixed" ;;
+            unknown) STATE="unknown" ;;
+            *) STATE="broken" ;;
+          esac
+          echo "判定: $STATE"
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: 检查收录 PR 状态
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if OUT=$(gh pr view "$LISTING_PR" \
+                --repo awesome-dsh-plugin/awesome-dsh-plugin \
+                --json state,mergedAt \
+                --jq '"\(.state)|\(.mergedAt // "-")"' 2>/dev/null); then
+            echo "PR 状态: $OUT"
+            echo "state=${OUT%%|*}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::查不到 PR #$LISTING_PR（可能已删除或仓库改名）"
+            echo "state=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 结论变化时通知
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UP: ${{ steps.upstream.outputs.state }}
+          UP_VER: ${{ steps.upstream.outputs.version }}
+          PR_STATE: ${{ steps.pr.outputs.state }}
+        run: |
+          set -euo pipefail
+
+          # 上次结论存在带固定 label 的 issue 正文里（HTML 注释，渲染时不可见）。
+          # 用 issue 而不是 cache：cache 会过期清空，issue 留得住、也有通知。
+          PREV_ISSUE=$(gh issue list --repo "${{ github.repository }}" \
+            --state all --label upstream-watch --limit 1 \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          PREV_UP="none"; PREV_PR="none"
+          if [ -n "$PREV_ISSUE" ]; then
+            BODY=$(gh issue view "$PREV_ISSUE" --repo "${{ github.repository }}" --json body --jq .body)
+            PREV_UP=$(printf '%s' "$BODY" | sed -n 's/^<!-- upstream:\(.*\) -->$/\1/p' | head -1)
+            PREV_PR=$(printf '%s' "$BODY" | sed -n 's/^<!-- pr:\(.*\) -->$/\1/p' | head -1)
+            PREV_UP=${PREV_UP:-none}; PREV_PR=${PREV_PR:-none}
+          fi
+          echo "上次: upstream=$PREV_UP pr=$PREV_PR"
+          echo "本次: upstream=$UP pr=$PR_STATE"
+
+          # unknown 不覆盖已知结论 —— 网络抖动不是「状态变化」。
+          UP2="$UP";      [ "$UP2" = "unknown" ] && UP2="$PREV_UP"
+          PR2="$PR_STATE"; [ "$PR2" = "unknown" ] && PR2="$PREV_PR"
+
+          UP_CHANGED=no; PR_CHANGED=no
+          [ "$UP2" != "$PREV_UP" ] && UP_CHANGED=yes
+          [ "$PR2" != "$PREV_PR" ] && PR_CHANGED=yes
+
+          if [ "$UP_CHANGED" = "no" ] && [ "$PR_CHANGED" = "no" ]; then
+            echo "结论无变化，不开新 issue"
+            {
+              echo "<!-- upstream:$UP2 -->"
+              echo "<!-- pr:$PR2 -->"
+            } > body.md
+            exit 0
+          fi
+
+          {
+            if [ -n "$PREV_ISSUE" ]; then
+              echo "状态发生变化（上次记录在 #$PREV_ISSUE）。"
+              echo
+            fi
+            if [ "$UP_CHANGED" = "yes" ]; then
+              echo "### 上游 11893：\`$PREV_UP\` → **\`$UP2\`**（最新版 \`$UP_VER\`）"
+              echo
+              if [ "$UP2" = "fixed" ]; then
+                echo "上游看起来已修好：\`spawn()\` 调 \`launch*\` 时不再漏传 \`internals\`。"
+                echo
+                echo "接下来：删掉 \`vendor/\`、移除 README 顶部的补丁警告，"
+                echo "然后重跑 A/B 确认 —— 这里检测的是源码形态，仍应以真实运行为准。"
+              else
+                echo "上游最新版仍然漏传 \`internals\`，本插件安装后不会生效。"
+              fi
+              echo
+            fi
+            if [ "$PR_CHANGED" = "yes" ]; then
+              echo "### 收录 PR #$LISTING_PR：\`$PREV_PR\` → **\`$PR2\`**"
+              echo
+              echo "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/$LISTING_PR"
+              echo
+            fi
+            echo "---"
+            echo "<!-- upstream:$UP2 -->"
+            echo "<!-- pr:$PR2 -->"
+          } > body.md
+
+          # 结论没变就不新开 issue，只更新已有那条的状态标记。
+          if [ "$UP_CHANGED" = "no" ] && [ "$PR_CHANGED" = "no" ] && [ -n "$PREV_ISSUE" ]; then
+            gh issue edit "$PREV_ISSUE" --repo "${{ github.repository }}" --body-file body.md
+            exit 0
+          fi
+
+          gh issue create --repo "${{ github.repository }}" \
+            --title "上游跟进：upstream=$UP2 / PR=$PR2（$UP_VER）" \
+            --label upstream-watch \
+            --body-file body.md
