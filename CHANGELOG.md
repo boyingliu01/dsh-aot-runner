@@ -3,6 +3,62 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-11-08
+
+**这是一次修复发布：0.2.1 中的两个缺陷会让 runner 在特定条件下不可用。建议升级。**
+
+### 修复（重要）
+
+- **空环境变量导致所有 spawn 失败。**
+  `BuildEnvironmentBlock` 在 env 为空时只产出 2 字节，而 `CreateProcessW` 对
+  这块内存要求至少 4 字节（双 NUL 终止），实测返回 `ERROR_INVALID_PARAMETER(87)`。
+  也就是说：**host 一旦传空 env，runner 完全无法启动 target**。
+
+  更值得记下的是它为什么没被发现 —— 当时那条单测写的是「断言 2 字节」，
+  而它的注释写着「2 字节会让 CreateProcessW 返回 87」。注释与断言互相矛盾，
+  **测试反而把这个 bug 锁死了**。这是「测试通过 ≠ 行为正确」的典型样本。
+
+- **IPC 通道关闭时误判为协议错误。**
+  `IpcChannel.IsEndOfStream` 只认 `ERROR_BROKEN_PIPE(109)` 和 `ERROR_NO_DATA(232)`，
+  漏掉了 `ERROR_PIPE_NOT_CONNECTED(233)`，同时还丢弃了 `ReadFile` 的 `ok` 标志。
+  对端以 233 关闭通道时，runner 会抛 `IpcProtocolException` 而不是正常结束。
+
+### 测试
+
+- **生产源码覆盖率 89.2% → 100.0%**（1020/1020 行），单元测试 254 → 319。
+- 新增 `FdLayoutHost`：在测试进程里**真实分配** fd 3/4/5/6/7，
+  让 `JobRunner` 的编排代码可以被真正覆盖，而不是靠 mock 自证 ——
+  mock 只能证明「mock 返回了我告诉它的值」。
+- 难测的失败路径（Job 创建失败、spawn 异常、fd 缺失、轮询异常）统一走
+  「**默认真实实现、测试可替换**」的注入接缝。接缝默认值必须指向真实实现，
+  写成空操作会让生产路径静默失效。
+- 修正 `TraceTests` 的集合名：`[Collection("TraceEnvironment")]` 从未定义
+  （实际定义叫 `TraceEnv`），导致修改进程环境变量的测试**完全没有隔离**，
+  是全量跑时的偶发失败源。
+- `ProtocolJson` 的十六进制转义补上 `InvariantCulture`。
+
+### 质量门禁
+
+- **编译严格度收敛到单一来源。** 此前严格度被抄在两个 csproj、`build.sh`
+  以及 CI/release 的 `dotnet` 命令里，靠「改了记得同步」的注释维系。
+  现在只有 XP-Gate Gate 13 适配器中的 `gate13_csharp_flags()` 一处定义，
+  构建脚本与 CI 都向它索取，找不到即报错退出（不退回默认值）。
+
+- **修掉两个实际漏检：**
+  - Gate 13 只构建第一个 `*.??proj`，**测试项目从未被严格检查过**。
+    新增 `DshAotRunner.sln` 把两个项目都纳入后，浮出 508 个此前隐藏的分析器告警。
+    测试代码的写法惯例（如 xUnit 方法名含下划线的 CA1707）已通过
+    `tests/DshAotRunner.Tests/.editorconfig` 定点豁免，`src/` 严格度不受影响。
+  - CI 的 `dotnet publish` 没有任何严格度参数，实测放入未使用字段时
+    **只有 warning、发布照常成功** —— 等于 CI 不拦任何代码质量问题。
+
+- 覆盖率门槛从 88% 提到 99%（实际已达 100%），`build.sh` 未达标即中断。
+
+### 致谢
+
+两个缺陷都是在为项目补建测试安全网的过程中暴露的，详见
+`docs/测量方法论-当工具比被测对象更容易出错.md` 案例 9 与案例 10。
+
 ## [0.2.1] - 2026-11-06
 
 **runner 行为无任何变化** —— 本次只动发布与门禁基建。二进制与 0.2.0 逐字节相同
