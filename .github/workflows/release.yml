@@ -99,7 +99,9 @@ jobs:
         run: |
           set -e
           ADAPTER_URL="https://raw.githubusercontent.com/boyingliu01/xp-gate/${XP_GATE_ADAPTER_REF}/githooks/gate-13-compiler-strictness.sh"
-          ADAPTER="$RUNNER_TEMP/gate-13-compiler-strictness.sh"
+          # 不用 $RUNNER_TEMP：Windows runner 给的是反斜杠路径（D:\a\_temp），
+          # Git Bash 下 curl -o 会把反斜杠当转义处理，文件写的不是预期位置。
+          ADAPTER="gate13-adapter.sh"
           curl -fsSL "$ADAPTER_URL" -o "$ADAPTER"
 
           if ! grep -q '^gate13_csharp_flags()' "$ADAPTER"; then

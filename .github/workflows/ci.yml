@@ -118,22 +118,25 @@ jobs:
           set -e
           # 严格度的唯一来源是 XP-Gate Gate 13 适配器，CI 不另抄一份。
           #
-          # 为什么不是 `npm install -g` + `xp-gate init` 走本地安装：
-          # 已发布的包尚未包含 gate13_csharp_flags()（xp-gate PR #781 在合并中），
-          # 而 init 还需要额外一步且路径随平台变化。直接从 PR 分支取同一个文件，
-          # 拿到的就是最终实现本身，不存在「CI 用的版本和评审通过的版本不一致」。
-          #
-          # 上游合并并发布后，把 XP_GATE_ADAPTER_REF 改成对应 tag 或删掉这段、
-          # 改用已安装包内的副本 —— 届时函数名不变，取法一变即可。
+          # 为什么不用已发布的 npm 包：包里的 0.37.0 是改动之前构建的，不含
+          # gate13_csharp_flags()（上游 npm-publish 发现有同版本号就跳过了）。
+          # 所以直接从上���源码取同一个文件 —— 拿到的就是评审通过的实现本身。
+          # 上游 bump 版本重新发布后，可改用包内副本，函数名不变。
           ADAPTER_URL="https://raw.githubusercontent.com/boyingliu01/xp-gate/${XP_GATE_ADAPTER_REF}/githooks/gate-13-compiler-strictness.sh"
-          ADAPTER="$RUNNER_TEMP/gate-13-compiler-strictness.sh"
+          # 不用 $RUNNER_TEMP：Windows runner 给的是反斜杠路径（D:\a\_temp），
+          # Git Bash 下 curl -o 会把反斜杠当转义处理，写到的不是预期位置，
+          # 后续 grep 自然找不到 —— 而在 Linux 上一切正常，很难察觉。
+          ADAPTER="gate13-adapter.sh"
+          echo "取适配器: $ADAPTER_URL"
           curl -fsSL "$ADAPTER_URL" -o "$ADAPTER"
+          echo "已下载 $(wc -c < "$ADAPTER") 字节"
 
           # 取到的文件必须真的含有这个函数。没有就失败，绝不退回一组本地默认值 ——
           # 退回等于悄悄降低标准，而这正是收敛到单一来源要避免的事。
           if ! grep -q '^gate13_csharp_flags()' "$ADAPTER"; then
             echo "::error::$ADAPTER_URL 中不含 gate13_csharp_flags()"
-            echo "C# 严格度由该函数统一提供，缺失时不能退回宽松参数。"
+            echo "前 5 行实际内容："
+            head -5 "$ADAPTER"
             exit 1
           fi
 
