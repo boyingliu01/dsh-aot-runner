@@ -21,7 +21,8 @@
     "observe": "node bench/aot-observe.js run",
     "observe:report": "node bench/aot-observe.js report",
     "observe:check": "node bench/aot-observe.js check",
-    "test:observe": "node --test test/aot-observe-verify.js"
+    "test:observe": "node --test test/aot-observe-verify.js",
+    "probe": "node bench/phase-probe.js"
   },
   "engines": {
     "node": ">=22"
