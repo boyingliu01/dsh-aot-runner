@@ -45,4 +45,13 @@
          它不是被测目标（只是一层 argv 接线），排除掉不影响覆盖其余逻辑。 -->
     <Compile Remove="../../src/Program.cs" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- xunit.runner.json 必须复制到输出目录，xunit 才会读到它。
+         内容见该文件：关闭测试集合并行 —— 本项目的测试大量操作**进程级**资源
+         （fd 4/5/6/7、环境变量、Job 对象），并行时实测会出现
+         CLR 内部错误 (0x80131506) 导致整个测试主机崩溃，且极低频难以复现。
+         串行没有实质性能损失（实测 27s vs 28s），换来的是结果可复现。 -->
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

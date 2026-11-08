@@ -60,6 +60,16 @@ internal sealed class ScriptedIo : IChannelIo
     }
 }
 
+/// <summary>
+/// 边界与失败路径的覆盖用例。
+/// </summary>
+/// <remarks>
+/// 必须归入 FdLayout 集合：其中两条用例会调用 <see cref="FdLayoutHost.Install"/>
+/// 改写**进程级**的 fd 4/5/6/7。若与其他测试并行，别的测试可能在这些 fd
+/// 被临时换掉的瞬间去做读取，实测会出现 CLR 内部错误 (0x80131506) 并整体崩溃 ——
+/// 极低频，但每次崩溃都会丢掉一整轮测试结果。
+/// </remarks>
+[Collection("FdLayout")]
 public class EdgePathCoverageTests
 {
     // ============ IpcChannel：构造失败 ============
