@@ -194,6 +194,17 @@ jobs:
           cd baseline
           npm init -y > /dev/null
           npm install "@deepseek-ai/dsh-subprocess-local@$VER" --no-audit --no-fund
+          cd ..
+
+          # 测试只在仓库根和 DSH_HOME 下找 runner.js，装到 baseline/ 是找不到的。
+          # 用 DSH_RUNNER 显式指过去 —— 这是测试自己文档里给出的扩展点。
+          RUNNER_JS="$PWD/baseline/node_modules/@deepseek-ai/dsh-subprocess-local/lib/runner.js"
+          if [ ! -f "$RUNNER_JS" ]; then
+            echo "::error::基线 runner 未安装成功：$RUNNER_JS"
+            exit 1
+          fi
+          echo "DSH_RUNNER=$RUNNER_JS" >> "$GITHUB_ENV"
+          echo "A/B 基线: $RUNNER_JS"
 
       - name: A/B 一致性验证
         # 注意：完整套件含 100 次泄漏回归（约 3 分钟）和竞态（约 3 分钟），
