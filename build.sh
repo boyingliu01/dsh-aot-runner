@@ -19,6 +19,55 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# 向全局 XP-Gate 的 Gate 13 适配器索取 C# 编译严格度参数。
+#
+# 为什么不在这里写一份常量：那必然要配一句「Gate 13 改了记得同步」的注释，
+# 而这种提醒既容易漏、也容易抄错，错了还没人发现。
+# 现在严格度只有一处定义（门禁适配器），本地检查和提交门禁用的是同一组参数，
+# 不可能出现「本地过了、提交被拦」或「本地比门禁宽松」的情况。
+#
+# 适配器路径依次取：$XP_GATE_ADAPTER > $XP_GATE_HOME/adapters > ~/.config/xp-gate/adapters
+# 找不到就**直接失败**而不是退回一组默认值 —— 退回默认等于悄悄换了严格度标准，
+# 那正是这里要避免的事。
+gate13_csharp_flags_for_build() {
+  local adapter=""
+  local candidates=()
+
+  if [ -n "${XP_GATE_ADAPTER:-}" ]; then
+    candidates+=("$XP_GATE_ADAPTER")
+  fi
+  if [ -n "${XP_GATE_HOME:-}" ]; then
+    candidates+=("$XP_GATE_HOME/adapters/gate-13-compiler-strictness.sh")
+  fi
+  candidates+=("$HOME/.config/xp-gate/adapters/gate-13-compiler-strictness.sh")
+
+  local c
+  for c in "${candidates[@]}"; do
+    if [ -f "$c" ]; then adapter="$c"; break; fi
+  done
+
+  if [ -z "$adapter" ]; then
+    echo "找不到 XP-Gate Gate 13 适配器（找过：${candidates[*]}）。" >&2
+    echo "C# 编译严格度由它统一提供，缺失时无法判断该用多严的参数。" >&2
+    echo "请先安装 xp-gate，或用 XP_GATE_ADAPTER 指定适配器路径。" >&2
+    return 1
+  fi
+
+  # 只取函数定义，适配器被 source 时不会执行主流程（已验证无副作用）。
+  # shellcheck disable=SC1090  # 路径是运行时解析的
+  source "$adapter"
+
+  if ! declare -F gate13_csharp_flags >/dev/null 2>&1; then
+    echo "适配器 $adapter 里没有 gate13_csharp_flags()，版本可能过旧。" >&2
+    echo "请升级 xp-gate 后重试。" >&2
+    return 1
+  fi
+
+  # 与提交门禁取同一个 tier（默认 balanced，可用 XP_GATE_COMPILER_STRICTNESS 覆盖）。
+  gate13_csharp_flags "$(gate13_resolve_tier)"
+}
+
+
 OUT="${RunnerOutDir:-$PWD/dist}"
 CLEAN=0
 TEST=0
@@ -44,12 +93,14 @@ done
 
 # ---- 质量门禁 ----
 # 1. C# 格式：.editorconfig + .csharp-formatting.json 定义的规则
-# 2. C# 静态检查：编译期 analyzer（csproj 里 TreatWarningsAsErrors=true）
+# 2. C# 静态检查：编译期 analyzer（严格度由全局 XP-Gate Gate 13 注入，csproj 不声明）
 # 3. JS 语法：测试/基准脚本
 if [ "$CHECK" = "1" ]; then
   echo "==> 质量门禁：C# 代码格式"
-  if ! dotnet format --verify-no-changes --verbosity quiet; then
-    echo "格式不合规。用 'dotnet format' 自动修复后重试。" >&2
+  # 必须显式指定 workspace：仓库根同时存在 DshAotRunner.sln 与 DshAotRunner.csproj 时，
+  # `dotnet format` 无法自行二选一，直接抛 FileNotFoundException 退出。
+  if ! dotnet format DshAotRunner.sln --verify-no-changes --verbosity quiet; then
+    echo "格式不合规。用 'dotnet format DshAotRunner.sln' 自动修复后重试。" >&2
     exit 1
   fi
 
@@ -57,8 +108,19 @@ if [ "$CHECK" = "1" ]; then
   # 注意：不能写成 `dotnet build | grep ... && exit` —— 管道的退出码是 grep 的，
   # 而 `set -e` 对 `cmd || true` 形式会吞掉真实失败，门禁就形同虚设。
   # 这里先落盘再判读 dotnet 自己的退出码。
+  #
+  # 严格度参数**不在这里定义**，而是直接向全局 XP-Gate Gate 13 适配器要。
+  # 之前这里抄了一份常量，靠注释提醒「Gate 13 变了要同步改」—— 那种提醒迟早会漏，
+  # 抄错一个字符也不会有人发现。现在只有一个定义处，改了适配器这里自动跟随。
+  STRICT_FLAGS=$(gate13_csharp_flags_for_build) || exit 1
+
   BUILD_LOG=$(mktemp)
-  if ! dotnet build -c Release -r win-x64 -v quiet >"$BUILD_LOG" 2>&1; then
+  # workspace 同样必须显式指定，否则 sln + csproj 并存会让 dotnet 报 MSB1011。
+  #
+  # 这里不能传 -r win-x64：NETSDK1134 明确禁止对解决方案指定 RuntimeIdentifier。
+  # 两个项目各自在 csproj 里已经声明了 RuntimeIdentifier=win-x64，不需要重复传。
+  # shellcheck disable=SC2086  # $STRICT_FLAGS 是有意的分词列表
+  if ! dotnet build DshAotRunner.sln -c Release -v quiet $STRICT_FLAGS >"$BUILD_LOG" 2>&1; then
     grep -E "error|warning" "$BUILD_LOG" || tail -20 "$BUILD_LOG"
     rm -f "$BUILD_LOG"
     echo "静态检查未通过（构建失败）。" >&2
@@ -93,10 +155,20 @@ if [ "$CHECK" = "1" ]; then
       exit 1
     fi
     grep -E "已通过|Passed!" /tmp/cs-test.log | tail -2 || true
-    # 覆盖率只报告、不设硬门槛：当前生产源码覆盖率是基线，
-    # 立刻卡一个数字会逼着人写凑数的测试。先让它可见，再逐步抬高。
+    # 覆盖率硬门槛：阈值定义在 scripts/coverage-summary.py 的 THRESHOLDS 里，
+    # 未达标时脚本以非 0 退出，这里据此中断构建。
+    #
+    # 为什么现在是硬门槛：先前只报告不拦截，理由是「立刻卡一个数字会逼着人
+    # 写凑数的测试」。现在各文件都已真正测到（生产源码 ~89%，JobRunner ~86%），
+    # 风险反过来变成了「新代码悄悄拉低整体」。门槛取当前实测值向下取整，
+    # 后续只升不降（ratchet）。
     if [ -f scripts/coverage-summary.py ]; then
-      python scripts/coverage-summary.py 2>/dev/null | head -6 || true
+      if ! python scripts/coverage-summary.py > /tmp/cs-cov.log 2>&1; then
+        tail -25 /tmp/cs-cov.log >&2
+        echo "覆盖率未达门槛（阈值见 scripts/coverage-summary.py 的 THRESHOLDS）" >&2
+        exit 1
+      fi
+      head -6 /tmp/cs-cov.log
     fi
   else
     echo "跳过：未找到 dotnet"

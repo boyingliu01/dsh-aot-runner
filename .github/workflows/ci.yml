@@ -99,9 +99,31 @@ jobs:
         with:
           node-version: '22'
 
-      - name: 构建 NativeAOT
+      - name: 安装 XP-Gate（提供唯一的编译严格度定义）
+        shell: bash
         run: |
-          dotnet publish -c Release -r win-x64 -o dist
+          set -e
+          npm install -g @boyingliu01/xp-gate
+          xp-gate --version
+
+      - name: 构建 NativeAOT
+        shell: bash
+        run: |
+          set -e
+          # 严格度参数取自 Gate 13 适配器，不在 CI 里另抄一份。
+          # 适配器随 npm 包安装，路径与本地一致（~/.config/xp-gate/adapters）。
+          ADAPTER="$HOME/.config/xp-gate/adapters/gate-13-compiler-strictness.sh"
+          if [ ! -f "$ADAPTER" ]; then
+            echo "::error::找不到 Gate 13 适配器：$ADAPTER"
+            echo "C# 严格度由它统一提供，缺失时不能退回宽松参数。"
+            exit 1
+          fi
+          source "$ADAPTER"
+          FLAGS=$(gate13_csharp_flags balanced)
+          # 必须指定 .csproj 而不是 sln：sln + --output 会触发 NETSDK1194
+          # （解决方案级输出路径会让多个项目往同一目录复制，产物不确定）。
+          # shellcheck disable=SC2086
+          dotnet publish DshAotRunner.csproj -c Release -r win-x64 -o dist $FLAGS
 
       - name: 确认产物存在
         run: |
