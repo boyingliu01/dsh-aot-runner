@@ -12,11 +12,16 @@ name: CI
 
 # C# 编译严格度的来源（Gate 13 适配器）所在的上游 ref。
 #
-# 用 PR 分支而不是已发布的 npm 包：gate13_csharp_flags() 尚未随包发布。
+# 用合并提交的 SHA，而不是分支或 tag：
+#   - PR 分支合并后会被删除，指过去等于让 CI 随时失效
+#   - 已发布的 npm 包还没有这个函数：包里的 0.37.0 是改动前构建的，
+#     上游尚未 bump 版本重新发布（见 xp-gate #781）
+#   - SHA 不可变，且删不掉，是此刻唯一稳定且含该实现的引用
+#
 # 这个值同时是「我们用哪一版严格度标准」的答案 —— 只在这里定义一次。
 # 上游合并并发布后改成对应 tag。
 env:
-  XP_GATE_ADAPTER_REF: fix/gate13-csharp-strictness-780
+  XP_GATE_ADAPTER_REF: c809d918db7a8b398369a11ddf5ceb59e303a42c
 
 on:
   push:

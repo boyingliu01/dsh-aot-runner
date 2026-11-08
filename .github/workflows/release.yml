@@ -19,8 +19,11 @@ name: Release
 
 # C# 编译严格度的来源（Gate 13 适配器）所在的上游 ref。
 # 与 ci.yml 保持一致 —— 发布时的严格度必须等于 CI 检查时的严格度。
+#
+# 用合并提交的 SHA 而非分支/tag：PR 分支已删，npm 上的 0.37.0 尚未包含该函数。
+# 上游 bump 版本并发布后，改用对应 tag（如 v0.37.1）。
 env:
-  XP_GATE_ADAPTER_REF: fix/gate13-csharp-strictness-780
+  XP_GATE_ADAPTER_REF: c809d918db7a8b398369a11ddf5ceb59e303a42c
 
 on:
   push:
