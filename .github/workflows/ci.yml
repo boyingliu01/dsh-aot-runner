@@ -10,6 +10,14 @@ name: CI
 # 如果额度耗尽，GitHub 会直接不调度，工作流显示 queued 或失败，
 # 这**不影响本地验证结论** —— 本地 `npm run test:all` 是唯一的发布判据。
 
+# C# 编译严格度的来源（Gate 13 适配器）所在的上游 ref。
+#
+# 用 PR 分支而不是已发布的 npm 包：gate13_csharp_flags() 尚未随包发布。
+# 这个值同时是「我们用哪一版严格度标准」的答案 —— 只在这里定义一次。
+# 上游合并并发布后改成对应 tag。
+env:
+  XP_GATE_ADAPTER_REF: fix/gate13-csharp-strictness-780
+
 on:
   push:
     branches: [main]
@@ -99,27 +107,42 @@ jobs:
         with:
           node-version: '22'
 
-      - name: 安装 XP-Gate（提供唯一的编译严格度定义）
+      - name: 解析 C# 编译严格度（Gate 13）
         shell: bash
         run: |
           set -e
-          npm install -g @boyingliu01/xp-gate
-          xp-gate --version
+          # 严格度的唯一来源是 XP-Gate Gate 13 适配器，CI 不另抄一份。
+          #
+          # 为什么不是 `npm install -g` + `xp-gate init` 走本地安装：
+          # 已发布的包尚未包含 gate13_csharp_flags()（xp-gate PR #781 在合并中），
+          # 而 init 还需要额外一步且路径随平台变化。直接从 PR 分支取同一个文件，
+          # 拿到的就是最终实现本身，不存在「CI 用的版本和评审通过的版本不一致」。
+          #
+          # 上游合并并发布后，把 XP_GATE_ADAPTER_REF 改成对应 tag 或删掉这段、
+          # 改用已安装包内的副本 —— 届时函数名不变，取法一变即可。
+          ADAPTER_URL="https://raw.githubusercontent.com/boyingliu01/xp-gate/${XP_GATE_ADAPTER_REF}/githooks/gate-13-compiler-strictness.sh"
+          ADAPTER="$RUNNER_TEMP/gate-13-compiler-strictness.sh"
+          curl -fsSL "$ADAPTER_URL" -o "$ADAPTER"
+
+          # 取到的文件必须真的含有这个函数。没有就失败，绝不退回一组本地默认值 ——
+          # 退回等于悄悄降低标准，而这正是收敛到单一来源要避免的事。
+          if ! grep -q '^gate13_csharp_flags()' "$ADAPTER"; then
+            echo "::error::$ADAPTER_URL 中不含 gate13_csharp_flags()"
+            echo "C# 严格度由该函数统一提供，缺失时不能退回宽松参数。"
+            exit 1
+          fi
+
+          source "$ADAPTER"
+          FLAGS=$(gate13_csharp_flags balanced)
+          echo "严格度参数: $FLAGS"
+          echo "STRICT_FLAGS=$FLAGS" >> "$GITHUB_ENV"
 
       - name: 构建 NativeAOT
         shell: bash
         run: |
           set -e
-          # 严格度参数取自 Gate 13 适配器，不在 CI 里另抄一份。
-          # 适配器随 npm 包安装，路径与本地一致（~/.config/xp-gate/adapters）。
-          ADAPTER="$HOME/.config/xp-gate/adapters/gate-13-compiler-strictness.sh"
-          if [ ! -f "$ADAPTER" ]; then
-            echo "::error::找不到 Gate 13 适配器：$ADAPTER"
-            echo "C# 严格度由它统一提供，缺失时不能退回宽松参数。"
-            exit 1
-          fi
-          source "$ADAPTER"
-          FLAGS=$(gate13_csharp_flags balanced)
+          # shellcheck disable=SC2153
+          FLAGS="$STRICT_FLAGS"
           # 必须指定 .csproj 而不是 sln：sln + --output 会触发 NETSDK1194
           # （解决方案级输出路径会让多个项目往同一目录复制，产物不确定）。
           # shellcheck disable=SC2086

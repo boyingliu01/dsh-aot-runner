@@ -17,6 +17,11 @@ name: Release
 #
 # 触发：推 v* tag。发布前会跑完整门禁，任一失败即中止 —— 宁可不发，不发错的。
 
+# C# 编译严格度的来源（Gate 13 适配器）所在的上游 ref。
+# 与 ci.yml 保持一致 —— 发布时的严格度必须等于 CI 检查时的严格度。
+env:
+  XP_GATE_ADAPTER_REF: fix/gate13-csharp-strictness-780
+
 on:
   push:
     tags: ['v*']
@@ -65,21 +70,23 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       # 编译严格度由 Gate 13 适配器统一提供，发布流程同样不另抄一份参数。
-      - name: 安装 XP-Gate（提供唯一的编译严格度定义）
-        shell: bash
-        run: |
-          npm install -g @boyingliu01/xp-gate
-          xp-gate --version
-
+      #
+      # 与 ci.yml 用同一个 ref（见 workflow 顶部的 XP_GATE_ADAPTER_REF）：
+      # 「发布时用的严格度」和「CI 检查用的严格度」必须是同一份，否则
+      # CI 绿了也只说明另一套标准通过了。
       - name: 解析编译严格度参数
         shell: bash
         run: |
           set -e
-          ADAPTER="$HOME/.config/xp-gate/adapters/gate-13-compiler-strictness.sh"
-          if [ ! -f "$ADAPTER" ]; then
-            echo "::error::找不到 Gate 13 适配器：$ADAPTER"
+          ADAPTER_URL="https://raw.githubusercontent.com/boyingliu01/xp-gate/${XP_GATE_ADAPTER_REF}/githooks/gate-13-compiler-strictness.sh"
+          ADAPTER="$RUNNER_TEMP/gate-13-compiler-strictness.sh"
+          curl -fsSL "$ADAPTER_URL" -o "$ADAPTER"
+
+          if ! grep -q '^gate13_csharp_flags()' "$ADAPTER"; then
+            echo "::error::$ADAPTER_URL 中不含 gate13_csharp_flags()"
             exit 1
           fi
+
           source "$ADAPTER"
           FLAGS=$(gate13_csharp_flags balanced)
           echo "STRICT_FLAGS=$FLAGS" >> "$GITHUB_ENV"
