@@ -45,7 +45,14 @@ echo "[pre-commit]   $JS_COUNT 个文件通过"
 
 if command -v dotnet >/dev/null 2>&1; then
   echo "[pre-commit] C# 格式检查"
-  if ! dotnet format --verify-no-changes --verbosity quiet >/dev/null 2>&1; then
+  # 仓库里同时存在 .sln 和 .csproj 时，`dotnet format` 无法自行选择 workspace，
+  # 会抛 FileNotFoundException 直接崩掉。此前只有 .csproj，所以没暴露；加入 .sln 后
+  # 这道检查从「检查格式」变成了「一律失败」，与代码是否合规无关。这里显式指定 .sln。
+  FORMAT_TARGET=""
+  for sln in ./*.sln; do
+    [ -f "$sln" ] && FORMAT_TARGET="$sln" && break
+  done
+  if ! dotnet format ${FORMAT_TARGET:+"$FORMAT_TARGET"} --verify-no-changes --verbosity quiet >/dev/null 2>&1; then
     echo "[pre-commit] 格式不合规，运行 'dotnet format' 修复后重新提交" >&2
     exit 1
   fi
