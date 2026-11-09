@@ -92,6 +92,18 @@ fi
 # ---- 第 2 段：转交 xp-gate 全局门禁 ----
 # 候选顺序：全局 config 下的 hooks → .git/hooks（xp-gate init 的安装位置）。
 # 都找不到就明确告警而非静默放行 —— 「没跑」不能看起来像「通过」。
+#
+# AOT_SKIP_GLOBAL_GATES=1 跳过本段，仅供 test/pre-commit-shortcircuit-verify.js 使用。
+# 那个测试验证的是**第 1 段的短路判据**（有没有按改动集合决定跑不跑）；第 2 段是
+# 另一个系统（每次 25 s 起，行为由 xp-gate 而非本仓库决定）。带着它跑会把
+# 「验证短路」变成「跑 3 遍全局门禁」，实测 423 s —— 一个没人会在提交前跑的测试
+# 等于没有测试。该开关**只影响这一段**，被测的第 1 段完全不受影响，且默认关闭：
+# 任何真实提交都不会走到这里。
+if [ "${AOT_SKIP_GLOBAL_GATES:-0}" = "1" ]; then
+  echo "[pre-commit] AOT_SKIP_GLOBAL_GATES=1 —— 跳过 xp-gate 全局门禁（仅供测试）"
+  exit 0
+fi
+
 XP_GATE_HOOK=""
 for candidate in \
   "$HOME/.config/xp-gate/hooks/pre-commit" \
