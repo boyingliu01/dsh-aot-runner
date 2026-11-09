@@ -21,29 +21,58 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-echo "[pre-commit] JS 语法检查"
-JS_FAIL=0
-JS_COUNT=0
-for f in $(find test bench plugin -name '*.js' -not -path '*/node_modules/*' | sort); do
-  JS_COUNT=$((JS_COUNT + 1))
-  if ! node --check "$f"; then
-    echo "  语法错误: $f" >&2
-    JS_FAIL=1
+# ---- 第 0 段：先判断这次提交有没有相关改动 ----
+# 顺序很重要：先问「有没有要检查的东西」（便宜），再问「工具在不在 / 跑一遍」（贵）。
+# 反过来做的话，每次提交都付一次与本次改动无关的固定开销：
+# 实测 dotnet format 11 s、JS 全扫 6.8 s，而最近 30 个提交里 27 个根本不碰 C#。
+#
+# 判据必须对着**改动集合**，不能对着**项目内容** —— 后者会让
+# 「这次没改 C#」被误判成「项目里有 C#，必须检查」，短路等于没做。
+#
+# 拿不到改动集合（不在 git 仓库、索引损坏等）时一律视为**需要检查**：
+# 宁可多跑一次，也不能把「没检查」显示成「通过」。
+HAS_CSHARP=1
+HAS_JS=1
+if CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null); then
+  # git 可用：空集合表示没有改动（例如手动执行 hook），同样按"要检查"处理，
+  # 因为手动运行时用户期望的是全量校验。
+  if [ -n "$CHANGED" ]; then
+    HAS_CSHARP=0
+    HAS_JS=0
+    echo "$CHANGED" | grep -qE '\.(cs|csproj|sln)$' && HAS_CSHARP=1
+    echo "$CHANGED" | grep -qE '\.(js|cjs|mjs)$' && HAS_JS=1
   fi
-done
-if [ "$JS_FAIL" -ne 0 ]; then
-  echo "[pre-commit] JS 语法检查未通过" >&2
-  exit 1
 fi
-# 扫描到 0 个文件说明启动路径出了问题（例如在错误目录执行），
-# 这时报 OK 等于假装检查过了。
-if [ "$JS_COUNT" -eq 0 ]; then
-  echo "[pre-commit] 没找到任何 JS 文件 —— 检查路径可能不对" >&2
-  exit 1
-fi
-echo "[pre-commit]   $JS_COUNT 个文件通过"
 
-if command -v dotnet >/dev/null 2>&1; then
+if [ "$HAS_JS" -eq 1 ]; then
+  echo "[pre-commit] JS 语法检查"
+  JS_FAIL=0
+  JS_COUNT=0
+  for f in $(find test bench plugin -name '*.js' -not -path '*/node_modules/*' | sort); do
+    JS_COUNT=$((JS_COUNT + 1))
+    if ! node --check "$f"; then
+      echo "  语法错误: $f" >&2
+      JS_FAIL=1
+    fi
+  done
+  if [ "$JS_FAIL" -ne 0 ]; then
+    echo "[pre-commit] JS 语法检查未通过" >&2
+    exit 1
+  fi
+  # 扫描到 0 个文件说明启动路径出了问题（例如在错误目录执行），
+  # 这时报 OK 等于假装检查过了。
+  if [ "$JS_COUNT" -eq 0 ]; then
+    echo "[pre-commit] 没找到任何 JS 文件 —— 检查路径可能不对" >&2
+    exit 1
+  fi
+  echo "[pre-commit]   $JS_COUNT 个文件通过"
+else
+  echo "[pre-commit] 跳过 JS 语法检查（本次提交无 JS 改动）"
+fi
+
+if [ "$HAS_CSHARP" -eq 0 ]; then
+  echo "[pre-commit] 跳过 C# 格式检查（本次提交无 C# 改动）"
+elif command -v dotnet >/dev/null 2>&1; then
   echo "[pre-commit] C# 格式检查"
   # 仓库里同时存在 .sln 和 .csproj 时，`dotnet format` 无法自行选择 workspace，
   # 会抛 FileNotFoundException 直接崩掉。此前只有 .csproj，所以没暴露；加入 .sln 后
