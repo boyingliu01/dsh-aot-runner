@@ -17,6 +17,13 @@
  *   AOT 的价值不只是均值更快，更是尾延迟更可控 ——
  *   所以「收益比例」比「绝对毫秒数」更适合作为判断指标。
  *
+ * ⚠️ 上面这组数字只在这一层（d1-ab-bench，固定 hostname 地板）成立。
+ *   换成完整调用口径（bench/load-matrix.cjs，真实 target 生命周期）后
+ *   方向是反的：2026-11-10 复核 matrix 数据，37%→100% 负载下
+ *   AOT p50 从 114 涨到 257ms（+125%），比 node 的 276→448ms（+62%）还多。
+ *   完整调用口径下真正站得住的是**离散度**：AOT 28.1%→15.6%，
+ *   node 19.9%→59.6%。不要把两层的结果混着引用。
+ *
  * 用法:
  *   node bench/aot-observe.js run --rounds 5 --n 50   # 跑一轮观测并落盘
  *   node bench/aot-observe.js report                  # 看历史趋势
