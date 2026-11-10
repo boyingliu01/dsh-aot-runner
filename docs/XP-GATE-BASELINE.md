@@ -352,6 +352,62 @@ if ! printf '%s\n' "$CC_CSV_FLAT" | awk -F, 'NF > 1 && $2 ~ /^[0-9]+$/ { found =
 
 ---
 
+## 5.1 Roslyn 全量分析器的构建成本（issue #27，2026-11-10 实测）
+
+启用 `AnalysisLevel=latest-all` 之前，默认值是 `latest-recommended`。
+实测那个默认值在这个项目上**一条告警都没有报**，而 `latest-all` 报 30 条
+生产代码告警（去重后）。「推荐集」对本项目覆盖不足 —— 连 CA5392
+（P/Invoke 的 DLL 劫持面）都不在其中。
+
+### 成本
+
+| 配置 | n | 均值 | 标准差 | 平均 CPU 负载 |
+|---|---|---|---|---|
+| `none`（关闭分析器） | 5 | 4.30s | ±0.67 | 49.3% |
+| `latest-recommended`（原默认） | 6 | **4.16s** | ±0.36 | 57.9% |
+| `latest-all`（现已启用） | 6 | **4.86s** | ±0.35 | 55.6% |
+
+```
+latest-recommended − none          =  −0.14s  ( −3%)  ← 测不出来，等效免费
+latest-all         − none          =  +0.56s  (+13%)
+latest-all         − latest-recommended =  +0.70s  (+17%)
+```
+
+**结论：全量分析器比不启用慢约 0.5~0.7 秒**，占一次 `-t:Rebuild` 的 13~17%。
+按一次 pre-commit 实测总耗时 246s 计，增量是 **0.2~0.3%**。
+
+### 为什么这组数据可信
+
+- **负载方向是反的**：`latest-recommended` 平均负载最高（57.9%）却耗时最低（4.16s）。
+  若负载有影响，应当让它更慢。这反而增强了结论。
+- **组内波动 < 组间差异**：±0.35s / ±0.67s 对差值 0.56s；三路排序自洽。
+- **ABBA 交替**：`none → rec → all → all → rec → none`，时间趋势被对称抵消。
+- **做过证伪**：若 +0.56s 是噪声，`latest-recommended` 应与 `latest-all` 同样偏慢；
+  实测它反而比 `none` 还快 0.14s。说明差异来自「分析规则数量」而非随机波动。
+
+### 测量时踩过的两个坑（重要）
+
+1. **不要用 shell `time`**：`time dotnet build` 报出的用户 CPU 只有约 0.03s
+   —— 构建在 MSBuild 子进程里完成，父进程时间不代表实际。本表数据取自
+   MSBuild 自身的「已用时间」。
+2. **必须丢弃首轮预热**：第一次 `-t:Rebuild` 报 12.77s，稳定性后仅约 5.8s。
+   若把首轮计入，会把成本算成 +41%（虚高 3 倍）。
+   本项目历史上还有一次反方向的错：单次测量得出「几乎无成本」，也是噪声。
+
+**两个方向都错过一次。** 这个环境的 CPU 负载常年 90~100%（DSH 宿主本身占约 115%），
+测量必须：多轮 ABBA + 记录每轮负载 + 剔除离群值 + 做证伪尝试。
+
+### 复现
+
+```bash
+# 三路对比，-m:1 -nodeReuse:false 排除并行噪声
+for lv in none latest-recommended latest-all; do
+  dotnet build DshAotRunner.sln -c Release -t:Rebuild -m:1 -nodeReuse:false     -p:AnalysisLevel=$lv 2>&1 | grep '已用时间' | tail -1
+done
+```
+
+---
+
 ## 6. 复现命令
 
 ```bash
