@@ -14,7 +14,7 @@
     "test:host": "node --test test/host-path-verify.js",
     "test:e2e": "node --test test/e2e-plugin-verify.js",
     "test:plugin": "node --test plugin/test/index.test.js",
-    "test:all": "npm run lint && npm run test:coverage && npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:observe && npm run test:hook && npm run test:lint && npm run test:leak && npm run test:race",
+    "test:all": "./build.sh --check && npm run lint && npm run test:coverage && npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:observe && npm run test:hook && npm run test:lint && npm run test:leak && npm run test:race",
     "bench": "node bench/d1-ab-bench.js",
     "test:coverage": "c8 node --test plugin/test/index.test.js",
     "lint": "npm run lint:syntax && npm run lint:eslint",
