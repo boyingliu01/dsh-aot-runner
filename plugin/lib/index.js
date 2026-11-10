@@ -208,17 +208,21 @@ function resolvePreconditions(ctx, config) {
 
   if (!enabled) {
     ctx.logger?.info?.('[aot-runner] 已禁用，继续使用 node runner');
+    setRunnerStatus('unsupported', '配置里 enabled=false');
     return null;
   }
 
   if (process.platform !== 'win32') {
     ctx.logger?.info?.('[aot-runner] 仅支持 Windows，当前平台继续使用 node runner');
+    setRunnerStatus('unsupported', `平台不受支持：${process.platform}`);
     return null;
   }
 
   const resolved = resolveRunnerPath(runnerPath);
   if (resolved === null) {
-    ctx.logger?.warn?.(`[aot-runner] ${describeMissingRunner(runnerPath)}，继续使用 node runner`);
+    const why = describeMissingRunner(runnerPath);
+    ctx.logger?.warn?.(`[aot-runner] ${why}，继续使用 node runner`);
+    setRunnerStatus('unsupported', why);
     return null;
   }
 
@@ -342,20 +346,86 @@ function requireRuntime(ctx) {
   const runtime = findRuntime(ctx);
   if (runtime === null) {
     ctx.logger?.warn?.('[aot-runner] 找不到 subprocess 服务，无法注入 runner');
+    setRunnerStatus('unsupported', '找不到 subprocess 服务，无法注入 runner');
   }
   return runtime;
 }
 
-/** 建立熔断器，把 open/close 接到注入开关上。 */
-function makeBreaker(ctx, { failThreshold, verbose }, activate, restore) {
+/**
+ * 当前 runner 的可观测状态（issue #18 B 项）。
+ *
+ * 「加速失效但没人知道」是最坏的产品状态：用户以为自己快着，实际慢着。
+ * 熔断器已经能自动降级，但降级后用户无从查证 —— 这个对象就是为了让人能查。
+ *
+ * 刻意做成**模块级单例**而不是挂在 ctx 上：DSH 插件管理页、诊断命令、
+ * 测试都需要一个稳定的读取入口，而 ctx 的生命周期在重载时会变。
+ *
+ * 状态值只有三种，含义明确：
+ *   'aot'        正在用 AOT runner（有性能增益）
+ *   'node'       已降级到 node runner（增益失效，需处理）
+ *   'unsupported' 根本没启用（非 Windows / 开关关闭 / DSH 版本有 bug）
+ *
+ * `reason` 只在非 aot 时有意义，并且是**给人看的中文**，不是错误码 ——
+ * 这条信息会出现在日志和诊断界面里，用户要能直接读懂该做什么。
+ */
+const runtimeStatus = {
+  runner: 'unsupported',
+  reason: '尚未启用',
+  /** 降级发生的时间（ISO 字符串），未降级为 null */
+  degradedAt: null,
+};
+
+/** 读取当前 runner 状态。返回副本，避免调用方改到内部状态。 */
+export function getRunnerStatus() {
+  return { ...runtimeStatus };
+}
+
+/** 供测试与启动流程重置状态。 */
+export function resetRunnerStatus() {
+  runtimeStatus.runner = 'unsupported';
+  runtimeStatus.reason = '尚未启用';
+  runtimeStatus.degradedAt = null;
+}
+
+/** 记录一次状态变化。`reason` 必须是人话，会直接展示给用户。 */
+function setRunnerStatus(runner, reason) {
+  runtimeStatus.runner = runner;
+  runtimeStatus.reason = reason;
+  runtimeStatus.degradedAt = runner === 'node' ? new Date().toISOString() : null;
+  return runtimeStatus;
+}
+
+/**
+ * 建立熔断器，把 open/close 接到注入开关上。
+ *
+ * ## 为什么降级日志不受 `verbose` 控制（issue #18）
+ *
+ * 原来 onOpen/onClose 都套了 `if (verbose)`，于是**默认配置下用户完全看不到降级**。
+ * 本插件是纯性能增益插件：失效时功能一切正常，只是变慢 2~3 倍。
+ * 「加速失效但没人知道」是最坏的产品状态 —— 用户以为自己快着，实际慢着，
+ * 而且因为一切都正常，永远不会去查。
+ *
+ * 所以这两个日志无条件输出。反过来，*激活*成功的日志（"已启用 AOT runner"）
+ * 才适合放 verbose 里 —— 那是噪音，降级是事故。
+ *
+ * 记 warn 而不是 info：DSH 的 info 日志容易被默认过滤掉，
+ * 而这条信息必须到达用户。降级不是错误，但它是**需要用户知道的状态变化**。
+ */
+function makeBreaker(ctx, { failThreshold }, activate, restore) {
   return new CircuitBreaker({
     threshold: failThreshold,
     onOpen: (reason) => {
-      if (verbose) ctx.logger?.warn?.(`[aot-runner] 熔断，降级到 node runner：${reason}`);
+      const text = String(reason?.message ?? reason);
+      setRunnerStatus('node', `熔断降级：${text}`);
+      ctx.logger?.warn?.(
+        `[aot-runner] 熔断：已降级到 node runner（连续失败 ${failThreshold} 次）：${text}。` +
+          ' 性能增益已失效。修复后重启 DSH 或重载插件即可恢复。',
+      );
       restore();
     },
     onClose: () => {
-      if (verbose) ctx.logger?.info?.('[aot-runner] 熔断恢复，重新启用 AOT runner');
+      setRunnerStatus('aot', '已恢复');
+      ctx.logger?.info?.('[aot-runner] 已恢复：重新启用 AOT runner');
       activate();
     },
   });
@@ -384,7 +454,10 @@ function setup(ctx, config, options) {
   const runtime = requireRuntime(ctx);
   if (runtime === null) return null;
 
-  if (runSelfCheck(ctx, options.verbose) === 'buggy') return null;
+  if (runSelfCheck(ctx, options.verbose) === 'buggy') {
+    setRunnerStatus('unsupported', 'DSH 版本存在已知缺陷（launch* 漏传 internals），需先打补丁');
+    return null;
+  }
 
   return { resolved, ...injectRunner(ctx, runtime, resolved, options) };
 }
@@ -409,6 +482,7 @@ export function apply(ctx, config = {}) {
     active.restore();
   }, 'aot-runner restore');
 
+  setRunnerStatus('aot', `已启用（来源 ${active.resolved.source}）：${active.resolved.path}`);
   ctx.logger?.info?.(
     `[aot-runner] 已启用（来源 ${active.resolved.source}）：${active.resolved.path}`,
   );

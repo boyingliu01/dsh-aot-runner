@@ -31,6 +31,11 @@ DSH 每跑一条命令都要先起一个 `runner.js` 子进程 —— 光加载 
 插件会**自动检测**这个情况：命中时明确告警并停用自己，而不是假装在工作。
 上游修好后，删掉 `vendor/` 目录、按普通插件安装即可。
 
+> 📮 **想催上游修？只能去 discussion，没有 issue 通道。**
+> `deepseek-ai/deepseek-harness` 已关闭 issues/PR 功能（`has_issues=false`），
+> 提交 PR 会 404 —— 但 discussion 区仍在活跃维护。
+> 请到 [discussion #11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893) 留言。
+
 ### ⚠️ 安装前必读（两步，缺一不可）
 
 > **1. 需要一行上游补丁。** 在 DSH **0.2.0-rc.2** 上，本插件**必须配合一个 1 行的上游补丁**才能工作。
