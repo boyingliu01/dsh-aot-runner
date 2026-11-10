@@ -351,16 +351,41 @@ echo "完成。runner 路径: $EXE"
 #    `cp` 报 "Device or resource busy" —— 但脚本此前仍然打印「完成」并以 0 退出，
 #    结果是**插件包里躺着上一版 exe**，而构建日志看起来一切正常。
 #    这类「静默不同步」最危险：发布出去的包和刚构建的源码不是一回事。
+#
+# ⚠️ 2026-11-10（issue #23）：文件被占用不再直接失败，改成「改名换位」。
+#
+#    Windows 不允许删除/覆盖一个正在被映射为可执行映像的文件，但**允许改名**。
+#    改名之后，已运行的进程继续持有旧 inode 的句柄（照常工作），
+#    新文件则占据原路径 —— 下一次启动就会用到新版。
+#    实际验证：占用中的 exe 用 `cp` 报 busy，用 `mv && cp` 成功。
+#
+#    这条比「让用户关掉 DSH 再构建」好得多：DSH 会话本身就是开发环境，
+#    要求关掉它等于要求用户中断工作。而且第 349 行那段告警的历史表明，
+#    「构建失败等人处理」在实践中经常被忽略 —— 告警挡不住发布。
+#    能自动绕开的阻塞，就不该留成人工待办。
 mkdir -p plugin/bin
 PLUGIN_EXE="plugin/bin/$(basename "$EXE")"
 if cp "$EXE" "$PLUGIN_EXE" 2>/dev/null && cmp -s "$EXE" "$PLUGIN_EXE"; then
   echo "已同步到插件包: $PLUGIN_EXE"
 else
-  echo
-  echo "⚠️  无法同步到插件包: $PLUGIN_EXE（文件被占用或复制失败）" >&2
-  echo "    原因通常是 DSH 正在通过该 exe 跑子进程。" >&2
-  echo "    这不影响 dist/ 下的新产物，但 plugin/bin/ 里仍是旧版本 ——" >&2
-  echo "    **打包发布前必须解决**，否则 npm 包会带上旧 exe。" >&2
-  echo "    处理办法：关掉 DSH 会话后重跑构建，或手动 cp 覆盖。" >&2
-  exit 3
+  # 直接覆盖失败（几乎总是 Windows 文件占用），改用改名换位。
+  # 后缀用 .old 而不是随机名：plugin/package.json 的 files 里有 `!bin/*.old`
+  # 把它排除在发布包之外，即使清理漏了也不会被打进去。
+  PLUGIN_OLD="$PLUGIN_EXE.old"
+  rm -f "$PLUGIN_OLD" 2>/dev/null || true
+  if mv "$PLUGIN_EXE" "$PLUGIN_OLD" 2>/dev/null \
+     && cp "$EXE" "$PLUGIN_EXE" 2>/dev/null \
+     && cmp -s "$EXE" "$PLUGIN_EXE"; then
+    echo "已同步到插件包（原文件被占用，已改名换位）: $PLUGIN_EXE"
+    # 清理失败不算错：占用进程退出前旧文件删不掉，而 .old 已被 files 排除
+    rm -f "$PLUGIN_OLD" 2>/dev/null \
+      || echo "    旧文件 $PLUGIN_OLD 待占用进程退出后自行删除（不会打进出包）"
+  else
+    echo
+    echo "⚠️  无法同步到插件包: $PLUGIN_EXE（改名换位也失败了）" >&2
+    echo "    这不影响 dist/ 下的新产物，但 plugin/bin/ 里仍是旧版本 ——" >&2
+    echo "    **打包发布前必须解决**，否则 npm 包会带上旧 exe。" >&2
+    echo "    发布前会被 scripts/check-release.mjs 拦下（prepublishOnly 已接入）。" >&2
+    exit 3
+  fi
 fi
