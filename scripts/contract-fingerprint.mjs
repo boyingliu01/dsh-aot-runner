@@ -42,9 +42,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
 
-const require = createRequire(import.meta.url);
+// createRequire 曾经用来读 CommonJS 版本的 runner-launch，改成静态分析源码后
+// 不再需要。留着会让 ESLint 报 no-unused-vars，也容易让人以为这里还在做运行时加载。
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FINGERPRINT_FILE = path.join(REPO, '.contract-fingerprint.json');
 

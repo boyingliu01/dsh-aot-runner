@@ -3,6 +3,75 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.3] - 2026-11-10
+
+**修复发布：解决插件安装后 `plugin/bin/*.exe` 被占用导致替换失败，以及降级静默失效无感知。建议升级。**
+
+### 新增
+
+- **降级路径可观测**（#18 B）。runner 是纯性能增益：进程挂掉时功能一切正常，
+  只是慢 2~3 倍——**不报错、不崩溃、没有任何用户可见症状**。此前这类失效
+  只在 `verbose` 日志里，等于没人知道。现在降级会明确告知，并说明「已降级到内联模式」。
+
+- **发布前置校验**（`npm run check:release`，已接进 `prepublishOnly`）：
+  校验 `plugin/bin/*.exe` 与 `dist/*.exe` 逐字节一致，且 `plugin/bin/` 没有
+  被 `files` 通配带进去的残留文件。此前这类不一致只在用户装完后才暴露。
+
+- **上游契约漂移自动检测**（#15 A 项）。机械提取 DSH runner 的 4 类契约
+  （start 请求字段集、Windows spawn 错误码表、可执行文件解析顺序、stdio fd 布局），
+  生成 SHA256 指纹存入 `.contract-fingerprint.json`。DSH 升级改动契约时，
+  pre-commit 会直接失败并指出哪一类变了，不再依赖人工核对备忘录。
+
+- **`npm run lint`**：JS 语法检查 + ESLint，扫描口径收敛到
+  `scripts/check-js-syntax.mjs` 一处定义，CI 与本机共用同一份。
+
+- **`npm run isolation`**：故障注入量化「独立 runner 进程」的隔离价值（#16）。
+
+### 修复
+
+- **`plugin/bin/*.exe` 被占用导致替换失败**（#23）。插件从自身目录启动的短命
+  `dsh-aot-runner.exe` 子进程会短暂持有 exe 句柄，直接覆盖会失败。
+  改为**改名换位**：先 `mv` 旧文件让出句柄，再写入新文件。
+
+- **`build.sh --check` 永远无法通过**。收敛 JS 扫描口径时删掉了
+  `JS_SYNTAX_COUNT` 变量，但第 213 行仍在引用它——`set -u` 下直接
+  `unbound variable` 退出。构建门禁因此在到达「全部通过」之前就中止。
+  **这个 bug 让 `--check` 从一次重构起就是坏的，而没人发现，因为它总是「失败」，
+  看起来像是代码有问题。** 现在删除该行，计数由脚本自己打印。
+
+- **pre-commit 显式指定 `.sln`**（#6cb7753）。仓库同时存在 `.sln` 和 `.csproj` 时
+  `dotnet format` 无法自行选择 workspace，会抛 `FileNotFoundException`
+  直接崩掉——那道检查从「检查格式」变成了「一律失败」，与代码是否合规无关。
+
+- **pre-commit 短路测试会破坏 git 索引**（`d20741b`）。测试在真实仓库里
+  模拟提交，失败时会留下半提交状态并挂死。
+
+- **覆盖率采集绕开 `KillTree` 崩溃路径**（#25 部分修复）。见「已知问题」。
+
+- **CI 四处修复**：适配器下载改用相对路径、Windows job 补装 A/B 基线、
+  `DSH_RUNNER` 指向基线并转成原生路径。此前 Windows CI 的红灯是环境问题，
+  不是代码问题——**「测试环境未就绪」和「测试失败」在 CI 上长得一样**。
+
+### 文档
+
+- 新增 `docs/质量门禁现状审计-2026-11-10.md`：实测 pre-commit/pre-push 两个
+  hook 的真实覆盖情况。结论是 **pre-push 在本仓库从未执行过**（`core.hooksPath`
+  与 `xp-gate init` 安装位置冲突），而 pre-commit 的 Gate 1 对 C# 项目静默跳过
+  （扩展名正则漏了 `.cs`，输出却是 `✅ PASSED`）。
+- 补 `docs/测量方法论-当工具比被测对象更容易出错.md` 案例 10，
+  以及 `ROADMAP.md` 的两条已知盲区。
+
+### 已知问题（未在本版修复）
+
+- **偶发 CLR 崩溃**（#25）。`dotnet test` 覆盖率那一遍偶尔会以
+  `Fatal error. Internal CLR error. (0x80131506)` 中止，栈指向 xunit 的
+  `TestInvoker<T>` 泛型实例化路径。发生概率约 1/10~1/300 次连续运行，
+  **不是确定性缺陷**。目前靠 xp-gate 侧的「崩溃后单次重试」缓解：
+  第一次崩、第二次过则放行；两次都崩则不放行（防止重试变成掩盖手段）。
+  根因仍在追。
+
+- **契约分支覆盖率与未覆盖维度补测**（#15 B/C 项）尚未完成。
+
 ## [0.2.2] - 2026-11-08
 
 **这是一次修复发布：0.2.1 中的两个缺陷会让 runner 在特定条件下不可用。建议升级。**

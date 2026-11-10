@@ -210,7 +210,10 @@ if [ "$CHECK" = "1" ]; then
     echo "JS 语法检查未通过。" >&2
     exit 1
   fi
-  echo "  $JS_SYNTAX_COUNT 个文件通过"
+  # 不再打印文件数：脚本自己已经打出「[lint:syntax] N 个文件通过」。
+  # 原来这里引用了 $JS_SYNTAX_COUNT，但那个变量在收敛扫描口径时被删掉了，
+  # 只剩引用 —— set -u 下直接 unbound variable 退出，--check 永远到不了「全部通过」。
+  # 计数是脚本的职责，build.sh 不该再数第二遍。
 
   echo "==> 质量门禁：上游补丁留档"
   node vendor/patch-dsh.mjs verify
