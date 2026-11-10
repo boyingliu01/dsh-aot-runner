@@ -72,6 +72,11 @@ function collect(dir, out = []) {
  * 一次改动几百个文件时参数列表会被截断，而截断后少检查的文件不会报错 ——
  * 那正是「假装检查过了」。
  *
+ * 传 `--list` 时**只输出文件清单并退出 0**，不做语法检查。
+ * 给测试用：让 `test/aot-observe-verify.js` 能断言「扫描范围够不够」，
+ * 而不必把扫描实现（ignore 集合、扩展名集合）复制一份到测试里 ——
+ * 复制出来的那份会漂移，然后测试替一个错误的口径背书。
+ *
  * ## 为什么不把全量模式也提速（实测过，都否决了）
  *
  * 全量的成本几乎全是进程启动：每个文件一次 `node --check` 约 102ms，
@@ -117,6 +122,13 @@ const files = listArgIdx === -1
 if (files.length === 0) {
   console.error('[lint:syntax] 没找到任何 JS 文件 —— 扫描路径可能不对');
   process.exit(1);
+}
+
+// --list：只交底「扫到了哪些」，给测试断言覆盖范围用。
+// 放在「0 个文件」判据之后，所以扫描路径坏掉时 --list 也会失败而不是输出空清单。
+if (process.argv.includes('--list')) {
+  for (const rel of files) console.log(rel);
+  process.exit(0);
 }
 
 let failed = 0;

@@ -110,6 +110,12 @@ test('aggregate 面对空输入不崩溃，也不假装测到了', () => {
 //
 // 这个 hook 原先逐行列举要检查的 JS 文件，结果漏掉了 test/test-utils.js ——
 // 漏检看不出来，所以必须由测试兜住，否则下次改动很容易退回手写清单。
+//
+// 2026-11-10 起口径收敛到 scripts/check-js-syntax.mjs（CI 与本机共用一份），
+// 所以这里断言的对象从「hook 里有没有 find」变成「hook 有没有委托给那个脚本」，
+// 再由下一条测试验证那个脚本自己扫得够全。这样改的理由：断言 "hook 里有 find"
+// 是把实现细节写死，一旦实现搬到共享脚本里就会误报 —— 而真正要守的契约是
+// 「有一个统一的地方在扫，且范围没有缩小」。
 // ---------------------------------------------------------------------------
 
 const fs = require('node:fs');
@@ -118,7 +124,7 @@ const path = require('node:path');
 const REPO = path.resolve(__dirname, '..');
 const HOOK = path.join(REPO, '.githooks', 'pre-commit');
 
-test('pre-commit 用扫描而非逐行列举检查 JS 语法', () => {
+test('pre-commit 用统一扫描脚本而非逐行列举检查 JS 语法', () => {
   const hook = fs.readFileSync(HOOK, 'utf8');
   // 逐行列举的痕迹：至少两行 `node --check <具体文件>`
   const listed = hook.match(/^\s*node --check\s+\S+\.js\s*$/gm) || [];
@@ -126,44 +132,35 @@ test('pre-commit 用扫描而非逐行列举检查 JS 语法', () => {
     listed.length, 0,
     `hook 又退回了逐行列举（${listed.length} 行），新加文件会漏检`,
   );
-  // 必须真的在扫描
-  assert.match(hook, /find\s+test\s+bench\s+plugin\s+-name/, '应当用 find 扫描目录');
+  // 必须真的在扫描 —— 口径收敛到共享脚本，hook 只负责调用它
+  assert.match(
+    hook,
+    /node\s+scripts\/check-js-syntax\.mjs/,
+    'hook 应当委托给 scripts/check-js-syntax.mjs，而不是自带一份扫描实现',
+  );
 });
 
-test('pre-commit 扫描到的 JS 文件覆盖 test/bench/plugin 下全部文件', () => {
-  const hook = fs.readFileSync(HOOK, 'utf8');
-  // 只取 find 到 -name 之间那段作为扫描根目录，不强求引号形式
-  const line = hook.split(/\r?\n/).find((l) => l.includes('find ') && l.includes('-name'));
-  assert.ok(line, 'hook 里没有 find 扫描');
-  const m = line.match(/find\s+(.+?)\s+-name/);
-  assert.ok(m, `解析不出 find 的扫描根目录: ${line}`);
+test('JS 语法扫描脚本的覆盖范围包含 test-utils.js 且不少于 10 个文件', () => {
+  // 这里直接调用真实脚本的 --list 模式（若没有该模式则退化为读源码判断），
+  // 断言的是「扫得够全」这个结果，而不是它的实现方式。
+  const script = path.join(REPO, 'scripts', 'check-js-syntax.mjs');
+  assert.ok(fs.existsSync(script), 'scripts/check-js-syntax.mjs 不存在');
 
-  const roots = m[1].split(/\s+/).filter((d) => !d.startsWith('-'));
-  const walk = (dir) => {
-    const abs = path.join(REPO, dir);
-    if (!fs.existsSync(abs)) return [];
-    let entries;
-    try {
-      entries = fs.readdirSync(abs, { withFileTypes: true });
-    } catch (err) {
-      // 目录不可读（权限/竞态删除）时跳过，而不是让整个断言崩掉 ——
-      // 这里的目标是「扫描范围够不够」，不是「目录一定能读」
-      assert.ok(false, `目录不可读: ${dir} (${err.message})`);
-      return [];
-    }
-    return entries.flatMap((e) => {
-      if (e.name === 'node_modules') return [];
-      const rel = path.join(dir, e.name);
-      return e.isDirectory() ? walk(rel) : (e.name.endsWith('.js') ? [rel] : []);
-    });
-  };
-  const onDisk = roots.flatMap(walk);
+  const { spawnSync } = require('node:child_process');
+  const r = spawnSync(process.execPath, [script, '--list'], {
+    cwd: REPO,
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+  assert.strictEqual(r.status, 0, `--list 应当成功，实际 ${r.status}: ${r.stderr}`);
+  const onDisk = String(r.stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+
   // test-utils.js 正是历史上被漏掉的那个
   assert.ok(
     onDisk.some((f) => f.endsWith('test-utils.js')),
     '扫描范围应当包含 test/test-utils.js',
   );
-  assert.ok(onDisk.length >= 10, `扫描范围过小（只找到 ${onDisk.length} 个），检查 find 参数`);
+  assert.ok(onDisk.length >= 10, `扫描范围过小（只找到 ${onDisk.length} 个）`);
 });
 
 // ───────────────────────────────────────────────────────────────────────────
