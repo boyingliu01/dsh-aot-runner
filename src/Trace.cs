@@ -53,7 +53,7 @@ internal static class Trace
     public static PhaseScope Measure(string phase) => new(phase);
 
     /// <summary><see cref="Measure"/> 的作用域对象。</summary>
-    public readonly struct PhaseScope : IDisposable
+    internal readonly struct PhaseScope : IDisposable
     {
         private readonly string _phase;
         private readonly long _startTicks;

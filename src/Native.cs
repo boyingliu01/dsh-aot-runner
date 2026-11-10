@@ -59,7 +59,7 @@ internal static class Native
     public const uint RESUME_THREAD_FAILED = 0xFFFFFFFF;
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct SECURITY_ATTRIBUTES
+    internal struct SECURITY_ATTRIBUTES
     {
         public int nLength;
         public IntPtr lpSecurityDescriptor;
@@ -67,7 +67,7 @@ internal static class Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct STARTUPINFO
+    internal struct STARTUPINFO
     {
         public int cb;
         public IntPtr lpReserved;
@@ -90,7 +90,7 @@ internal static class Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct PROCESS_INFORMATION
+    internal struct PROCESS_INFORMATION
     {
         public IntPtr hProcess;
         public IntPtr hThread;
@@ -99,7 +99,7 @@ internal static class Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    internal struct JOBOBJECT_BASIC_LIMIT_INFORMATION
     {
         public long PerProcessUserTimeLimit;
         public long PerJobUserTimeLimit;
@@ -113,7 +113,7 @@ internal static class Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct IO_COUNTERS
+    internal struct IO_COUNTERS
     {
         public ulong ReadOperationCount;
         public ulong WriteOperationCount;
@@ -124,7 +124,7 @@ internal static class Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    internal struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
     {
         public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
         public IO_COUNTERS IoInfo;
@@ -162,7 +162,7 @@ internal static class Native
         uint cbJobObjectInformationLength, out uint lpReturnLength);
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+    internal struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
     {
         public long TotalUserTime;
         public long TotalKernelTime;

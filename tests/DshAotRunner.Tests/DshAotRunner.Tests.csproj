@@ -6,8 +6,15 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <!-- 测试项目不参与 AOT 发布，也不继承主项目的裁剪/分析器设定 -->
+    <!-- 测试项目不参与 AOT 发布，也不继承主项目的裁剪设定 -->
     <PublishAot>false</PublishAot>
+    <!-- 分析器档位与主项目一致（issue #27）。这一条不属于下面说的
+         「严格度由 Gate 13 统一注入」—— 那个管的是要不要把告警升级成错误，
+         而 AnalysisLevel 管的是启用哪些规则，是项目自身性质。
+         不设的话测试项目仍停在 latest-recommended，与生产代码两侧口径不一致，
+         同一条规则在一侧报、另一侧不报，最难排查。
+         测试特有的豁免见同目录 .editorconfig。 -->
+    <AnalysisLevel>latest-all</AnalysisLevel>
     <EnableAotAnalyzer>false</EnableAotAnalyzer>
     <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
     <!-- 编译期严格度由全局 XP-Gate Gate 13 统一注入（见 DshAotRunner.csproj 说明）。

@@ -52,6 +52,18 @@
 
          想调整严格度：改适配器，或设 XP_GATE_COMPILER_STRICTNESS=balanced|strict|warn-only。
          不要在项目文件里加回 TreatWarningsAsErrors 之类的属性。 -->
+
+    <!-- AnalysisLevel 不属于上面那条约束。
+         「严格度」tier（balanced/strict）决定的是**要不要把告警升级成错误**，
+         由 Gate 13 统一供给；而 AnalysisLevel 决定的是**分析器库里启用哪些规则**，
+         是项目自身的性质（这个项目要不要用全部分析器），不是 CI 的严格度档位。
+
+         设成 latest-all 的理由（issue #27）：默认的 latest-recommended 在这个项目上
+         **一条告警都没报**（实测），而 latest-all 能报出 30 条生产代码告警。
+         「推荐集」对 AOT + P/Invoke 这种项目覆盖不足 —— CA5392（DLL 劫持面）
+         就不在推荐集里。豁免项在 .editorconfig 里逐条写明理由。 -->
+    <AnalysisLevel>latest-all</AnalysisLevel>
+
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 

@@ -26,3 +26,24 @@ dotnet_diagnostic.CA1310.severity = none
 dotnet_diagnostic.CA1305.severity = none
 dotnet_diagnostic.CA1711.severity = none
 dotnet_diagnostic.CA1822.severity = none
+
+# --- 全量分析器（latest-all）带来的额外豁免（issue #27）---
+#
+# 生产代码那侧只留 22 条并逐条写明理由；测试这一侧共 119 条，集中在下面几类。
+# 理由：测试的价值在于抓出生产代码的缺陷，把这些写法噪声也压上去，
+# 只会让人对告警麻木。生产代码那一侧是收紧的。
+#
+#   CA1307 字符串比较未指定 StringComparison —— 82 条，几乎全是
+#          Assert.Contains(期望, 实际)，在断言里加 StringComparison 只是噪声
+#   CA2000 未释放 IDisposable —— 25 条，夹具里的 MemoryStream/StringWriter
+#          随测试结束被 GC，不构成资源泄漏
+#   CA1031 捕获过宽 —— 6 条，测试辅助方法里「断言不该抛」的写法
+#   CA1062 公共方法未校验参数 —— 3 条，测试辅助方法
+#   CA1515 类型可 internal —— 2 条，xUnit 需要 public 测试类
+#   CA1823 未使用的私有字段 —— 1 条
+dotnet_diagnostic.CA1307.severity = none
+dotnet_diagnostic.CA2000.severity = none
+dotnet_diagnostic.CA1031.severity = none
+dotnet_diagnostic.CA1062.severity = none
+dotnet_diagnostic.CA1515.severity = none
+dotnet_diagnostic.CA1823.severity = none
