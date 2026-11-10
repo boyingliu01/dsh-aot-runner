@@ -17,5 +17,46 @@ indent_size = 2
 [*.cs]
 indent_size = 4
 
+# ============================================================================
+# Roslyn 分析器（issue #27）
+# ============================================================================
+#
+# 分析器开关在 csproj（AnalysisLevel），**豁免项只在这里定义一处**。
+# 本仓库的教训：同一份列表在十几处各写一遍就会漂移，而漏掉一处看不出来 ——
+# 检查照样打印"通过"。所以这里每条都写了为什么可以豁免；
+# 没写理由的豁免，等于把门禁变成装饰。
+
+# CA1031: 不要捕获过于宽泛的异常。
+# 本项目**有意**在边界处捕获一切（13 处），每处都有注释：
+#   Trace.Write / NdjsonChannel.Dispose —— 诊断与清理失败不能拖垮 runner
+#   Program.Main / RunCore / EmitProtocolError —— 顶层入口，异常逃逸会破坏 IPC 协议
+#   JobRunner.OnDisconnect / TryTerminateJob / WriteLine —— runner 必须活到进程结束
+# 捕获后都转成了明确的降级行为，不是静默吞掉，所以这条规则的立意在此不成立。
+# 将来若新增的 catch(Exception) 是"掩盖缺陷"，应改代码，而不是靠这条放行。
+dotnet_diagnostic.CA1031.severity = none
+
+# CA2000: 作用域外未释放 IDisposable。实测 2 处均为误报/无风险：
+#   JobRunner.cs:70  BlockingCollection 不持有非托管资源
+#   Program.cs:107   Console.OpenStandardOutput() 是进程级流，Dispose 会破坏后续输出
+dotnet_diagnostic.CA2000.severity = none
+
+# CA2213: 可释放字段未释放。实测 4 处都是**分析器跟不到间接触发**：
+#   JobRunner 的 _job/_process/_thread —— 由 ReleaseOwnedJob() → ReleaseHandle<T>() 释放，
+#     Dispose() 确实调用了 ReleaseOwnedJob()，分析器只跟直接调用链
+#   NdjsonChannel._out —— 进程级 stdout，只 Flush 不 Close 才是正确做法
+dotnet_diagnostic.CA2213.severity = none
+
+# CA1032: 异常类应提供标准构造函数。本项目异常只在内部抛出且总带上下文，
+# 加无参构造反而让"忘了传消息"变成可能。
+dotnet_diagnostic.CA1032.severity = none
+
+# CA1307: 字符串比较应指定 StringComparison。生产代码只剩 1 处且已显式处理。
+dotnet_diagnostic.CA1307.severity = none
+
+# 注意：CA5392（P/Invoke 未限定搜索路径）**不在**这里豁免。
+# 它已由 src/Native.cs 的程序集级声明根治；保留规则开启状态，将来谁破坏了
+# 那条声明，这条会重新报错 —— 这正是保留它的意义。
+
 [*.md]
 trim_trailing_whitespace = false
+
