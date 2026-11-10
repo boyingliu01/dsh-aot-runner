@@ -442,12 +442,37 @@ public class EdgePathCoverageTests
         //
         // 注意不能只 Sleep 固定时长就断言：机器负载高时进程可能还没起来。
         // 这里用轮询 + 明确的上限，避免在慢机器上偶发失败。
+        //
+        // 为什么直接起 ping.exe 而不是 `cmd.exe /c ping ...`（2026-11-10，issue #25）：
+        //
+        //   原来用 cmd.exe 是为了让进程活久一点，但 cmd 会派生一个 ping.exe 子进程，
+        //   于是清理时必须 Kill(entireProcessTree: true)。而 KillTree 会枚举
+        //   **整台机器**的进程句柄，在测试主机并发回收进程时会命中
+        //   .NET 运行时的 Internal CLR error (0x80131506)，进程直接崩掉：
+        //
+        //     at System.Diagnostics.ProcessManager.OpenProcess(...)
+        //     at System.Diagnostics.Process.GetProcessHandlePairs(...)
+        //     at System.Diagnostics.Process.KillTree()
+        //
+        //   那个崩溃把测试主机整个带走，dotnet test 报「测试运行已中止」，
+        //   门禁再把「跑不起来」误判成「覆盖率检查失败」，方向指错。
+        //   实测频率约 1/10 —— 不是必现，所以「连跑 10 次全绿」证明不了修好。
+        //
+        //   直接起 ping.exe 就没有子进程，用 p.Kill() 即可，根本不进 KillTree。
+        //   本测试要验的是「进程还在跑时 TryReadExitCode 返回 false」，
+        //   派生子进程本来就是这段代码不需要的东西。
+        //
+        // System32 必须走完整路径：测试进程的 PATH 里不一定有它，
+        // 而且从 System32 之外的地方找 ping.exe 可能命中同名的其它程序。
+        var pingPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System), "ping.exe");
         using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
         {
-            FileName = "cmd.exe",
-            Arguments = "/c ping -n 10 127.0.0.1 >nul",
+            FileName = pingPath,
+            Arguments = "-n 10 127.0.0.1",
             CreateNoWindow = true,
             UseShellExecute = false,
+            RedirectStandardOutput = true,
         });
         Assert.NotNull(p);
         try
@@ -466,7 +491,9 @@ public class EdgePathCoverageTests
         }
         finally
         {
-            try { p!.Kill(entireProcessTree: true); } catch { }
+            // 没有子进程，Kill() 就够 —— 刻意不用 entireProcessTree。
+            // 这正是本测试要绕开的路径，写回去等于把这个坑重新挖开。
+            try { p!.Kill(); } catch { }
         }
     }
 
