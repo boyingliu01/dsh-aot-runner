@@ -265,6 +265,20 @@ if [ "$CLEAN" = "1" ]; then
     echo "    已备份现有产物 -> $EXE_BACKUP"
   fi
   rm -rf obj bin "${OUT_ABS:?}"/*
+
+  # dotnet test 每跑一次就在 TestResults/ 下生成一个新的 GUID 目录，从不自清。
+  # 实测累积了 66 个目录 / 35MB —— 而 coverage-summary.py 只读**最新一份非空报告**
+  # （见 scripts/coverage-summary.py:pick_latest_report），历史那些是纯死重。
+  # 这些目录被 .gitignore 排除，所以在 git status 里看不出来，只能靠 --clean 收。
+  #
+  # 用 find 而不是 `rm -rf tests/*/TestResults`：后者在 glob 不匹配时会因
+  # `set -e` 之外的行为难以察觉地什么都不删，这里显式检查存在性。
+  TEST_RESULTS_DIRS=$(find tests -type d -name TestResults 2>/dev/null || true)
+  if [ -n "$TEST_RESULTS_DIRS" ]; then
+    echo "    清理 dotnet test 历史产物 TestResults/"
+    # shellcheck disable=SC2086
+    rm -rf $TEST_RESULTS_DIRS
+  fi
 fi
 
 echo "==> 构建 NativeAOT (输出: $OUT_WIN)"
