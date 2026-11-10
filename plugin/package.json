@@ -1,6 +1,6 @@
 {
   "name": "@boyingliu01/dsh-aot-runner",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "用 NativeAOT runner 替换 DSH 的 Node.js 子进程 runner：消除约 63~67% 的 runner 开销，p99 改善 73~124ms",
   "type": "module",
   "license": "MIT",

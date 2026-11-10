@@ -69,7 +69,10 @@ const AOT = path.join(REPO, 'dist', 'dsh-aot-runner.exe');
  *
  * 复用它是唯一能保证"测的是真实契约"的做法。
  */
-const { launchRunner, isAlive } = require('../test/runner-client.js');
+// 只解构 isAlive。launchRunner 真正被用的地方（fork 场景）在子进程脚本里，
+// 那里必须重新 require —— 子进程不是这个模块，拿不到顶层绑定（见下文 158 行附近）。
+// 之前这里解构了 launchRunner 却从未使用，被 ESLint no-unused-vars 抓到。
+const { isAlive } = require('../test/runner-client.js');
 
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
