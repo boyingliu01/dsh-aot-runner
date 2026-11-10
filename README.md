@@ -222,9 +222,9 @@ node 的 `resolveWindowsExecutable` 规则（`runner-launch-*.js`）：
 
 ```bash
 ./build.sh                 # 增量构建
-./build.sh --check         # 只跑质量门禁（格式 + 静态检查 + JS 语法）
+./build.sh --check         # 只跑质量门禁（8 道，见「质量门禁」章节）
 ./build.sh --clean         # 清理后重建
-./build.sh --test          # 构建 + 跑回归（JS 77 项 + C# 139 项）
+./build.sh --test          # 构建 + 跑回归（JS 77 项 + C# 319 项）
 ./build.sh --all           # 质量门禁 + 清理重建 + 测试 + 基准
 ./build.sh --out <目录>    # 指定产物目录
 ```
@@ -331,15 +331,28 @@ A/B 需要两个 runner：AOT 产物与 node runner。两者路径自动解析�
 
 ## 质量门禁
 
-`./build.sh --check` 跑三道检查，任何一道失败即非零退出：
+`./build.sh --check` 跑八道检查，任何一道失败即非零退出：
 
 | 门禁 | 实现 | 说明 |
 |---|---|---|
 | C# 代码格式 | `dotnet format --verify-no-changes` | 规则来自 `.editorconfig` + `.csharp-formatting.json` |
 | C# 静态检查 | 编译期 analyzer | csproj 里 `TreatWarningsAsErrors=true`，**0 警告是硬约束** |
-| JS 语法 | `node --check` | 测试与基准脚本 |
+| 版本一致性 | `scripts/check-version.mjs` | `VERSION` / `package.json` / `plugin/package.json` 三处对齐 |
+| C# 单元测试 | `dotnet test` | 319 个测试 |
+| 覆盖率门槛 | coverlet + `.runsettings` | 对应 xp-gate Gate 5 |
+| ESLint | `eslint .` | 对应 xp-gate Gate 1 |
+| JS 语法 | `scripts/check-js-syntax.mjs` | 口径唯一定义处，CI 与 pre-commit 共用 |
+| 上游补丁留档 | `vendor/patch-dsh.mjs verify` | 校验 `index.js.orig` 与原始版本一致 |
 
 一键修复格式：`dotnet format`。
+
+> `npm run test:all` 会把 `--check` 作为第一道，再跑完整测试链 ——
+> 「跑了测试」不等于「跑了门禁」，两者都过才算绿。
+
+这些门禁与 xp-gate 的全局 hook 是**双保险**，不是互相替代：`--check` 不依赖
+全局安装状态、CI 里也跑，是最小可复现的那一层；xp-gate 提供 Gate 0~13 的
+完整覆盖。历史上 xp-gate 曾「看不见 C#」（[#717](https://github.com/boyingliu01/xp-gate/issues/717)），
+那段时期确实只能靠 `--check`；该缺口已修复，见 `ROADMAP.md` 的复核记录。
 
 
 ---
@@ -508,20 +521,22 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 | S6 插件接入 | ✅ | 插件 + 熔断器（[#11](https://github.com/boyingliu01/dsh-aot-runner/issues/11) 阶段 B）|
 | S7 性能对比验证 | 🔄 | 第一层 + 第二层 ✅，第三层进行中 |
 
-**全套件 216 项通过**：`npm run test:all`（77 项 JS）+ `dotnet test`（139 项 C#）。
+**全套件 408 项通过**：`npm run test:all`（89 项 JS）+ `dotnet test`（319 项 C#）。
 
 | 层 | 套件 | 项数 |
 |---|---|---|
-| C# 单元 | `tests/DshAotRunner.Tests` | 139 |
+| C# 单元 | `tests/DshAotRunner.Tests` | 319 |
 | A/B 一致性 | `test/ab-verify.js` | 28 |
-| 观测器逻辑 | `test/aot-observe-verify.js` | 17 |
+| 观测器逻辑 | `test/aot-observe-verify.js` | 15 |
 | 插件单元 | `plugin/test/index.test.js` | 11 |
 | 泄漏/混沌 | `test/leak-verify.js` | 7 |
+| pre-commit 短路 | `test/pre-commit-shortcircuit-verify.js` | 7 |
+| JS 语法检查器 | `test/lint-syntax-verify.js` | 7 |
 | IPC 协议 | `test/ipc-verify.js` | 6 |
 | terminate 竞态 | `test/race-verify.js` | 5 |
 | 插件端到端 | `test/e2e-plugin-verify.js` | 2 |
 | 真实 host 路径 | `test/host-path-verify.js` | 1 |
-| **合计** | | **216** |
+| **合计** | | **408** |
 
 ### 已知待办
 
