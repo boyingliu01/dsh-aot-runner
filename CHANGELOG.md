@@ -13,9 +13,10 @@
   只是慢 2~3 倍——**不报错、不崩溃、没有任何用户可见症状**。此前这类失效
   只在 `verbose` 日志里，等于没人知道。现在降级会明确告知，并说明「已降级到内联模式」。
 
-- **发布前置校验**（`npm run check:release`，已接进 `prepublishOnly`）：
-  校验 `plugin/bin/*.exe` 与 `dist/*.exe` 逐字节一致，且 `plugin/bin/` 没有
-  被 `files` 通配带进去的残留文件。此前这类不一致只在用户装完后才暴露。
+- **发布前置校验**（`scripts/check-release.mjs`，已接进 `plugin/package.json`
+  的 `prepublishOnly`）：校验 `plugin/bin/*.exe` 与 `dist/*.exe` 逐字节一致，
+  且 `plugin/bin/` 没有被 `files` 通配带进去的残留文件。
+  此前这类不一致只在用户装完后才暴露。
 
 - **上游契约漂移自动检测**（#15 A 项）。机械提取 DSH runner 的 4 类契约
   （start 请求字段集、Windows spawn 错误码表、可执行文件解析顺序、stdio fd 布局），
