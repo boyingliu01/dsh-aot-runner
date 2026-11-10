@@ -435,6 +435,32 @@ icacls "D:\your\workspace" | grep -i "mandatory\|label"
 
 ---
 
+## ⚠️ 另一个陷阱：exe 被占用时无法覆盖（改名可绕过）
+
+**Windows 不允许覆盖一个正被映射为可执行映像的文件**，但**允许改名**。
+
+场景：DSH 会话本身就在通过 `plugin/bin/dsh-aot-runner.exe` 跑子进程，
+此时重新构建会撞上：
+
+```
+cp: cannot create regular file 'plugin/bin/dsh-aot-runner.exe': Device or resource busy
+```
+
+`build.sh` 的处理是**改名换位**：把占用中的文件 `mv` 成 `.old`，
+再把新文件放到原路径。已运行的进程继续持有旧 inode 的句柄（照常工作），
+下次启动就用新版 —— 不需要关掉 DSH。
+
+`.old` 后缀不是随便选的：`plugin/package.json` 的 `files` 里有 `!bin/*.old`，
+即使清理漏了也不会被打进发布包。
+
+> 这个陷阱有历史：早期版本在这种情况下只告警、仍以 0 退出，
+> 结果**插件包里躺着上一版 exe 而构建日志一切正常**。
+> 现在除了改名换位，发布前还有 `scripts/check-release.mjs` 兜底 ——
+> 它已接进 `prepublishOnly`，产物不一致时 `npm publish` 会直接失败。
+> 两道防线各司其职：构建期尽量成功，发布期必须正确。
+
+---
+
 ## 项目结构
 
 ```
