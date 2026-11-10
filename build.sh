@@ -7,7 +7,7 @@
 # 用法：
 #   ./build.sh                    # 增量构建
 #   ./build.sh --clean            # 清理后重建
-#   ./build.sh --check            # 只跑质量门禁（格式 + 静态检查 + JS 语法），不构建
+#   ./build.sh --check            # 只跑质量门禁（8 项，见下），不构建
 #   ./build.sh --test             # 构建后跑 A/B 验证
 #   ./build.sh --bench            # 构建后跑性能基准
 #   ./build.sh --all              # 质量门禁 + 清理重建 + 测试 + 基准
@@ -92,9 +92,15 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- 质量门禁 ----
-# 1. C# 格式：.editorconfig + .csharp-formatting.json 定义的规则
-# 2. C# 静态检查：编译期 analyzer（严格度由全局 XP-Gate Gate 13 注入，csproj 不声明）
-# 3. JS 语法：测试/基准脚本
+# 完整 8 项（`--check` 会按顺序全跑）：
+#   1. C# 格式：.editorconfig + .csharp-formatting.json 定义的规则
+#   2. C# 静态检查：编译期 analyzer（严格度由全局 XP-Gate Gate 13 注入，csproj 不声明）
+#   3. 版本一致性：VERSION / package.json / plugin/package.json 三处对齐
+#   4. C# 单元测试（319 个）
+#   5. 覆盖率门槛（对应 xp-gate Gate 5）
+#   6. ESLint（对应 xp-gate Gate 1）
+#   7. JS 语法（口径在 scripts/check-js-syntax.mjs，CI 共用同一份）
+#   8. 上游补丁留档校验
 if [ "$CHECK" = "1" ]; then
   echo "==> 质量门禁：C# 代码格式"
   # 必须显式指定 workspace：仓库根同时存在 DshAotRunner.sln 与 DshAotRunner.csproj 时，

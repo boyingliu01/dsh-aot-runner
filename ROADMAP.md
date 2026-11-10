@@ -219,19 +219,39 @@ node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
 | Gate 2 重复代码 | 16 处克隆 | 1.93%（9 处，均在测试夹具内） |
 | Gate 6 架构 | Long Parameter List 1 处 | 清零，7.5/10 |
 
-### 关键发现：xp-gate 看不见 C#
+### 曾经的坑：xp-gate 看不见 C#（已修，2026-11-10 复核）
 
-`lib/language-tools.js` 没有 C# 适配器（`arch.js` 里有 `.cs → csharp`，两者不一致），
+> **这条结论已经过期，保留是为了记录它当初为什么不便宜。**
+> 下面原「结论」段里「不能依赖 xp-gate 的绿灯」现在不成立，别照做。
+
+当时的现象：`lib/language-tools.js` 没有 C# 适配器（`arch.js` 里有 `.cs → csharp`，两者不一致），
 所以 Gate 1/3/5/9/13 对 C# 一律**静默跳过**，输出「无源文件」——
 
 **看起来是通过，实际是没检查。**
 
-本项目主体恰恰是 C#（2031 行）。拿 lizard 手工扫才发现有 4 个函数 CCN 严重超标。
+本项目主体恰恰是 C#。拿 lizard 手工扫才发现有 4 个函数 CCN 严重超标。
 
 已提 issue 说明根因与修复建议：<https://github.com/boyingliu01/xp-gate/issues/717>
 
-> 结论：**在 xp-gate 支持 C# 之前，`build.sh --check` 里的 `dotnet format` +
-> `-warnaserror` 才是 C# 质量的实际保障**，不能依赖 xp-gate 的绿灯。
+**现在（2026-11-10 复核）**：#717 已 closed，`adapters/csharp.sh` 已落地并安装到
+`~/.config/xp-gate/adapters/csharp.sh`（360 行）。实测同一笔提交的门禁输出：
+
+```
+→ Gate 1: Code Quality
+   ── Checking csharp ──
+   FORMAT OK - dotnet format reports no changes required
+   ✅ PASSED - Language-specific code quality checks.
+→ Gate 5: Tests & coverage
+   dotnet test → 已通过! 失败: 0，通过: 319，总计: 319
+   csharp coverage: 97% ✅ (≥ 80%)
+→ Gate 13: Compiler Strictness   PASS
+```
+
+C# 现在确实被检查了。**`build.sh --check` 与 xp-gate 是双保险，不是唯一保障** ——
+两者都保留：`--check` 不依赖全局安装状态，CI 里也跑，是最小可复现的那一层。
+
+> 教训：这条记录的价值在于「绿灯不等于检查过」这个判断方法。方法没过期，
+> 只是这次的答案是「确实检查了」。所以改的是结论，不是方法。
 
 ### 仍未处理
 
