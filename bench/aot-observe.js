@@ -48,18 +48,24 @@ const BENCH = path.join(REPO, 'bench', 'd1-ab-bench.js');
 const HISTORY_DIR = path.join(REPO, '.aot-observation');
 const HISTORY_FILE = path.join(HISTORY_DIR, 'history.jsonl');
 
-/** 离散度超过这个值，单轮结果不可采信（与 d1-ab-bench.js 的判定保持一致）。 */
-const DISPERSION_LIMIT = 10;
-
 /**
- * 跨轮收益比例的允许跨度（百分点）。
- * 单轮离散度超限时，若多轮收益比例落在这个区间内，可采信「比例」但不可采信绝对值。
- * 5pp 的取值依据：本机 6 轮实测跨度 4.3pp，而噪声主导时需要 ~20pp 才会触发。
+ * 三态判定与可信度判据已抽成通用模块（issue #17 B 项）：
+ * `lib/bench-verdict.mjs`。
+ *
+ * 抽取的理由不是"整理代码"，而是这套判据**不含任何 AOT 相关的东西** ——
+ * 它只依赖 { gainPct, dispNode, dispAot, nodeP50, aotP50, fails } 这几个字段，
+ * 任何"优化前 vs 优化后"的测量都能用。留在 bench/ 里等于把它锁死在
+ * 一个平台特定的项目里。
+ *
+ * 本文件只保留 AOT 特有的部分：怎么跑 d1-ab-bench、怎么读写 history.jsonl。
+ *
+ * 用 require() 而不是 import：本仓库是 commonjs（package.json 没有 "type":
+ * "module"）。Node ≥22 支持 require() 加载 ESM，实测本机 v24 正常。
  */
-const GAIN_SPREAD_LIMIT = 5;
-
-/** 走跨轮收益路径所需的最少轮数 —— 3 轮才能谈「一致」。 */
-const MIN_ROUNDS_FOR_SPREAD = 3;
+const verdict = require('../lib/bench-verdict.mjs');
+const {
+  median, isTrustworthy, crossRoundGain, aggregate, DISPERSION_LIMIT, GAIN_SPREAD_LIMIT,
+} = verdict;
 
 /**
  * 解析 d1-ab-bench.js 末行的 `SUMMARY {json}`。
@@ -78,159 +84,6 @@ function parseSummary(stdout) {
     return null;
   }
 }
-
-/**
- * 一轮是否可采信。除离散度外还要求 0 失败：
- * 有失败的轮次说明 runner 本身不稳定，数字再好看也不能用。
- *
- * @param {object|null} s
- * @returns {boolean}
- */
-function isTrustworthy(s) {
-  if (!isRoundObject(s)) return false;
-  // 有失败的轮次说明 runner 本身不稳定，数字再好看也不能用
-  if (hasFailures(s)) return false;
-  // 缺离散度时不能判定可信 —— 这正是「不编造」的底线
-  return isValidDispersion(s.dispNode) && isValidDispersion(s.dispAot);
-}
-
-/** 是不是一个可读的轮次对象（null/非对象都不算）。 */
-function isRoundObject(s) {
-  return Boolean(s) && typeof s === 'object';
-}
-
-/** 这一轮是否存在失败次数。 */
-function hasFailures(s) {
-  return Boolean(s.fails) && s.fails > 0;
-}
-
-/**
- * 单项离散度是否在允许范围内。
- *
- * 非有限值（undefined/NaN/字符串）一律不可信：把「没测到」当成「合格」
- * 会让整份结论建立在缺失数据上。
- */
-function isValidDispersion(raw) {
-  const d = Number(raw);
-  return Number.isFinite(d) && d <= DISPERSION_LIMIT;
-}
-
-/**
- * 单轮离散度超限时，退一步看「跨轮收益比例是否一致」。
- *
- * ## 为什么需要这条路径（2026-11-04 实测）
- *
- * 本机常态负载就在 50%~75%（火绒 HipsDaemon + 常驻办公软件），
- * 逐轮离散度几乎不可能压到 10% 以下 —— 6 轮实测全部 UNRELIABLE：
- *
- *   第1轮 60.7%  第2轮 63.2%  第3轮 62.9%
- *   第4轮 64.1%  第5轮 61.7%  第6轮 65.0%
- *
- * 绝对毫秒数抖得厉害（node 237~308ms），但**收益比例极稳**（跨度 4.3pp）。
- * 这不是数据变好了，而是「收益比例」本身对负载不敏感：
- * 负载同时抬高 node 和 AOT 的绝对延迟，比值却保持一致。
- *
- * 所以判据分两层：
- *   1. 单轮可信（离散度 ≤ 10%）—— 最严格，能给绝对值
- *   2. 跨轮收益一致（跨度 ≤ 该阈值 且 轮数 ≥ 3）—— 只给比例，不给绝对值
- *
- * 第 2 层**绝不**用来输出 netMs/nodeP50 这类绝对值 —— 那些确实不可信。
- *
- * @param {object[]} summaries 全部轮次（已过滤 null）
- * @returns {object|null} 通过则返回聚合成败信息，否则 null
- */
-function crossRoundGain(summaries) {
-  const valid = (summaries || []).filter(
-    (s) => s && !(s.fails > 0) && Number.isFinite(Number(s.gainPct)),
-  );
-  if (valid.length < MIN_ROUNDS_FOR_SPREAD) return null;
-
-  const gains = valid.map((s) => Number(s.gainPct));
-  const spread = Math.max(...gains) - Math.min(...gains);
-  if (spread > GAIN_SPREAD_LIMIT) return null;
-
-  return {
-    rounds: valid.length,
-    gainPct: Math.round(median(gains) * 10) / 10,
-    gainSpread: Math.round(spread * 10) / 10,
-  };
-}
-
-/** 中位数；空数组返回 null。 */
-function median(xs) {
-  if (!Array.isArray(xs) || !xs.length) return null;
-  const d = xs.slice().sort((a, b) => a - b);
-  const m = Math.floor(d.length / 2);
-  return d.length % 2 ? d[m] : (d[m - 1] + d[m]) / 2;
-}
-
-/**
- * 聚合多轮结果。
- *
- * 关键：只用可信轮次算中位数。全都不可信时返回 verdict=UNRELIABLE 且
- * gainPct=null —— 而不是把不可信的数字平均一下当结论。
- *
- * @param {object[]} summaries
- */
-function aggregate(summaries) {
-  const all = (summaries || []).filter(Boolean);
-  const good = all.filter(isTrustworthy);
-  if (!good.length) return aggregateUnreliable(all);
-  // 净收益 = node 的 runner 开销 − AOT 的 runner 开销
-  //          = (nodeP50 − floorP50) − (aotP50 − floorP50)
-  //          = nodeP50 − aotP50
-  // 地板项相消，所以不必单独要求 floorP50 存在。
-  const gains = good.map((s) => Number(s.gainPct)).filter(Number.isFinite);
-  const nets = good
-    .filter((s) => Number.isFinite(Number(s.nodeP50)) && Number.isFinite(Number(s.aotP50)))
-    .map((s) => Number(s.nodeP50) - Number(s.aotP50));
-
-  return {
-    verdict: 'MEASURED',
-    rounds: all.length,
-    trustworthyRounds: good.length,
-    gainPct: gains.length ? Math.round(median(gains) * 10) / 10 : null,
-    netMs: nets.length ? Math.round(median(nets)) : null,
-    nodeP50: median(good.map((s) => Number(s.nodeP50)).filter(Number.isFinite)),
-    aotP50: median(good.map((s) => Number(s.aotP50)).filter(Number.isFinite)),
-    floorP50: median(good.map((s) => Number(s.floorP50)).filter(Number.isFinite)),
-  };
-}
-
-/**
- * 没有一轮单轮可信时的退路：看第二层（跨轮收益一致性）能不能给结论。
- * 能 → GAIN_CONSISTENT（只给比例）；不能 → UNRELIABLE（什么都不给）。
- */
-function aggregateUnreliable(all) {
-  // 第一层（单轮离散度）全军覆没 —— 看看第二层（跨轮收益一致性）能不能给结论
-  const cross = crossRoundGain(all);
-  if (cross) {
-    return {
-      verdict: 'GAIN_CONSISTENT',
-      rounds: all.length,
-      trustworthyRounds: 0,
-      gainPct: cross.gainPct,
-      netMs: null,          // 绝对值不可信，坚决不给
-      nodeP50: null,
-      aotP50: null,
-      floorP50: null,
-      gainSpread: cross.gainSpread,
-      note: `单轮离散度均超限，但 ${cross.rounds} 轮收益比例一致`
-        + `（${cross.gainSpread}pp 跨度）—— 只能采信比例，绝对值不可用`,
-    };
-  }
-  return {
-    verdict: 'UNRELIABLE',
-    rounds: all.length,
-    trustworthyRounds: 0,
-    gainPct: null,
-    netMs: null,
-    note: all.length
-      ? '所有轮次离散度都超限，且跨轮收益比例也不一致 —— 机器被干扰，重跑'
-      : '没有拿到任何可用轮次',
-  };
-}
-
 /** 当前 CPU 负载百分比；取不到返回 null。 */
 function cpuLoad() {
   try {
