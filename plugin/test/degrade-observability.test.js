@@ -94,33 +94,40 @@ async function tripBreaker(runtime, times) {
   await new Promise((r) => setTimeout(r, 30));
 }
 
-test('降级可观测：成功启用后状态是 aot', async () => {
-  const { apply, getRunnerStatus, resetRunnerStatus, resolveRunnerPath } = await loadPlugin();
-  resetRunnerStatus();
+/**
+ * 把「重置状态 → 建假 runtime → 建 ctx → apply」这段样板抽出来。
+ *
+ * 每个测试都要这四步，重复 5 次后连 jscpd 都报重复了。
+ * 放进辅助函数还有个额外好处：apply 之前必须先装好假 spawn 这个约束
+ * （见 tripBreaker 说明）现在只在一个地方体现，不容易再踩。
+ *
+ * @param {object} [config] 传给 apply 的配置
+ * @returns {Promise<{ctx: object, logs: object, runtime: object, plugin: object}>}
+ */
+async function setupPlugin(config = {}) {
+  const plugin = await loadPlugin();
+  plugin.resetRunnerStatus();
 
-  const exePath = resolveRunnerPath()?.path;
+  const exePath = plugin.resolveRunnerPath()?.path;
   const { runtime } = makeFakeRuntime();
-  const { ctx } = makeCtx({ subprocess: runtime });
+  const { ctx, logs } = makeCtx({ subprocess: runtime });
 
-  apply(ctx, { runnerPath: exePath });
+  plugin.apply(ctx, { runnerPath: exePath, ...config });
+  return { ctx, logs, runtime, plugin, exePath };
+}
 
-  const status = getRunnerStatus();
+test('降级可观测：成功启用后状态是 aot', async () => {
+  const { plugin } = await setupPlugin();
+  const status = plugin.getRunnerStatus();
   assert.strictEqual(status.runner, 'aot', '启用成功后应报告 aot');
   assert.strictEqual(status.degradedAt, null, '未降级时不应有降级时间');
 });
 
 test('降级可观测：熔断后状态变成 node，并记录降级时间', async () => {
-  const { apply, getRunnerStatus, resetRunnerStatus, resolveRunnerPath } = await loadPlugin();
-  resetRunnerStatus();
-
-  const exePath = resolveRunnerPath()?.path;
-  const { runtime } = makeFakeRuntime();
-  const { ctx } = makeCtx({ subprocess: runtime });
-
-  apply(ctx, { runnerPath: exePath, failThreshold: 3 });
+  const { plugin, runtime } = await setupPlugin({ failThreshold: 3 });
   await tripBreaker(runtime, 3);
 
-  const status = getRunnerStatus();
+  const status = plugin.getRunnerStatus();
   assert.strictEqual(status.runner, 'node', '熔断后应报告 node（已降级）');
   assert.ok(status.degradedAt, '降级必须记录时间，否则无法判断是什么时候变慢的');
   // 必须是可解析的 ISO 时间
@@ -128,16 +135,9 @@ test('降级可观测：熔断后状态变成 node，并记录降级时间', asy
 });
 
 test('降级可观测：降级日志不受 verbose=false 影响', async () => {
-  const { apply, resetRunnerStatus, resolveRunnerPath } = await loadPlugin();
-  resetRunnerStatus();
-
-  const exePath = resolveRunnerPath()?.path;
-  const { runtime } = makeFakeRuntime();
-  const { ctx, logs } = makeCtx({ subprocess: runtime });
-
   // verbose=false 是**默认配置**。原来的 bug 就在这里：
   // 降级日志套了 if (verbose)，于是默认配置下用户完全看不到降级。
-  apply(ctx, { runnerPath: exePath, failThreshold: 3, verbose: false });
+  const { runtime, logs } = await setupPlugin({ failThreshold: 3, verbose: false });
   await tripBreaker(runtime, 3);
 
   assert.ok(
@@ -151,14 +151,7 @@ test('降级可观测：降级日志不受 verbose=false 影响', async () => {
 });
 
 test('降级可观测：降级日志说明后果和恢复方式', async () => {
-  const { apply, resetRunnerStatus, resolveRunnerPath } = await loadPlugin();
-  resetRunnerStatus();
-
-  const exePath = resolveRunnerPath()?.path;
-  const { runtime } = makeFakeRuntime();
-  const { ctx, logs } = makeCtx({ subprocess: runtime });
-
-  apply(ctx, { runnerPath: exePath, failThreshold: 3 });
+  const { runtime, logs } = await setupPlugin({ failThreshold: 3 });
   await tripBreaker(runtime, 3);
 
   const msg = logs.warn.find((m) => m.includes('降级'));
