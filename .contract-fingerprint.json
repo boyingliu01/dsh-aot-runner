@@ -1,0 +1,51 @@
+{
+  "dshVersion": "0.2.0-rc.2",
+  "capturedAt": "2026-11-10T05:37:41.737Z",
+  "fingerprint": "e2fec4b853cdcfc78c0416fb34b28222c5caec5d2662f2a0970f85369423f019",
+  "contracts": {
+    "startRequestFields": {
+      "required": [
+        "type",
+        "cwd",
+        "env"
+      ],
+      "optional": [
+        "control"
+      ]
+    },
+    "spawnErrorCodes": {
+      "2": "ENOENT",
+      "3": "ENOENT",
+      "5": "EPERM",
+      "193": "EFTYPE",
+      "267": "ENOENT",
+      "740": "EACCES"
+    },
+    "executableResolution": {
+      "candidateExtensions": [
+        "com",
+        "exe"
+      ],
+      "searchOrder": [
+        "explicit-directory",
+        "cwd-unless-disabled",
+        "PATH"
+      ],
+      "respectsNoDefaultCurrentDir": true
+    },
+    "runnerStdioLayout": {
+      "fixed": [
+        "ignore",
+        "ignore",
+        "ignore",
+        "ipc",
+        "inherit",
+        "pipe",
+        "inherit",
+        "pipe"
+      ],
+      "hasOverlappedControl": true,
+      "referencesControlFdConstant": true
+    }
+  }
+}

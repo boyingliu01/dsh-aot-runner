@@ -14,7 +14,7 @@
     "test:host": "node --test test/host-path-verify.js",
     "test:e2e": "node --test test/e2e-plugin-verify.js",
     "test:plugin": "node --test plugin/test/*.test.js",
-    "test:all": "./build.sh --check && npm run lint && npm run test:coverage && npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:observe && npm run test:hook && npm run test:lint && npm run test:leak && npm run test:race && npm run test:release && npm run test:degrade && npm run test:verdict",
+    "test:all": "./build.sh --check && npm run lint && npm run test:coverage && npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:observe && npm run test:hook && npm run test:lint && npm run test:leak && npm run test:race && npm run test:release && npm run test:degrade && npm run test:verdict && npm run test:contract",
     "bench": "node bench/d1-ab-bench.js",
     "test:coverage": "c8 node --test plugin/test/index.test.js",
     "lint": "npm run lint:syntax && npm run lint:eslint",
@@ -30,7 +30,10 @@
     "test:release": "node test/check-release-verify.js",
     "test:degrade": "node --test plugin/test/degrade-observability.test.js",
     "test:verdict": "node --test test/bench-verdict-verify.js",
-    "isolation": "node bench/isolation-value.js"
+    "isolation": "node bench/isolation-value.js",
+    "contract": "node scripts/contract-fingerprint.mjs",
+    "contract:update": "node scripts/contract-fingerprint.mjs --update",
+    "test:contract": "node --test test/contract-fingerprint-verify.js"
   },
   "engines": {
     "node": ">=22"

@@ -44,6 +44,34 @@ if CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null); then
   fi
 fi
 
+# ---- 第 1.5 段：上游契约漂移检测（issue #15） ----
+# DSH 升级改变调用契约时，A/B 的 28 项用例可能落不到新分支上，门禁会静默放过。
+# 这里把 4 条关键契约从实际安装的 DSH 源码机械提取成指纹，变了就报警。
+#
+# 为什么放在本地这一段而不是 xp-gate：这是本仓库特有的检查，
+# xp-gate 是通用门禁，不该知道 AOT runner 的契约长什么样。
+#
+# 只在「可能影响契约的改动」上跑（本项目 shell/C# 源码或指纹文件本身）——
+# 改个文档也跑一遍是纯粹的浪费。但不跑的时候要说出来，不能静默跳过。
+if [ -n "${CHANGED:-}" ]; then
+  if echo "$CHANGED" | grep -qE '^(src/|scripts/contract-fingerprint|\.contract-fingerprint|tests/|plugin/lib/)'; then
+    echo "[pre-commit] 上游契约漂移检测"
+    if ! node scripts/contract-fingerprint.mjs; then
+      echo "[pre-commit] 契约漂移了。确认影响后运行 'npm run contract:update' 更新基线" >&2
+      exit 1
+    fi
+  else
+    echo "[pre-commit] 跳过契约漂移检测（本次改动不影响契约）"
+  fi
+else
+  # 手动运行 hook（无改动集合）时做全量校验，与 JS 那段口径一致
+  echo "[pre-commit] 上游契约漂移检测"
+  if ! node scripts/contract-fingerprint.mjs; then
+    echo "[pre-commit] 契约漂移了。确认影响后运行 'npm run contract:update' 更新基线" >&2
+    exit 1
+  fi
+fi
+
 if [ "$HAS_JS" -eq 1 ]; then
   echo "[pre-commit] JS 语法检查"
   # 口径只在 scripts/check-js-syntax.mjs 里定义一次，CI 与本机共用同一份 ——

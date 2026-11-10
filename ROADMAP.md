@@ -180,6 +180,44 @@ grep -nE "launch(WindowsJob|LinuxScope)\(" package/lib/index.js
 > [discussion #11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)，
 > 讨论区仍在活跃维护。**不要再尝试开 PR 催修。**
 
+#### 契约漂移自动检测（issue #15）
+
+上面的矩阵靠人记得去复核。`scripts/contract-fingerprint.mjs` 把这件事自动化的部分接管了。
+
+它从**实际安装的 DSH 源码**机械提取 4 条契约，生成 SHA256 指纹存入
+`.contract-fingerprint.json`。DSH 升级后指纹变了就报警，此时才需要人判断。
+
+| # | 契约 | 来源 |
+|---|---|---|
+| 1 | start 请求字段集 `{type, cwd, env}` + 可选 `control` | `parseWindowsStartRequest` |
+| 2 | `WINDOWS_SPAWN_ERROR_CODES` 映射 | `runner.js` |
+| 3 | 候选扩展名 `.com`/`.exe`（**顺序有语义**）+ 搜索顺序 | `windowsExecutableNames` |
+| 4 | `runnerStdio` 的 fd 布局（fd 3 = ipc） | `runnerStdio` |
+
+```bash
+npm run contract          # 对比，漂移则退出码 1
+npm run contract:update   # 确认影响后更新基线
+```
+
+已接入 `.githooks/pre-commit` 第 1.5 段：改动涉及 `src/`、`tests/`、`plugin/lib/`
+或指纹文件时自动跑。
+
+**设计要点：提取失败必须报错，不能当成"没漂移"。**
+
+这个选择不是洁癖 —— 提取失败恰好发生在**上游改了源码结构**时，
+也就是最需要它工作的时刻。如果那时它说"契约未漂移"，检测就完全失效了。
+
+写这个脚本时踩了两次坑，都是同一类错误：
+
+- 第一版在全文找第一个 `hasExactKeys(...)`，抓到的是 runner 的 **error 结果**
+  结构 `["name","message"]`，不是 start 请求。指纹照常生成、照常打印"已保存"，
+  但**它保护的是错误的东西**。
+- 第一版找 `resolveWindowsExecutable` 里的 `".exe"` 字面量，一个都没找到 ——
+  实际扩展名是在辅助函数里用模板字符串拼的（`` `${command}${separator}exe` ``）。
+
+两次都是"命令跑起来了但没测到东西"。现在每个提取器都带自校验
+（例如 start 字段必须含 `type`/`cwd`/`env`），不满足就拒绝保存基线。
+
 ## 已知盲区
 
 **切帧丢数据类缺陷测不出来。** 见
