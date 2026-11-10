@@ -29,11 +29,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      run_windows:
-        description: '额外跑 Windows 构建 + A/B（消耗 2x 额度）'
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -44,8 +39,14 @@ permissions:
 
 jobs:
   # ── 与平台无关的静态检查：便宜（1x），每次必跑 ──────────────────
+  #
+  # ⚠️ 这个 job 的展示名必须**与分支保护的 required status check 完全一致**。
+  # GitHub 的分支保护匹配的是 `name:` 字段，不是 job id —— 曾经把 name 改成
+  # 「静态检查（Linux / 1x 计费）」而保护规则里写着 `lint`，于是那个必需检查
+  # 永远无法满足，每次 push 都被记为 "Bypassed rule violations"。
+  # 改成 `lint` 之后两者对齐。要改展示名，必须同步改分支保护的 required checks。
   lint:
-    name: 静态检查（Linux / 1x 计费）
+    name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -56,14 +57,9 @@ jobs:
           node-version: '22'
 
       - name: 语法检查（全部 JS）
-        run: |
-          set -e
-          fail=0
-          while IFS= read -r f; do
-            echo "check $f"
-            node --check "$f" || fail=1
-          done < <(find . -name '*.js' -not -path './node_modules/*' -not -path './bin/*' -not -path './obj/*')
-          exit $fail
+        # 与本机 pre-commit 共用 scripts/check-js-syntax.mjs，不在这里另抄一份
+        # sh 扫描循环 —— 两处口径一旦漂移，漏掉的目录会让检查静默变成 PASS。
+        run: node scripts/check-js-syntax.mjs
 
       - name: ESLint
         run: |

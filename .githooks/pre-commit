@@ -46,26 +46,27 @@ fi
 
 if [ "$HAS_JS" -eq 1 ]; then
   echo "[pre-commit] JS 语法检查"
-  JS_FAIL=0
-  JS_COUNT=0
-  for f in $(find test bench plugin -name '*.js' -not -path '*/node_modules/*' | sort); do
-    JS_COUNT=$((JS_COUNT + 1))
-    if ! node --check "$f"; then
-      echo "  语法错误: $f" >&2
-      JS_FAIL=1
-    fi
-  done
-  if [ "$JS_FAIL" -ne 0 ]; then
+  # 口径只在 scripts/check-js-syntax.mjs 里定义一次，CI 与本机共用同一份 ——
+  # 这里再抄一遍 sh 的话，扫描口径迟早漂移，而且漂移是静默的：
+  # 漏掉一个目录，检查依然打印 PASS。
+  #
+  # 有改动集合时只检查改动的文件：全量会让一次改 2 个文件的提交去启动 52 个
+  # node 子进程（实测 4s，几乎全是进程启动开销）。拿不到集合（CHANGED 为空）时
+  # 退化为全量扫描 —— 宁可慢，也不能少查。
+  if [ -n "${CHANGED:-}" ]; then
+    JS_LIST=$(mktemp -t aot-js-changed.XXXXXX)
+    printf '%s\n' "$CHANGED" | grep -E '\.(js|cjs|mjs)$' > "$JS_LIST" || true
+    node scripts/check-js-syntax.mjs --changed-from "$JS_LIST"
+    JS_RC=$?
+    rm -f "$JS_LIST"
+  else
+    node scripts/check-js-syntax.mjs
+    JS_RC=$?
+  fi
+  if [ "$JS_RC" -ne 0 ]; then
     echo "[pre-commit] JS 语法检查未通过" >&2
     exit 1
   fi
-  # 扫描到 0 个文件说明启动路径出了问题（例如在错误目录执行），
-  # 这时报 OK 等于假装检查过了。
-  if [ "$JS_COUNT" -eq 0 ]; then
-    echo "[pre-commit] 没找到任何 JS 文件 —— 检查路径可能不对" >&2
-    exit 1
-  fi
-  echo "[pre-commit]   $JS_COUNT 个文件通过"
 else
   echo "[pre-commit] 跳过 JS 语法检查（本次提交无 JS 改动）"
 fi
