@@ -1,0 +1,41 @@
+#!/bin/sh
+# pre-push 转发器 —— 本仓库 core.hooksPath=.githooks，而 xp-gate init 只把
+# hook 装到 .git/hooks/。不显式转发的话 xp-gate 的 pre-push 在本项目等于完全没生效。
+#
+# 这和 .githooks/pre-commit 第 2 段是同一个问题。当初只补了 pre-commit，
+# pre-push 漏掉了 —— 结果 .git/hooks/pre-push 从 2026-11-05 装好起就没执行过，
+# .xp-gate/reports/pre-push/ 一直是空目录。
+#
+# 「没跑」不能看起来像「通过」：找不到全局 hook 时明确告警，不静默放行。
+
+set -u
+
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$(pwd)")
+
+# AOT_SKIP_GLOBAL_GATES=1 跳过全局门禁，仅供测试使用（与 pre-commit 同一个开关，
+# 语义一致：只影响转发这一段，不影响被测逻辑）。
+if [ "${AOT_SKIP_GLOBAL_GATES:-0}" = "1" ]; then
+  echo "[pre-push] AOT_SKIP_GLOBAL_GATES=1 —— 跳过 xp-gate 全局门禁（仅供测试）"
+  exit 0
+fi
+
+XP_GATE_HOOK=""
+for candidate in \
+  "$HOME/.config/xp-gate/hooks/pre-push" \
+  "$PROJECT_ROOT/.git/hooks/pre-push"; do
+  # 排除本文件自身：core.hooksPath 可能被指回 .githooks，那样 $0 就是候选之一，
+  # 转发给自己会无限递归。
+  if [ -f "$candidate" ] && [ "$candidate" != "$PROJECT_ROOT/.githooks/pre-push" ]; then
+    XP_GATE_HOOK="$candidate"
+    break
+  fi
+done
+
+if [ -z "$XP_GATE_HOOK" ]; then
+  echo "[pre-push] ⚠️  未找到 xp-gate pre-push，全局质量门禁本次未执行" >&2
+  echo "[pre-push]    修复: xp-gate init --full  或  xp-gate setup-global" >&2
+  exit 0
+fi
+
+echo "[pre-push] 转交 xp-gate 全局门禁: $XP_GATE_HOOK"
+exec sh "$XP_GATE_HOOK" "$@"
