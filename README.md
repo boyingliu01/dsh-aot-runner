@@ -191,6 +191,28 @@ start 请求字段被 `hasExactKeys` 严格校验为 `{type, cwd, env, control?}
 用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000)`，`JobObjectExtendedLimitInformation`，
 结构体 **144 字节**。runner 退出时整棵进程树一并回收。
 
+**这个机制的价值是实测出来的，不只是「设计上应该有用」**（
+[完整报告](docs/隔离价值量化-2026-11-10.md)，脚本
+[`bench/isolation-value.js`](bench/isolation-value.js)）：
+
+| 场景 | 内联方案 | 走 runner | 隔离有价值 |
+|---|---|---|---|
+| target 崩溃 | host 正常完成 | host 正常完成 | ❌ 无差异 |
+| target 吐 200MB 输出（host 不读）| 卡住 | 卡住 | ❌ 无差异 |
+| target 挂起不退出 | host 保持响应 | host 保持响应 | ❌ 无差异 |
+| **target 崩溃 + 遗留 detached 子孙** | **5 个孤儿全存活** | **5 个全部回收** | ✅ |
+
+结论值得单独强调，因为它推翻了常见直觉：
+
+> **这一层进程边界的价值不是"防崩溃"，而是"防进程泄漏"。**
+>
+> target 崩溃时，内联方案里 host 同样存活 —— Windows 的进程隔离本来就够用。
+> 真正需要 Job Object 的是**孤儿进程**：target 派生并 `detach` 的子进程在
+> target 死后会一直存活占资源，实测内联方案残留 5 个、runner 方案 0 个。
+
+同理，「多一层转发更安全」的直觉在**背压**上不成立：两组都卡住 ——
+隔离不改变管道语义，谁在最下游不读，整条链都会阻塞。
+
 ### 可执行文件解析必须与 node 逐项对齐
 
 node 的 `resolveWindowsExecutable` 规则（`runner-launch-*.js`）：
