@@ -31,6 +31,85 @@ for candidate in \
   fi
 done
 
+# ---------------------------------------------------------------------------
+# 第 1 段：本仓库自己的 C# 检查（在转发之前跑）
+#
+# 为什么需要这一段：xp-gate 的 pre-push 用 SOURCE_EXTENSIONS 判断「这次推送有
+# 没有源码」，而那个列表里**没有 .cs**。于是这个纯 C# 项目的每次推送都被判为
+# `📚 Documentation-only push`，11 个门禁全部跳过、有效工作量为 0，
+# 却打印 `✅ No code review required`。
+#
+# 上游修复已提交（xp-gate PR #799），但在发布了包含它的版本之前，本仓库的
+# 推送路径等于完全没有检查。这一段补的就是这个空窗期。
+#
+# 上游修好之后这一段**不会白费**：它跑的是 dotnet 编译期的 analyzer
+# （严格度取自 Gate 13 适配器），xp-gate 的 pre-push 门禁表里没有任何一条
+# 覆盖 C# 编译，所以这是互补而不是重复。
+#
+# 刻意只做「编译 + 0 警告」：完整测试在 pre-commit 的 Gate 5 已经跑过，
+# 在 push 上再跑一遍只是把同一个成本和同一个信号重复一次。实测增量构建 6s，
+# 代价可以接受。
+if [ "${AOT_SKIP_LOCAL_CHECKS:-0}" = "1" ]; then
+  echo "[pre-push] AOT_SKIP_LOCAL_CHECKS=1 —— 跳过本地 C# 检查（仅供测试）"
+else
+  # 只在本次推送确实包含 .cs（或影响编译的工程文件）时跑。
+  # 纯文档推送不该付 6 秒编译的代价。
+  # 注意：这里的 stdin 是 git 给 hook 的 ref 列表，读取会消耗它，
+  # 所以先读进变量，转发前再回放给全局 hook。
+  PUSH_INPUT=$(cat)
+  # 用命令替换而不是 `while ... | grep`：管道两端都是子 shell，
+  # 在里面给 CS_CHANGED 赋值传不出来。这里把「是否有 C# 改动」的判定
+  # 收敛成一次 grep，外层只读结果。
+  CS_CHANGED=0
+  if printf '%s\n' "$PUSH_INPUT" | {
+        while read -r _lref _lsha _rref _rsha; do
+          case "$_lsha" in
+            0000000000000000000000000000000000000000) continue ;;  # 删分支
+          esac
+          if [ "$_rsha" = "0000000000000000000000000000000000000000" ]; then
+            # 新分支：与 base 的合并基点比较，否则会把整个历史都算进来
+            _base=$(git merge-base "$_lsha" origin/main 2>/dev/null || echo "")
+            [ -n "$_base" ] || continue
+            git diff --name-only "$_base" "$_lsha"
+          else
+            git diff --name-only "$_rsha" "$_lsha"
+          fi
+        done
+      } | grep -qE '\.(cs|csx|fs|vb|csproj|sln)$'; then
+    CS_CHANGED=1
+  fi
+
+  if [ "$CS_CHANGED" != "1" ]; then
+    echo "[pre-push] 跳过 C# 编译检查（本次推送无 C# / 工程文件改动）"
+  else
+    echo "[pre-push] C# 编译检查（0 警告）"
+    CS_LOG=$(mktemp)
+    # 严格度参数刻意不在这里重复定义：它的唯一来源是 build.sh 里的
+    # gate13_csharp_flags_for_build()（向全局 Gate 13 适配器要）。
+    # 复制一份到 hook 里，等于制造第二个定义处 —— 那正是本轮审计反复
+    # 遇到的问题（同一份扩展名列表在十几个地方各写一遍，逐步漂移）。
+    # 代价是这里用 csproj 自身的严格度，比 build.sh 略松；
+    # 更严的那一遍在 pre-commit（走 build.sh）和 CI 里跑。
+    if ! dotnet build "$PROJECT_ROOT/DshAotRunner.sln" -c Release -v quiet \
+         >"$CS_LOG" 2>&1; then
+      grep -E "error|warning" "$CS_LOG" | head -20 || tail -20 "$CS_LOG"
+      rm -f "$CS_LOG"
+      echo "[pre-push] ❌ C# 编译未通过，推送已阻止" >&2
+      exit 1
+    fi
+    if grep -qE "warning [A-Z]+[0-9]+" "$CS_LOG"; then
+      grep -E "warning [A-Z]+[0-9]+" "$CS_LOG" | sort -u | head -20
+      rm -f "$CS_LOG"
+      echo "[pre-push] ❌ C# 编译存在警告，推送已阻止" >&2
+      exit 1
+    fi
+    rm -f "$CS_LOG"
+    echo "[pre-push] ✅ C# 编译通过，0 警告"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 第 2 段：转发 xp-gate 全局门禁
 if [ -z "$XP_GATE_HOOK" ]; then
   echo "[pre-push] ⚠️  未找到 xp-gate pre-push，全局质量门禁本次未执行" >&2
   echo "[pre-push]    修复: xp-gate init --full  或  xp-gate setup-global" >&2
@@ -38,4 +117,5 @@ if [ -z "$XP_GATE_HOOK" ]; then
 fi
 
 echo "[pre-push] 转交 xp-gate 全局门禁: $XP_GATE_HOOK"
-exec sh "$XP_GATE_HOOK" "$@"
+# 回放前面 consume 掉的 ref 列表（第 1 段把它读完了）。
+printf '%s\n' "$PUSH_INPUT" | exec sh "$XP_GATE_HOOK" "$@"
