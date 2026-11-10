@@ -91,10 +91,35 @@ jobs:
           fi
           echo "无构建产物被提交 ✅"
 
-  # ── Windows 构建 + 核心 A/B：贵（2x），手动或打 tag 时才跑 ────────
+  # ── Windows 构建 + 核心 A/B：贵（2x），但它是唯一目标平台的回归保护 ──
+  #
+  # 原先只在手动 / 打 tag 时跑，理由是「省 Actions 额度」。实测后这个理由
+  # 站不住（2026-11-10）：
+  #
+  #   真实耗时   4 分钟/次（run 42461645181: 08:08:34 → 08:12:28），
+  #              2x 计费约 8 分钟 —— 而 issue #19 里估计的是 8~10 分钟/次
+  #   真实频率   近 30 天 77 次 push
+  #   月消耗     77 × 8 ≈ 616 分钟，免费额度 2000 分钟/月
+  #
+  # 也就是说全额跑也只用到三成额度，而代价是**每次 push 都没有 Windows 回归**
+  # —— 本项目是 Windows x64 专用，这个取舍一直是亏的。
+  #
+  # 现在改成每次 push / PR 都跑。
+  #
+  # 没有加 paths filter 的原因：GitHub 的 `paths` 只能写在 trigger 层
+  # （`on.push.paths`），一旦加上会连带把 lint job 也一起跳过 —— 而 lint
+  # 是分支保护的必需检查，跳过它会让 PR 卡在「等待状态检查」上。要按路径
+  # 过滤 Windows job，只能引入额外的 changed-files action，为一个 4 分钟的
+  # job 增加一个第三方依赖不划算。按上面的测算，全额跑也只用三成额度。
+  #
+  # 保留 workflow_dispatch 与 tag 触发：前者用于发布前的强制验证，后者是发版路径。
   build-windows:
     name: Windows 构建 + A/B（2x 计费）
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/')
+      || github.event_name == 'push'
+      || github.event_name == 'pull_request'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

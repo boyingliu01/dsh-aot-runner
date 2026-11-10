@@ -196,29 +196,12 @@ if [ "$CHECK" = "1" ]; then
   fi
 
   echo "==> 质量门禁：JS 语法"
-  # 用扫描而不是逐行列举：原来那份手写清单已经漏掉过文件
-  # （test/test-utils.js），新加文件忘了登记就会静默跳过检查，
-  # 而漏检是看不出来的。扫描口径与 npm 发布范围一致，
-  # 因此 dist/obj/bin/node_modules 天然不在其中。
-  JS_SYNTAX_FAIL=0
-  JS_SYNTAX_COUNT=0
-  while IFS= read -r jsfile; do
-    jsfile="${jsfile#./}"
-    case "$jsfile" in
-      dist/*|dist-*/*|obj/*|bin/*|node_modules/*|vendor/dsh-subprocess-local-*/*) continue ;;
-    esac
-    JS_SYNTAX_COUNT=$((JS_SYNTAX_COUNT + 1))
-    if ! node --check "$jsfile"; then
-      echo "  语法错误: $jsfile" >&2
-      JS_SYNTAX_FAIL=1
-    fi
-  done < <(find test bench plugin scripts vendor -name '*.js' -o -name '*.mjs' | sort)
-  if [ "$JS_SYNTAX_FAIL" -ne 0 ]; then
+  # 口径只在 scripts/check-js-syntax.mjs 里定义一次，CI 与本机共用同一份。
+  # 这里原本另抄了一遍 `find test bench plugin scripts vendor` 的扫描循环 ——
+  # 那份副本已经和 CI 不一致了（漏了仓库根部的 eslint.config.mjs，也不检 .cjs），
+  # 而漏检是看不出来的：检查照样打印"通过"。
+  if ! node scripts/check-js-syntax.mjs; then
     echo "JS 语法检查未通过。" >&2
-    exit 1
-  fi
-  if [ "$JS_SYNTAX_COUNT" -eq 0 ]; then
-    echo "没找到任何 JS 文件 —— 扫描路径可能不对。" >&2
     exit 1
   fi
   echo "  $JS_SYNTAX_COUNT 个文件通过"
