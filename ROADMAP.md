@@ -154,6 +154,32 @@ node vendor/patch-dsh.mjs verify   # 校验留档未被篡改
 - 检查是否仍生效：看子进程命令行里是 `runner.js` 还是 `dsh-aot-runner.exe`
 - 上游修复后：**删掉整个 `vendor/` 目录**
 
+#### 版本兼容矩阵（每次 DSH 升级后复核并回填）
+
+复核方法（不靠猜，直接拆 npm 包）：
+
+```bash
+npm pack @deepseek-ai/dsh-subprocess-local@<版本>
+tar -xzf *.tgz
+grep -nE "launch(WindowsJob|LinuxScope)\(" package/lib/index.js
+# 唯一调用点若形如 launchWindowsJob(spec, env) 且函数签名有 internals 形参 → 仍需补丁
+```
+
+| DSH 版本 | subprocess-local | 需要补丁 | 复核日期 | 证据 |
+|---|---|---|---|---|
+| 0.2.0-rc.2 | 0.2.0-rc.2 | **是** | 2026-11-02 | 原始发现，见上 |
+| 0.2.2-rc.1 | 0.2.2-rc.1 | **是** | 2026-11-10 | 拆包复核：第 1560 行两处调用均不传 `internals`；函数签名第 563/769 行都有该形参 |
+
+> ⚠️ **别用 `npm view` 的 `latest` 标签判断版本。**
+> `@deepseek-ai/dsh-subprocess-local` 的 `latest` 指向 `0.0.1-rc.1`
+> （比 `next` 的 `0.2.2-rc.1` 更旧），而 DSH 的各个子包是**固定版本**依赖，
+> 不是范围依赖。看 `dist-tags` 会得出「版本回退」的错误结论。
+
+> ⚠️ **上游已关闭 issues/PR 功能**（`has_issues=false`，2026-11-04 起），
+> 提交 PR 会 404。反馈只能走
+> [discussion #11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)，
+> 讨论区仍在活跃维护。**不要再尝试开 PR 催修。**
+
 ## 已知盲区
 
 **切帧丢数据类缺陷测不出来。** 见
