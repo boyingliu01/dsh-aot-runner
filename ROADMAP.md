@@ -229,6 +229,27 @@ npm run contract:update   # 确认影响后更新基线
   试过小帧连发 / 大帧+小帧 / 256KB 噪声帧+terminate+start，都构造不出来。
 - 解法（未实施）：runner 侧加一个测试接缝，可注入「一次读返回多帧」。
 
+**测试主机偶发 CLR 运行时崩溃（`0x80131506`）。** 见 Issue #25：
+
+- 现象：`dotnet test` 偶发以 `Fatal error. Internal CLR error. (0x80131506)` 结束
+  （`COR_E_EXECUTIONENGINE`），VSTest 报成非零退出，门禁显示为「测试失败」。
+- 复现率：约 1/10～1/300（连续多轮观察）；单轮 319 项全绿说明不了问题。
+- **已排除**：AOT/裁剪（`PublishAot=false`，全仓零 `decimal`）、
+  `KillTree` 路径（`39e246d` 已改掉）、测试并行（`a2233d5` 已关闭）、
+  xunit 版本冲突（nuspec 无交叉依赖）。
+- **采集方式无关**：A/B 实验（`bench/coverlet-crash-ab.js`）对比
+  coverlet 进程内 profiler 与 `dotnet-coverage` 外挂采集，
+  A 组 0/18、B 组 3/14，p = 0.47～1.00 —— **方向与"coverlet 相关"相反且不显著**。
+- **已缩小到的范围**：崩溃栈集中在 xunit 的 `TestInvoker<T>` 泛型实例化路径
+  （`CreateTestClass` → `UniqueIDGenerator` → `AsyncTaskMethodBuilder<Decimal>`），
+  发生在第 214/319 个测试附近。`System.Decimal` 在栈里出现 5 次，
+  而项目零 Decimal 使用 —— 那是 xunit 内部泛型类型参数。
+  三条历史崩溃栈看似无关，实际都经过这条路径。
+- **已缓解**：xp-gate 的 `adapters/csharp.sh` 已加入崩溃识别 + 单次重试
+  （两次都崩仍然失败，不会掩盖问题）。见 xp-gate #794。
+- 剩余方向：`--blame-crash` 配合连续多轮抓 dump，用 `dotnet-dump analyze`
+  确认是否为类型加载/泛型实例化耗尽。
+
 ## 依赖关系
 
 ```
