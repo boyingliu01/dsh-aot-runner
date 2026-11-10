@@ -1,6 +1,18 @@
 // Win32 P/Invoke 声明 —— 对齐 RUNNER-SPEC.md §5.1
 using System.Runtime.InteropServices;
 
+// 所有 P/Invoke 目标都是系统 DLL（kernel32/advapi32 等），显式限定只在
+// System32 里搜索，关掉「按 PATH 顺序找 DLL」的劫持面（CA5392，本文件 21 处）。
+//
+// 写成**程序集级**声明而不是在每个 [DllImport] 上加 DefaultDllImportSearchPaths：
+// 21 处逐个写，迟早有新增的 P/Invoke 忘记加，而漏掉一处就等于整条防线破了。
+// 一行覆盖全部，且新增的 DllImport 自动继承。
+//
+// 为什么这条值得修：本项目是进程管理工具，判为「资源泄漏」的 CA2000/CA2213
+// 实测下来要么误报、要么是进程级流不可 Dispose；真正有运行时安全意义的
+// 反而是这个加载路径问题。
+[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+
 namespace DshAotRunner;
 
 internal static class Native
