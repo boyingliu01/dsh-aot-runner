@@ -33,7 +33,8 @@
     "isolation": "node bench/isolation-value.js",
     "contract": "node scripts/contract-fingerprint.mjs",
     "contract:update": "node scripts/contract-fingerprint.mjs --update",
-    "test:contract": "node --test test/contract-fingerprint-verify.js"
+    "test:contract": "node --test test/contract-fingerprint-verify.js",
+    "crash:ab": "node bench/coverlet-crash-ab.js"
   },
   "engines": {
     "node": ">=22"
