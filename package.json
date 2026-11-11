@@ -1,6 +1,6 @@
 {
   "name": "dsh-aot-runner",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "DSH 子进程 runner 的 NativeAOT 实现：消除约 63~67% 的 runner 开销，p99 改善 73~124ms",
   "type": "commonjs",
