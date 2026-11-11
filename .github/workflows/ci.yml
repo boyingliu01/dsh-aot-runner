@@ -91,6 +91,43 @@ jobs:
           fi
           echo "无构建产物被提交 ✅"
 
+      # 契约漂移检测（issue #15 A3）
+      #
+      # A1/A2 早就做完了：4 类契约能从实际安装的 DSH 源码里机械提取成指纹，
+      # 存在 .contract-fingerprint.json。但这个检查**从来没在 CI 里跑过** ——
+      # 只在开发者本机手动执行。也就是说：DSH 升级把契约改了，CI 照样绿。
+      #
+      # 这一步补上那个缺口。设计要点：
+      #
+      # 1. **不跳过，只报错。** 装不上 DSH 时脚本自己会 exit 1（见
+      #    scripts/contract-fingerprint.mjs 的 main()：「提取失败 ≠ 契约没变」）。
+      #    这里不写 `|| true`，否则一次网络故障就能让漂移检测静默失效 ——
+      #    那正是本仓库反复踩的坑。
+      #
+      # 2. **装的是公开 npm 包，不是本机 workspace。** 脚本的查找顺序是
+      #    DSH_HOME → USERPROFILE → REPO 下的 node_modules，CI 里前两个都不存在，
+      #    所以装到仓库 node_modules 就能被找到。
+      #
+      # 3. **不加 paths filter。** 契约变化由 DSH 升级触发，不由本仓库改哪个文件
+      #    触发 —— 按路径过滤等于漏掉绝大多数漂移。
+      - name: 契约漂移检测（对比 upstream）
+        run: |
+          set -e
+          echo "安装 upstream DSH subprocess 包（契约提取的数据源）"
+          # 显式指定公共 registry：runner 的 npm 配置可能指向镜像，
+          # 而 @deepseek-ai scope 在部分镜像上缺同步。装不上就明确失败，
+          # 不静默跳过（见下方注释）。
+          if ! npm install --no-save --no-audit --no-fund --loglevel=error \
+               --registry=https://registry.npmjs.org/ \
+               @deepseek-ai/dsh-subprocess-local@latest; then
+            echo "::error::无法安装 @deepseek-ai/dsh-subprocess-local。"
+            echo "契约漂移检测需要它作为数据源；装不上就检测不了。"
+            echo "这里失败而不是跳过 —— 跳过会让漂移检测形同虚设。"
+            exit 1
+          fi
+          node -e "console.log('已安装:', require('./node_modules/@deepseek-ai/dsh-subprocess-local/package.json').version)"
+          node scripts/contract-fingerprint.mjs
+
   # ── Windows 构建 + 核心 A/B：贵（2x），但它是唯一目标平台的回归保护 ──
   #
   # 原先只在手动 / 打 tag 时跑，理由是「省 Actions 额度」。实测后这个理由
