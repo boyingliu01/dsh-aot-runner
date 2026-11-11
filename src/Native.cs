@@ -23,7 +23,9 @@ internal static class Native
     public const uint CREATE_NO_WINDOW = 0x08000000;
     public const int STARTF_USESTDHANDLES = 0x00000100;
     public const int STARTF_USESHOWWINDOW = 0x00000001;
-    public const short SW_HIDE = 0;
+    // SW_HIDE 是 wShowWindow 的取值，而该字段在 Win32 里是 WORD（无符号），
+    // 常量跟着字段类型走，避免每次赋值都要强转。
+    public const ushort SW_HIDE = 0;
     public const uint HANDLE_FLAG_INHERIT = 0x00000001;
     public const uint INFINITE = 0xFFFFFFFF;
     public const uint WAIT_TIMEOUT = 258;
@@ -81,8 +83,24 @@ internal static class Native
         public int dwYCountChars;
         public int dwFillAttribute;
         public int dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
+        /// <summary>STARTUPINFO.wShowWindow（Win32: WORD，无符号 16 位）。</summary>
+        /// <remarks>
+        /// 原声明是 short（有符号），与 Win32 的 WORD 不一致。
+        /// 当前只用到 SW_HIDE(0)/SW_SHOW(1) 这类小值，不会出事，
+        /// 但类型错了就是在等一个「将来有人填了 40000」的日子 ——
+        /// 那会静默变成负数。issue #15 C 项审查强转时发现。
+        /// </remarks>
+        public ushort wShowWindow;
+
+        /// <summary>STARTUPINFO.cbReserved2（Win32: WORD，无符号 16 位）。</summary>
+        /// <remarks>
+        /// 同上：原声明 short 会让超过 32767 的长度翻成负数。
+        /// 而它的实际取值是 CrtDescriptorTable 编码出的字节数，
+        /// 目前固定 8（ControlFileDescriptor + 1 个槽 × 9 字节），
+        /// 所以现在安全 —— 但那是「碰巧安全」，靠的是常量的当前取值，
+        /// 而不是类型本身挡住了错误。
+        /// </remarks>
+        public ushort cbReserved2;
         public IntPtr lpReserved2;
         public IntPtr hStdInput;
         public IntPtr hStdOutput;
@@ -94,8 +112,11 @@ internal static class Native
     {
         public IntPtr hProcess;
         public IntPtr hThread;
-        public int dwProcessId;
-        public int dwThreadId;
+        // 进程/线程 ID 在 Win32 里是 DWORD（无符号），这里的 int 宽度相同
+        // 但语义错：ID 永远非负，用有符号类型会给人「可能是负数」的错觉，
+        // 也会让 (int) 与 (uint) 之间的转换在别处悄悄出现。
+        public uint dwProcessId;
+        public uint dwThreadId;
     }
 
     [StructLayout(LayoutKind.Sequential)]

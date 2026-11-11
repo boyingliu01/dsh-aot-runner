@@ -46,7 +46,8 @@ internal sealed class JobRunner : IDisposable
     private SafeJobHandle? _job;
     private SafeKernelHandle? _process;
     private SafeKernelHandle? _thread;
-    private int _targetPid;
+    /// <summary>target 的进程 id；进程 ID 在 Win32 里是无符号 DWORD。</summary>
+    private uint _targetPid;
 
     public JobRunner(string[] argv, IMessageChannel channel)
     {
@@ -555,7 +556,19 @@ internal sealed class JobRunner : IDisposable
         // CreateProcessW 会在子进程启动期据此重建 fd 表。
         if (descriptorPtr != IntPtr.Zero)
         {
-            si.cbReserved2 = (short)descriptorTable!.Length;
+            // 不做 (short) 强转：cbReserved2 在 Win32 里是 WORD（无符号 16 位），
+            // 强转成有符号 short 后，长度一旦超过 32767 就会翻成负数，
+            // CreateProcessW 读到的是「负数字节数」。这正是 exitCode 那个 bug
+            // 的同一模式 —— 只不过这里靠「表长固定为 8」碰巧没出事。
+            //
+            // 改成显式校验：真超了就明确报错，而不是静默回绕。
+            if (descriptorTable!.Length > ushort.MaxValue)
+            {
+                throw new InvalidOperationException(
+                    $"描述符表长度 {descriptorTable.Length} 超过 cbReserved2 的 WORD 上限");
+            }
+
+            si.cbReserved2 = (ushort)descriptorTable.Length;
             si.lpReserved2 = descriptorPtr;
         }
 

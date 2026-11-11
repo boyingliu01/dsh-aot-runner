@@ -197,6 +197,45 @@ public sealed class CrtDescriptorTableTests : IDisposable
         return handle;
     }
 
+    [Fact]
+    public void Encode_长度可放进cbReserved2的WORD范围()
+    {
+        // cbReserved2 在 Win32 里是 WORD（无符号 16 位），C# 侧原先是 short。
+        // 虽然 CreateProcessW 的 lpReserved2 缓冲长度理论上限是 65535，
+        // 但真正会拦住错误的是类型本身 —— 而不是「现在表长恰好是 8」。
+        //
+        // 这条用例断言的是：编码结果的字节数能无损放进 ushort。
+        // 若将来有人改了槽数或每槽字节数，让它超过 65535，这里会立刻红。
+        using var pipe = new AnonymousPipeServerStream(PipeDirection.Out);
+        var inH = pipe.ClientSafePipeHandle.DangerousGetHandle();
+        var outH = pipe.SafePipeHandle.DangerousGetHandle();
+
+        var table = CrtDescriptorTable.Encode(inH, outH, outH, outH);
+        Assert.NotNull(table);
+        Assert.True(
+            table!.Length <= ushort.MaxValue,
+            $"描述符表 {table.Length} 字节，超过 cbReserved2 的 WORD 上限 {ushort.MaxValue}");
+    }
+
+    [Fact]
+    public void Encode_槽数固定等于ControlFd加一()
+    {
+        // 这条锁住 count 的来源：ControlFileDescriptor + 1。
+        // cbReserved2 的安全性依赖「槽数是个小常量」，所以常量本身要受测试约束 ——
+        // 否则改大 fd 号时，风险只在生产代码里才暴露。
+        using var pipe = new AnonymousPipeServerStream(PipeDirection.Out);
+        var inH = pipe.ClientSafePipeHandle.DangerousGetHandle();
+        var outH = pipe.SafePipeHandle.DangerousGetHandle();
+
+        var table = CrtDescriptorTable.Encode(inH, outH, outH, outH);
+        Assert.NotNull(table);
+
+        // 布局：[4 字节 count][count 字节 flags][count 个 8 字节句柄]
+        var count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(table!.AsSpan(0, 4));
+        Assert.Equal((uint)(CrtDescriptorTable.ControlFileDescriptor + 1), count);
+        Assert.Equal(4 + count + count * 8, (uint)table.Length);
+    }
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr CreateFileW(
         string lpFileName, uint dwDesiredAccess, uint dwShareMode,
