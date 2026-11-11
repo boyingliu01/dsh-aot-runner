@@ -151,15 +151,61 @@ if [ "$CHECK" = "1" ]; then
   # 顺带收集覆盖率（coverlet + runsettings），因为 xp-gate 的 Gate 5 会问
   # "覆盖率多少"，而这个数字必须是真量出来的，不能靠门禁闭嘴。
   if command -v dotnet >/dev/null 2>&1; then
-    if ! dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj \
-         --nologo --verbosity quiet \
-         --collect:"XPlat Code Coverage" \
-         --settings tests/DshAotRunner.Tests/coverage.runsettings \
-         >/tmp/cs-test.log 2>&1; then
+    # 崩溃重试（issue #25）：先跑，崩了就再跑一次。
+    #
+    # 为什么要区分「跑不起来」和「跑出来是坏的」：
+    #   本机实测有约 2.7% 的概率测试主机被 CLR fail-fast 带走
+    #   （Fatal error. Internal CLR error. 0x80131506）。崩溃时测试是
+    #   0 失败、296/319 跑完 —— 也就是**什么都没验证完就没了**。
+    #   如果直接 exit 1，作者会去查自己的改动，而真正原因是机器抽风。
+    #
+    # 为什么重试一次就够：单次失败率 2.7%，重试后降到约 0.07%。
+    #   重试更多次只是让失败更晚出现，不会让结论更可靠。
+    #
+    # 为什么只对崩溃重试、不对失败重试：测试失败是**结论**，重跑它等于
+    #   在筛掉不喜欢的答案。只有「没跑完」才值得重来。
+    cs_test_once() {
+      dotnet test tests/DshAotRunner.Tests/DshAotRunner.Tests.csproj \
+        --nologo --verbosity quiet \
+        --collect:"XPlat Code Coverage" \
+        --settings tests/DshAotRunner.Tests/coverage.runsettings \
+        >/tmp/cs-test.log 2>&1
+    }
+    # 崩溃签名。必须同时覆盖中英文，因为本机输出是中文的
+    # 「测试主机进程崩溃 : Fatal error. Internal CLR error.」——
+    # xp-gate 适配器的判据只匹配英文，认不出这条（见 issue #25 的 B 项）。
+    cs_test_crashed() {
+      grep -qiE 'Fatal error\. Internal CLR error|Internal CLR error \(0x80131506\)|测试主机进程崩溃|测试运行已中止|test host process crashed' /tmp/cs-test.log
+    }
+
+    set +e
+    cs_test_once
+    CS_RC=$?
+    if [ "$CS_RC" -ne 0 ] && cs_test_crashed; then
+      echo "   ⚠️  测试主机崩溃（CLR fail-fast），重试一次。" >&2
+      echo "      这不是测试失败 —— 崩溃时通常是 0 失败、但只跑完了一部分。" >&2
+      cs_test_once
+      CS_RC=$?
+      if [ "$CS_RC" -ne 0 ] && cs_test_crashed; then
+        set -e
+        tail -30 /tmp/cs-test.log >&2
+        echo "C# 测试主机连续两次崩溃（CLR 级故障，非测试失败）。" >&2
+        echo "这不是你的改动导致的，也不是覆盖率问题 —— 见 issue #25。" >&2
+        exit 1
+      fi
+      echo "   ✅ 重试通过" >&2
+    fi
+    set -e
+
+    # 用退出码判定，不用 grep 字符串：部分失败时日志里也会出现「已通过」字样，
+    # 靠字符串匹配判成败就是在给自己挖坑。
+    if [ "$CS_RC" -ne 0 ]; then
       tail -30 /tmp/cs-test.log >&2
       echo "C# 单元测试未通过。" >&2
       exit 1
     fi
+
+    # 到这里 RC 才有意义：崩溃的两次已经排除，剩下的非 0 就是真的测试失败。
     grep -E "已通过|Passed!" /tmp/cs-test.log | tail -2 || true
     # 覆盖率硬门槛：阈值定义在 scripts/coverage-summary.py 的 THRESHOLDS 里，
     # 未达标时脚本以非 0 退出，这里据此中断构建。
