@@ -74,5 +74,12 @@
          而且测试代码会被打进 AOT 产物。这里显式排除。 -->
     <Compile Remove="tests/**" />
     <None Remove="tests/**" />
+
+    <!-- tools/ 下是独立的开发期工具（各自带 csproj），不参与 runner 的 AOT 构建。
+         不排除的话，SDK 的 **/*.cs 通配会把 tools/cast-audit 的源码编进主项目，
+         实际症状是 obj/ 下的程序集属性重复（CS0579），
+         而且 Roslyn 依赖会被拖进 AOT 的引用图里。 -->
+    <Compile Remove="tools/**" />
+    <None Remove="tools/**" />
   </ItemGroup>
 </Project>

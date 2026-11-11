@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    强转审计工具（rule-based）。
+
+    ## 为什么需要这个工具
+
+    C# 对显式数值强转**完全不告警**：`(int)someUlong` 被视为「开发者已表明意图」，
+    编译器和 Roslyn 分析器（含 AllEnabledByDefault 全开）都报 0 条。
+    实测过：`(int)uint`、`(byte)int`、`(long)double` 三个明显危险的转换，
+    在 AnalysisLevel=latest-all + AnalysisMode=AllEnabledByDefault 下静默通过。
+
+    而 Windows 的 Win32 API 里大量字段是**无符号**的（DWORD/WORD/UINT），
+    用有符号类型接就会在边界值上翻符号。本项目已经因此出过一次真实缺陷
+    （退出码 4294967295 报成 -1，导致 host 判协议非法、工具调用失败）。
+
+    ## 为什么是独立项目
+
+    它不参与 runner 的 AOT 编译。放进主 csproj 会把 Roslyn 的依赖带进
+    PublishAot 的引用图，那是没必要的复杂度和体积。
+    也因此它**不在 DshAotRunner.sln 里**，由 build.sh 单独调用。
+
+    ## 为什么不用正则
+
+    正则在 C# 里分不清 `(int)x`（强转）和 `(int x)`（参数声明）、
+    `byte[]`（数组类型）—— 误报率高到会让规则被无视。
+    宁可多一个工具进程，也不要一条没人看的规则。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CastAudit</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+  </ItemGroup>
+
+</Project>

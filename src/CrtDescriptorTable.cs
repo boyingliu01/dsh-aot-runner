@@ -69,6 +69,7 @@ internal static class CrtDescriptorTable
         var handlesOffset = flagsOffset + count;
         var block = new byte[handlesOffset + count * HandleBytes];
 
+        // cast-audit:ignore count = ControlFileDescriptor + 1，是个小常量
         BinaryPrimitives.WriteUInt32LittleEndian(block.AsSpan(0, 4), (uint)count);
 
         // 所有槽先填 INVALID_HANDLE_VALUE

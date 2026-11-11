@@ -568,6 +568,7 @@ internal sealed class JobRunner : IDisposable
                     $"描述符表长度 {descriptorTable.Length} 超过 cbReserved2 的 WORD 上限");
             }
 
+            // cast-audit:ignore 上面已显式校验过长度不超 ushort.MaxValue
             si.cbReserved2 = (ushort)descriptorTable.Length;
             si.lpReserved2 = descriptorPtr;
         }
@@ -920,6 +921,7 @@ internal sealed class JobRunner : IDisposable
             foreach (var ch in s)
             {
                 bytes.Add((byte)(ch & 0xFF));
+                // cast-audit:ignore char 右移 8 位后必然落在 0..255
                 bytes.Add((byte)(ch >> 8));
             }
         }

@@ -37,6 +37,7 @@ internal sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         var info = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
         info.BasicLimitInformation.LimitFlags = Native.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // cast-audit:ignore Marshal.SizeOf 返回结构体字节数，恒为小的正数
         var size = (uint)Marshal.SizeOf<Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
         if (!Native.SetInformationJobObject(handle, Native.JobObjectExtendedLimitInformation, ref info, size))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "SetInformationJobObject failed");
@@ -71,6 +72,7 @@ internal sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
     public bool IsEmpty()
     {
         if (!Native.QueryInformationJobObject(handle, Native.JobObjectBasicAccountingInformation,
+                // cast-audit:ignore Marshal.SizeOf 返回结构体字节数，恒为小的正数
                 out var acct, (uint)Marshal.SizeOf<Native.JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>(),
                 out _))
             return false;
