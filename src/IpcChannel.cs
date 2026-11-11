@@ -60,6 +60,7 @@ internal sealed class Win32ChannelIo : IChannelIo
 
     public (bool Ok, uint Got, int Error) Read(byte[] buffer)
     {
+        // cast-audit:ignore buffer.Length 是数组长度，CLR 保证非负且不超过 int.MaxValue
         var ok = Native.ReadFile(_handle, buffer, (uint)buffer.Length, out var got, IntPtr.Zero);
         // 失败时才读 LastError：成功路径上 GetLastWin32Error 的值无意义，
         // 提前读会拿到上一次调用的残留错误码，把「成功」误判成 EOF。
@@ -69,6 +70,7 @@ internal sealed class Win32ChannelIo : IChannelIo
     public (bool Ok, uint Written, int Error) Write(byte[] buffer, int offset, int count)
     {
         var chunk = offset == 0 && count == buffer.Length ? buffer : buffer[offset..(offset + count)];
+        // cast-audit:ignore chunk 是数组切片，Length 非负且不超过 int.MaxValue
         var ok = Native.WriteFile(_handle, chunk, (uint)chunk.Length, out var written, IntPtr.Zero);
         return (ok, written, ok ? 0 : Marshal.GetLastWin32Error());
     }
@@ -178,6 +180,7 @@ internal sealed class IpcChannel : IMessageChannel
 
         if (ok && got > 0)
         {
+            // cast-audit:ignore got 是 ReadFile 实际读到的字节数，不会超过 chunk.Length
             _decoder.Append(chunk.AsSpan(0, (int)got));
             return true;
         }
@@ -305,6 +308,7 @@ internal sealed class IpcChannel : IMessageChannel
         if (written == 0)
             throw new IpcProtocolException("WriteFile 返回 0 字节，通道可能已关闭");
 
+        // cast-audit:ignore written 是 WriteFile 实际写入的字节数，不超过 chunk.Length
         return (int)written;
     }
 

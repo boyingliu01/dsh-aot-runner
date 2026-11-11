@@ -92,15 +92,16 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- 质量门禁 ----
-# 完整 8 项（`--check` 会按顺序全跑）：
+# 完整 9 项（`--check` 会按顺序全跑）：
 #   1. C# 格式：.editorconfig + .csharp-formatting.json 定义的规则
 #   2. C# 静态检查：编译期 analyzer（严格度由全局 XP-Gate Gate 13 注入，csproj 不声明）
-#   3. 版本一致性：VERSION / package.json / plugin/package.json 三处对齐
-#   4. C# 单元测试（319 个）
-#   5. 覆盖率门槛（对应 xp-gate Gate 5）
-#   6. ESLint（对应 xp-gate Gate 1）
-#   7. JS 语法（口径在 scripts/check-js-syntax.mjs，CI 共用同一份）
-#   8. 上游补丁留档校验
+#   3. 强转审计：有符号/无符号错配、窄化截断（tools/cast-audit，rule-based）
+#   4. 版本一致性：VERSION / package.json / plugin/package.json 三处对齐
+#   5. C# 单元测试（322 个）
+#   6. 覆盖率门槛（对应 xp-gate Gate 5）
+#   7. ESLint（对应 xp-gate Gate 1）
+#   8. JS 语法（口径在 scripts/check-js-syntax.mjs，CI 共用同一份）
+#   9. 上游补丁留档校验
 if [ "$CHECK" = "1" ]; then
   echo "==> 质量门禁：C# 代码格式"
   # 必须显式指定 workspace：仓库根同时存在 DshAotRunner.sln 与 DshAotRunner.csproj 时，
@@ -139,6 +140,24 @@ if [ "$CHECK" = "1" ]; then
     exit 1
   fi
   rm -f "$BUILD_LOG"
+
+  echo "==> 质量门禁：强转审计（有符号/无符号错配、窄化截断）"
+  # 为什么需要单独一道：C# 对**显式数值强转完全不告警**。
+  # 实测过 (int)uint / (byte)int / (long)double 在 AnalysisLevel=latest-all
+  # + AnalysisMode=AllEnabledByDefault 下都是 0 条告警 —— 显式强转被视为
+  # 「开发者已表明意图」。而 Win32 API 里大量字段是无符号的（DWORD/WORD/UINT），
+  # 用有符号类型接就会在边界值上翻符号。
+  #
+  # 本项目已经因此出过一次真实缺陷：退出码 4294967295 报成 -1，
+  # host 侧校验 exitCode >= 0 失败，工具调用当场中断。
+  #
+  # 工具是 rule-based（Roslyn 语义分析），确定性高、无 LLM 调用、秒级完成。
+  # 安全的强转请在代码里写 `// cast-audit:ignore <理由>` —— 理由必填，
+  # 只写 ignore 不写理由的仍会被报出来。
+  if ! dotnet run --project tools/cast-audit -c Release -- src; then
+    echo "强转审计未通过。上面每一处都需要确认：改成 checked(...)，或写明豁免理由。" >&2
+    exit 1
+  fi
 
   echo "==> 质量门禁：版本一致性"
   node scripts/check-version.mjs

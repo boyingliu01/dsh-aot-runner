@@ -56,10 +56,27 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: 语法检查（全部 JS）
         # 与本机 pre-commit 共用 scripts/check-js-syntax.mjs，不在这里另抄一份
         # sh 扫描循环 —— 两处口径一旦漂移，漏掉的目录会让检查静默变成 PASS。
         run: node scripts/check-js-syntax.mjs
+
+      - name: 强转审计（有符号/无符号错配、窄化截断）
+        # C# 对显式数值强转完全不告警：(int)uint / (byte)int / (long)double
+        # 在 AnalysisLevel=latest-all + AnalysisMode=AllEnabledByDefault 下都是 0 条。
+        # 本项目因此出过真实缺陷（退出码 4294967295 报成 -1，host 判协议非法）。
+        # 工具是 rule-based 的 Roslyn 语义分析，确定性高，不依赖网络。
+        run: |
+          dotnet run --project tools/cast-audit -c Release -- src
+
+      - name: 强转审计自测
+        # 规则工具本身也需要被验证：规则改错有两种坏结果 ——
+        # 漏报（门禁全绿但风险不报，比没门禁更危险）和误报（开发者开始无脑豁免）。
+        run: node test/cast-audit-selftest.mjs
 
       - name: ESLint
         run: |
