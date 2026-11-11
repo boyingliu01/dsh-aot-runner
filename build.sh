@@ -159,6 +159,17 @@ if [ "$CHECK" = "1" ]; then
     exit 1
   fi
 
+  echo "==> 质量门禁：契约分支覆盖率（issue #15 B 项）"
+  # 给「53 项通过」补一个分母：契约里一共有多少分支、用例走到了多少。
+  #
+  # 明确**不作为阻塞门禁**：覆盖率依赖本机能拿到哪个版本的 DSH 包，
+  # 版本不同分支数就不同，设死阈值会在 DSH 升级时无端变红。
+  # 它的价值是「让缺口可见」，不是一个及格线。
+  if ! node scripts/contract-branch-coverage.mjs; then
+    echo "⚠️  契约分支覆盖率未测得（采集失败）。"
+    echo "   注意：这不是「覆盖率为 0」，是「没测成」—— 两者补救方向相反。"
+  fi
+
   echo "==> 质量门禁：版本一致性"
   node scripts/check-version.mjs
 

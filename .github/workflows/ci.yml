@@ -177,6 +177,16 @@ jobs:
           echo "契约源可用，执行指纹比对"
           node scripts/contract-fingerprint.mjs
 
+          echo ""
+          echo "契约分支覆盖率（issue #15 B 项）"
+          # 这个数字是给「53 项通过」补一个分母：说明契约里一共有多少分支、
+          # 我们的用例走到了多少。**不作为门禁**（不设阈值），因为它依赖
+          # 本机/CI 上能拿到哪个版本的 DSH 包，版本不同分支数就不同，
+          # 设死阈值会在 DSH 升级时无端变红。
+          if ! node scripts/contract-branch-coverage.mjs; then
+            echo "::warning title=契约分支覆盖率未测得::采集失败，不是「覆盖率为 0」。"
+          fi
+
   # ── Windows 构建 + 核心 A/B：贵（2x），但它是唯一目标平台的回归保护 ──
   #
   # 原先只在手动 / 打 tag 时跑，理由是「省 Actions 额度」。实测后这个理由
