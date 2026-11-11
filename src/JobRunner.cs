@@ -153,10 +153,15 @@ internal sealed class JobRunner : IDisposable
         if (!_finished) OnDisconnect();
     }
 
-    private void HandleMessage(string line)
+    /// <summary>取消息的 type 字段；非法或缺失时投递协议错误并返回 null。</summary>
+    /// <remarks>
+    /// 从 <see cref="HandleMessage"/> 抽出来，让后者只剩「按 type 分发」一个意图。
+    ///
+    /// 解析方式的选择很重要：只用 JsonDocument（启动开销 ~33ms），
+    /// 绝不能用 JsonSerializer.Deserialize —— AOT 下会多付 ~1.2s 启动代价。
+    /// </remarks>
+    private string? PeekMessageType(string line)
     {
-        // 注意：这里只用 JsonDocument（启动开销 ~33ms）。
-        // 绝不能用 JsonSerializer.Deserialize —— AOT 下会多付 ~1.2s 启动代价。
         string? type;
         string? jsonError;
         using (Trace.Measure("json-peek-type"))
@@ -166,13 +171,16 @@ internal sealed class JobRunner : IDisposable
         if (jsonError is not null)
         {
             FailProtocol($"invalid JSON: {jsonError}");
-            return;
+            return null;
         }
-        if (type is null)
-        {
-            FailProtocol("message missing 'type'");
-            return;
-        }
+        if (type is null) FailProtocol("message missing 'type'");
+        return type;
+    }
+
+    private void HandleMessage(string line)
+    {
+        var type = PeekMessageType(line);
+        if (type is null) return;      // 已投递协议错误，调用方无需再处理
 
         switch (type)
         {
@@ -940,14 +948,8 @@ internal sealed class JobRunner : IDisposable
     /// <summary>轮询线程主体：等进展 → 处理，直到 finished。</summary>
     private void PollLoop()
     {
-        while (true)
+        while (!ShouldStopPolling())
         {
-            lock (_gate)
-            {
-                if (_finished) return;
-                if (_resultDelivered) return;
-            }
-
             WaitForProgress();
 
             try
@@ -959,6 +961,21 @@ internal sealed class JobRunner : IDisposable
                 PublishResult(MakePollError(ex));
                 return;
             }
+        }
+    }
+
+    /// <summary>轮询是否该停下：已收尾或结果已投递。</summary>
+    /// <remarks>
+    /// 从 <see cref="PollLoop"/> 里抽出来，让循环条件本身读得懂「什么情况下该停」。
+    /// 顺带把这几个分支从 PollLoop 的圈复杂度里移走 —— lizard 会把
+    /// lock 块和每个 return 都算进 CCN，原来的写法在工具眼里是 21，
+    /// 而真实逻辑只有两个判断。
+    /// </remarks>
+    private bool ShouldStopPolling()
+    {
+        lock (_gate)
+        {
+            return _finished || _resultDelivered;
         }
     }
 
@@ -1096,7 +1113,9 @@ internal sealed class JobRunner : IDisposable
         process!.Dispose();
         _process = null;
         // RUNNER-SPEC §6.1：投递 target-exit
-        PublishResult(new TargetExitResult { ExitCode = (int)code });
+        // 不做 (int) 强转：退出码是无符号 32 位，最高位为 1 时强转会翻成负数，
+        // 而 host 侧要求 exitCode >= 0，收到负数会直接判协议非法。
+        PublishResult(new TargetExitResult { ExitCode = code });
         return true;
     }
 

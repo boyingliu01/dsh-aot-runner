@@ -191,11 +191,29 @@ public class ProtocolJsonTests
     }
 
     [Fact]
-    public void Serialize_TargetExitResult负数退出码()
+    public void Serialize_TargetExitResult最大无符号退出码()
     {
-        var json = ProtocolJson.Serialize(new TargetExitResult { ExitCode = -1 });
+        // 退出码在 Windows 上是无符号 32 位。这个用例原先写的是 ExitCode = -1
+        // 并断言输出 "-1" —— 把一个 bug 固化成了契约。
+        //
+        // host 侧 parseWindowsRunnerResult 的校验是
+        //   Number.isSafeInteger(value.exitCode) && value.exitCode >= 0
+        // 收到 -1 直接抛 "invalid target-exit result"。所以「能序列化出 -1」
+        // 不是特性，是会让工具调用失败的缺陷。issue #15 C 项实测发现。
+        var json = ProtocolJson.Serialize(new TargetExitResult { ExitCode = uint.MaxValue });
 
-        Assert.Equal("""{"type":"target-exit","exitCode":-1}""", json);
+        Assert.Equal("""{"type":"target-exit","exitCode":4294967295}""", json);
+    }
+
+    [Fact]
+    public void Serialize_TargetExitResult符号位翻转区间()
+    {
+        // 分界点：2147483647 是 int.MaxValue，再大就翻符号。
+        // 逐个断言，避免以后有人又把类型改回 int。
+        Assert.Equal("""{"type":"target-exit","exitCode":2147483647}""",
+            ProtocolJson.Serialize(new TargetExitResult { ExitCode = 2147483647 }));
+        Assert.Equal("""{"type":"target-exit","exitCode":2147483648}""",
+            ProtocolJson.Serialize(new TargetExitResult { ExitCode = 2147483648 }));
     }
 
     [Fact]

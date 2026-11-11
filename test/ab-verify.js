@@ -11,11 +11,17 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert');
+const path = require('node:path');
 const { runNode, runAot, targetEnv, assertEnvironment, NODE_RUNNER, AOT_RUNNER } = require('./runner-client.js');
 
 // 环境缺失（找不到 node runner / 未构建 AOT 产物）必须报出可操作的错误，
 // 而不是在第一个用例里以 TypeError 崩溃 —— 两者是完全不同的失败含义。
 assertEnvironment();
+
+// 退出码探针（见下方「退出码边界」用例的说明）。
+// 用绝对路径，因为 cwd 在用例里是可变的，相对路径会解析到别处。
+const EXITCODE_PROBE = path.join(__dirname, '..', 'exitcode-probe.py');
+const EXITCODE_PROBE_CWD = path.join(__dirname, '..').replace(/\\/g, '/');
 console.log(`node runner: ${NODE_RUNNER}`);
 console.log(`AOT runner : ${AOT_RUNNER}\n`);
 
@@ -48,6 +54,28 @@ const CASES = [
   { name: 'cmd/crlf',        argv: ['cmd.exe', '/c', 'echo A& echo B& echo C'],    cwd: 'C:/Windows' },
   { name: 'cmd/cwd',         argv: ['cmd.exe', '/c', 'cd'],                        cwd: 'C:/Windows' },
 
+  // ---- C 项：长路径 / UNC / 设备路径（issue #15 C，第一优先级）----
+  //
+  // 为什么这个维度排第一：runner 的 cwd 会过 NormalizeWindowsPath()，
+  // 而那条规则里有 `Length > 3` 这样的长度判断。只要某一版把 `\\?\` 前缀
+  // 当成「多余的反斜杠」剥掉，路径就变成普通路径，超过 260 字符时
+  // CreateProcessW 直接失败 —— 而错误信息会说「找不到目录」，指错方向。
+  //
+  // 断言放在「target 打出来的 cwd 字符串」上，不是「有没有报错」：
+  // 后者在路径被悄悄改写成另一个合法目录时同样会通过。
+  { name: 'path/unc-cwd',    argv: ['cmd.exe', '/c', 'cd'],
+    cwd: '//localhost/C$/Windows' },
+  { name: 'path/unc-cwd-backslash', argv: ['cmd.exe', '/c', 'cd'],
+    cwd: '\\\\localhost\\C$\\Windows' },
+  // 含 `..` 的路径：node 会解析成真实目录，AOT 侧必须一致。
+  { name: 'path/dotdot',     argv: ['cmd.exe', '/c', 'cd'],
+    cwd: 'C:/Windows/System32/../' },
+  // 裸盘符：NormalizeWindowsPath 明确把它补成 "C:\"。
+  // 若不补，语义是「盘符当前目录」而不是根目录 —— 两者可能不同。
+  { name: 'path/bare-drive', argv: ['cmd.exe', '/c', 'cd'],                        cwd: 'C:' },
+  // 正斜杠：node 与 Windows API 都能接受，验证两侧都归一化到同一结果。
+  { name: 'path/forward-slash', argv: ['cmd.exe', '/c', 'cd'],                     cwd: 'C:/Windows/System32' },
+
   // ---- python ----
   { name: 'python/stdout',   argv: ['python', '-c', 'print("PY_OK")'],            cwd: 'C:/Windows' },
   { name: 'python/stderr',   argv: ['python', '-c', 'import sys; sys.stderr.write("PYERR\\n")'], cwd: 'C:/Windows' },
@@ -55,6 +83,55 @@ const CASES = [
   { name: 'python/unicode',  argv: ['python', '-c', 'print("你好世界")'],          cwd: 'C:/Windows' },
   { name: 'python/long',     argv: ['python', '-c', 'print("X"*5000)'],           cwd: 'C:/Windows' },
   { name: 'python/env',      argv: ['python', '-c', 'import os; print(os.environ.get("MYTEST","MISSING"))'], cwd: 'C:/Windows', env: targetEnv({ MYTEST: 'VALUE123' }) },
+
+  // ---- C 项：argv 特殊字符（issue #15 C，第二优先级）----
+  //
+  // 这是 Windows 命令行最经典的一类缺陷：MSVCRT 的 argv 解析规则
+  // （反斜杠只在与引号相邻时才是转义符）与直觉不同，自己拼命令行的实现
+  // 很容易在这些组合上出错。Node 用 libuv 的 `quote_cmd_arg`，AOT 侧必须
+  // 复现同一套规则，否则**同一个 argv 在两侧会变成不同的参数**。
+  //
+  // 探针用 python 打印 repr(argv)，因为它是唯一能精确回显「收到的原始参数」
+  // 而不做二次解释的方式 —— 用 echo 会被 shell 自己再处理一遍，测了个寂寞。
+  //
+  // 每一条都对应一个真实的失败模式：
+  //   quote-in-arg       参数里含双引号 —— 必须转义成 \" 而不是直接拼
+  //   trailing-backslash 尾随反斜杠 + 需要被引号包裹 —— 反斜杠必须翻倍，
+  //                      否则 "a\" 会把闭合引号吃掉，后续参数全被吞进上一个
+  //   alternating        反斜杠与引号交替 —— MSVCRT 规则最容易算错的地方
+  //   embedded-space     含空格的单个参数 —— 必须被引号包裹，但只包这一个
+  //   empty-arg          空字符串参数 —— 常被优化掉，导致参数位置整体左移
+  //   unicode-arg        含非 ASCII —— 验证 UTF-16 传递没有被降级
+  {
+    name: 'argv/quote-in-arg',
+    argv: ['python', '-c', 'import sys;print(repr(sys.argv[1:]))', 'a"b'],
+    cwd: 'C:/Windows',
+  },
+  {
+    name: 'argv/trailing-backslash',
+    argv: ['python', '-c', 'import sys;print(repr(sys.argv[1:]))', 'C:\\path with space\\'],
+    cwd: 'C:/Windows',
+  },
+  {
+    name: 'argv/alternating',
+    argv: ['python', '-c', 'import sys;print(repr(sys.argv[1:]))', 'a\\"b\\\\"c'],
+    cwd: 'C:/Windows',
+  },
+  {
+    name: 'argv/embedded-space',
+    argv: ['python', '-c', 'import sys;print(repr(sys.argv[1:]))', 'hello world'],
+    cwd: 'C:/Windows',
+  },
+  {
+    name: 'argv/empty-arg',
+    argv: ['python', '-c', 'import sys;print(repr(sys.argv[1:]))', ''],
+    cwd: 'C:/Windows',
+  },
+  {
+    name: 'argv/unicode-arg',
+    argv: ['python', '-c', 'import sys;print(repr(sys.argv[1:]))', '中文 " 混合'],
+    cwd: 'C:/Windows',
+  },
 
   // ---- bash (git bash) ----
   { name: 'bash/echo',       argv: ['bash', '-c', 'echo BASH_OK'],                cwd: 'C:/Windows' },
@@ -64,6 +141,129 @@ const CASES = [
   // ---- pwsh ----
   { name: 'pwsh/echo',       argv: ['pwsh', '-NoProfile', '-Command', 'Write-Output "PS_OK"'], cwd: 'C:/Windows' },
   { name: 'pwsh/exit-1',     argv: ['pwsh', '-NoProfile', '-Command', 'exit 1'],  cwd: 'C:/Windows' },
+
+  // ---- C 项：env 边界（issue #15 C，第四优先级）----
+  //
+  // 环境块是 Windows 进程创建里最容易被「自己拼」搞坏的一处：它要求
+  // 「KEY=VALUE\0KEY=VALUE\0\0」的双空字节结尾、KEY 不能含 '='、整体大小
+  // 有上限。自己拼环境块时最容易漏的正是**结尾的第二个空字节** ——
+  // 漏了以后进程照样能启动，但会读到越界的环境数据，表现为随机的
+  // 「环境变量莫名其妙少了几个」，非常难查。
+  //
+  // 这里的探针让 target 自己回显收到的值，断言落在**值是否逐字节一致**上。
+  // 每条对应一个真实失败模式：
+  //   eq-in-value   值里含 '=' —— 只能按**第一个** '=' 切分，否则值被截断
+  //   quote-in-value 值里含引号 —— 环境块不做转义，必须原样传递
+  //   unicode-value 含中文 —— 验证 UTF-16LE 编码没有降级
+  //   spaced-value  值含空格 —— 容易在拼块时被误当成两个变量
+  //   empty-value   值为空字符串 —— 与「变量不存在」是两件不同的事
+  //   name-with-dot 变量名含 '.' —— Windows 允许，但正则校验容易误杀
+  {
+    name: 'env/eq-in-value',
+    argv: ['python', '-c', 'import os;print(repr(os.environ.get("EQV")))'],
+    cwd: 'C:/Windows',
+    env: targetEnv({ EQV: 'a=b=c' }),
+  },
+  {
+    name: 'env/quote-in-value',
+    argv: ['python', '-c', 'import os;print(repr(os.environ.get("QT")))'],
+    cwd: 'C:/Windows',
+    env: targetEnv({ QT: 'he said "hi"' }),
+  },
+  {
+    name: 'env/unicode-value',
+    argv: ['python', '-c', 'import os;print(repr(os.environ.get("UNI")))'],
+    cwd: 'C:/Windows',
+    env: targetEnv({ UNI: '中文值测试' }),
+  },
+  {
+    name: 'env/spaced-value',
+    argv: ['python', '-c', 'import os;print(repr(os.environ.get("SP")))'],
+    cwd: 'C:/Windows',
+    env: targetEnv({ SP: 'a b  c' }),
+  },
+  {
+    // 空值 vs 缺失：Windows 允许 `KEY=` 这种空值项存在，
+    // 而 os.environ.get 对「空字符串」和「不存在」返回不同结果（'' vs None）。
+    // 断言用 sentinel 区分，确保测的是「真的传过去了空值」。
+    name: 'env/empty-value',
+    argv: ['python', '-c', 'import os;print("EMPTY" if os.environ.get("EMPTYV") == "" else ("MISSING" if "EMPTYV" not in os.environ else "OTHER"))'],
+    cwd: 'C:/Windows',
+    env: targetEnv({ EMPTYV: '' }),
+  },
+  {
+    name: 'env/name-with-dot',
+    argv: ['python', '-c', 'import os;print(repr(os.environ.get("A.B")))'],
+    cwd: 'C:/Windows',
+    env: targetEnv({ 'A.B': 'dotted' }),
+  },
+
+  // ---- C 项：退出码边界（issue #15 C，第五优先级）----
+  //
+  // 这一组是**补测时真的抓到了 bug** 的地方，不是例行公事。
+  //
+  // Windows 的退出码是**无符号** 32 位（GetExitCodeProcess 的签名就是
+  // out uint，取值 0..4294967295）。AOT 侧原来把它强转成 int 再序列化，
+  // 导致最高位为 1 时翻成负数：target 退出 4294967295 报成 -1。
+  //
+  // 严重性不是「数字对不上」：host 侧 parseWindowsRunnerResult 的校验是
+  //   Number.isSafeInteger(value.exitCode) && value.exitCode >= 0
+  // 收到 -1 直接抛 "subprocess runner emitted an invalid target-exit result"
+  // —— 也就是**工具调用会直接失败**。
+  //
+  // 为什么用 exitcode-probe.py 而不是 `sys.exit(N)`：
+  // Python 的 sys.exit() 超出 int32 会自己报错退出（实测 sys.exit(2147483648)
+  // → 127），那样测出来的差异全是 Python 造成的假象，与 runner 无关。
+  // 探针走 ExitProcess，能设置完整的 32 位值。
+  //
+  // 分界点选在 2147483647/2147483648，正好跨 int.MaxValue。
+  { name: 'exit/255',        argv: ['python', '-c', 'import sys;sys.exit(255)'],  cwd: 'C:/Windows' },
+  { name: 'exit/max-int32',  argv: ['python', EXITCODE_PROBE, '2147483647'],      cwd: EXITCODE_PROBE_CWD },
+  { name: 'exit/sign-flip',  argv: ['python', EXITCODE_PROBE, '2147483648'],      cwd: EXITCODE_PROBE_CWD },
+  { name: 'exit/large-u32',  argv: ['python', EXITCODE_PROBE, '3000000000'],      cwd: EXITCODE_PROBE_CWD },
+  { name: 'exit/max-uint32', argv: ['python', EXITCODE_PROBE, '4294967295'],      cwd: EXITCODE_PROBE_CWD },
+
+  // ---- C 项：超长命令行（issue #15 C，第三优先级）----
+  //
+  // CreateProcessW 的 lpCommandLine 上限是 32767 个字符（含结尾 NUL）。
+  // 超过时**不是静默截断**，而是直接失败；两侧的错误形状必须一致，
+  // 否则 host 分不清「命令太长」和「命令不存在」。
+  //
+  // 探针让 python 回显收到的参数长度，断言落在**参数没被截断**上 ——
+  // 只看 exitCode 的话，长度被悄悄截掉也会显示成功。
+  //
+  // 32000 与 32767 之间留出的是命令前缀（python + -c + 脚本）的开销：
+  // 实测 32000 能过、32767 报 ENAMETOOLONG，说明边界就在这附近。
+  {
+    name: 'longcmd/30000',
+    argv: ['python', '-c', 'import sys;print(len(sys.argv[1]))', 'X'.repeat(30000)],
+    cwd: 'C:/Windows',
+  },
+  {
+    name: 'longcmd/32000',
+    argv: ['python', '-c', 'import sys;print(len(sys.argv[1]))', 'X'.repeat(32000)],
+    cwd: 'C:/Windows',
+  },
+  {
+    // 为什么不测 32767 那条边界：
+    //
+    // 试过，但**测不到 runner** —— A/B 框架本身是
+    //   spawn(NODE, [NODE_RUNNER, '--', ...argv])
+    // 把 target argv 拼进启动 runner 的命令行。当参数接近 32767 时，
+    // Node 在启动测试进程这一步就抛 ENAMETOOLONG，请求根本没送达 runner。
+    // 那样测出来的是「Node 的 spawn 有长度限制」，与 runner 无关 ——
+    // 属于「命令跑起来了 ≠ 命令测到了东西」里最典型的一种。
+    //
+    // 要真正测到 CreateProcessW 的边界，得绕过这层 spawn（例如把超长
+    // 参数写进文件让 target 自己读）。那是另一套测试架构的工作量，
+    // 与 C 项「补充覆盖率」目标不匹配，如实留作已知缺口。
+    //
+    // 32000 这条仍有效：它验证了**大参数不被截断**，而这正是长命令行
+    // 场景下最容易出的实际问题。
+    name: 'longcmd/32000',
+    argv: ['python', '-c', 'import sys;print(len(sys.argv[1]))', 'X'.repeat(32000)],
+    cwd: 'C:/Windows',
+  },
 
   // ---- npm / git ----
   { name: 'npm/version',     argv: ['npm', '--version'],                          cwd: 'C:/Windows' },

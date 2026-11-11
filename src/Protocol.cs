@@ -27,7 +27,19 @@ internal sealed class StartRequest
 internal sealed class TargetExitResult
 {
     public string Type { get; set; } = "target-exit";
-    public int ExitCode { get; set; }
+
+    // 必须是 uint，不能是 int —— Windows 的退出码是**无符号** 32 位
+    // （GetExitCodeProcess 的签名就是 out uint，取值 0..4294967295）。
+    //
+    // 这里原本是 int，于是 TryPublishExit 里的 (int)code 在最高位为 1 时
+    // 翻成负数：target 退出 4294967295 会报成 -1。
+    //
+    // 而 host 侧 parseWindowsRunnerResult 的校验是
+    //   Number.isSafeInteger(value.exitCode) && value.exitCode >= 0
+    // 收到 -1 会直接抛 "subprocess runner emitted an invalid target-exit
+    // result" —— 所以这不是「数字对不上」的轻微差异，是会让工具调用
+    // 直接失败。issue #15 C 项（退出码边界）实测发现。
+    public uint ExitCode { get; set; }
 }
 
 internal sealed class ErrorResult
