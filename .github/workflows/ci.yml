@@ -157,6 +157,10 @@ jobs:
           if [ ! -d "$PKG/lib" ]; then
             echo "::warning title=契约漂移检测未执行::npm 包未安装成功，本次未检测契约漂移。"
             echo "这不是「契约没变」—— 是「没查」。见 issue #15。"
+            # 分支覆盖率同样依赖契约源；拿不到就如实报未测得，不走假成功。
+            if ! node scripts/contract-branch-coverage.mjs; then
+              echo "::warning title=契约分支覆盖率未测得::拿不到契约源，不是「覆盖率为 0」。"
+            fi
             exit 0
           fi
 
@@ -171,6 +175,10 @@ jobs:
             echo "这不是「契约没变」—— 是「拿不到可用的契约源」。"
             echo "npm 公开包 $VER 是早期占位版，结构与真实 DSH 不同。"
             echo "详见 issue #15 里关于 A3 的说明。"
+            # 同上：覆盖率也采不到，明确报出来而不是静默跳过整段。
+            if ! node scripts/contract-branch-coverage.mjs; then
+              echo "::warning title=契约分支覆盖率未测得::npm 包 $VER 没有 runner-launch-*.js，不是「覆盖率为 0」。"
+            fi
             exit 0
           fi
 
