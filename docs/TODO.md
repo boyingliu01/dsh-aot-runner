@@ -314,7 +314,11 @@ ESLint 的「零规则绿」、我第一版自测的空跑、xp-gate 的 `long-f
       若 WSL 能跑通 AOT 交叉编译，这是最大的收益点
 - [ ] **Gate 5 的本地等价物**：`build.sh --check` 已覆盖覆盖率门槛，但 xp-gate 的 Gate 5
       只在 commit 时跑。考虑在 CI 里显式跑一次 `xp-gate check 5` 的等价逻辑
-- [ ] **`coverage/` 已在 `.gitignore`**（本轮新增）。若将来用 c8，产物路径需与 `coverage-summary.py` 对齐
+- [x] `.gitignore` 只忽略 `coverage/tmp/`，**保留 `coverage/coverage-summary.json`**
+  - 踩过的坑：一度写成忽略整个 `coverage/`，而那正是 xp-gate Gate 5 判定覆盖率门槛时
+    **唯一**会读的路径（`gate-5-entry.sh` 的 `_gate5_coverage_usable`）。整目录忽略
+    会让报告进不了版本库 → CI 上 Gate 5 永远找不到它
+  - **迁移后复查**：若引入 c8/vitest，确认 `coverage-summary.json` 能正常生成且不被忽略
 
 ---
 
@@ -331,7 +335,7 @@ ESLint 的「零规则绿」、我第一版自测的空跑、xp-gate 的 `long-f
 | `src/JobRunner.Polling.cs` | 新增：退出检测状态机（partial class） |
 | `src/JobRunner.cs` | 1468 → 983 行 |
 | `docs/XP-GATE-BASELINE.md` | 修复 #30：重写失真内容 + §7 记录适配器缺陷 |
-| `.gitignore` | 新增 `coverage/` |
+| `.gitignore` | 新增 `coverage/tmp/`（**不是**整个 `coverage/`，见 TODO-5 说明） |
 
 > **`EnvironmentBlock` 的契约警告**：每个 `KEY=VALUE` 后必须是 **2 个 0 字节**（宽字符终止符），
 > 整体再 2 个 0 字节。空 env 必须是 **4 字节** —— 2 字节会让 `CreateProcessW` 返回
