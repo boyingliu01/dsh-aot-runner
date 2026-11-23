@@ -19,3 +19,16 @@
 {"timestamp":"2026-11-22T03:56:52.450Z","gate_id":"gate-7","gate_name":"iac-security","passed":true,"issues_found":0,"duration_ms":0}
 {"timestamp":"2026-11-22T03:56:57.304Z","gate_id":"gate-8","gate_name":"secret-scanning","passed":true,"issues_found":0,"duration_ms":1350}
 {"timestamp":"2026-11-22T04:41:01.510Z","gate_id":"gate-8","gate_name":"secret-scanning","passed":true,"issues_found":0,"duration_ms":1143}
+{"timestamp":"2026-11-23T05:39:16.883Z","gate_id":"gate-3","gate_name":"complexity","passed":false,"issues_found":0,"duration_ms":91}
+{"timestamp":"2026-11-23T05:39:22.013Z","gate_id":"gate-3","gate_name":"complexity","passed":false,"issues_found":0,"duration_ms":96}
+{"timestamp":"2026-11-23T05:39:25.998Z","gate_id":"gate-7","gate_name":"iac-security","passed":true,"issues_found":0,"duration_ms":0}
+{"timestamp":"2026-11-23T05:39:27.792Z","gate_id":"gate-8","gate_name":"secret-scanning","passed":true,"issues_found":0,"duration_ms":748}
+{"timestamp":"2026-11-23T05:39:28.850Z","gate_id":"gate-9","gate_name":"sast-security","passed":false,"issues_found":0,"duration_ms":0}
+{"timestamp":"2026-11-23T05:39:47.023Z","gate_id":"gate-3","gate_name":"complexity","passed":false,"issues_found":0,"duration_ms":105}
+{"timestamp":"2026-11-23T05:39:50.555Z","gate_id":"gate-7","gate_name":"iac-security","passed":true,"issues_found":0,"duration_ms":0}
+{"timestamp":"2026-11-23T05:39:52.377Z","gate_id":"gate-8","gate_name":"secret-scanning","passed":true,"issues_found":0,"duration_ms":767}
+{"timestamp":"2026-11-23T05:39:53.424Z","gate_id":"gate-9","gate_name":"sast-security","passed":false,"issues_found":0,"duration_ms":0}
+{"timestamp":"2026-11-23T05:41:38.471Z","gate_id":"gate-3","gate_name":"complexity","passed":false,"issues_found":0,"duration_ms":94}
+{"timestamp":"2026-11-23T05:41:43.626Z","gate_id":"gate-3","gate_name":"complexity","passed":false,"issues_found":0,"duration_ms":102}
+{"timestamp":"2026-11-23T05:41:49.782Z","gate_id":"gate-3","gate_name":"complexity","passed":false,"issues_found":0,"duration_ms":106}
+{"timestamp":"2026-11-23T05:42:00.544Z","gate_id":"gate-3","gate_name":"complexity","passed":true,"issues_found":0,"duration_ms":337}
