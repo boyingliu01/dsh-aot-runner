@@ -20,7 +20,7 @@ public class JobRunnerPureLogicTests
     private static string Quote(string arg)
     {
         var sb = new StringBuilder();
-        JobRunner.AppendQuoted(sb, arg);
+        ExecutableResolver.AppendQuoted(sb, arg);
         return sb.ToString();
     }
 
@@ -102,7 +102,7 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildCommandLine_多参数用空格连接()
     {
-        var line = JobRunner.BuildCommandLine(new[] { "node", "a.js", "--flag" });
+        var line = ExecutableResolver.BuildCommandLine(new[] { "node", "a.js", "--flag" });
 
         Assert.Equal("node a.js --flag", line);
     }
@@ -110,7 +110,7 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildCommandLine_只给需要引号的参数加引号()
     {
-        var line = JobRunner.BuildCommandLine(new[] { @"C:\Program Files\node.exe", "a.js" });
+        var line = ExecutableResolver.BuildCommandLine(new[] { @"C:\Program Files\node.exe", "a.js" });
 
         Assert.Equal("\"C:\\Program Files\\node.exe\" a.js", line);
     }
@@ -118,14 +118,14 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildCommandLine_空数组产出空串()
     {
-        Assert.Equal("", JobRunner.BuildCommandLine(Array.Empty<string>()));
+        Assert.Equal("", ExecutableResolver.BuildCommandLine(Array.Empty<string>()));
     }
 
     [Fact]
     public void BuildCommandLine_空参数保留为引号对()
     {
         // 空参数不能被丢掉，否则 argv 位置整体左移
-        var line = JobRunner.BuildCommandLine(new[] { "a", "", "c" });
+        var line = ExecutableResolver.BuildCommandLine(new[] { "a", "", "c" });
 
         Assert.Equal("a \"\" c", line);
     }
@@ -143,7 +143,7 @@ public class JobRunnerPureLogicTests
     [InlineData("", 0)]
     public void WindowsFileNameStart_定位文件名起点(string command, int expected)
     {
-        Assert.Equal(expected, JobRunner.WindowsFileNameStart(command));
+        Assert.Equal(expected, ExecutableResolver.WindowsFileNameStart(command));
     }
 
     // ============ NormalizeWindowsPath ============
@@ -159,7 +159,7 @@ public class JobRunnerPureLogicTests
     [InlineData("C:", @"C:\")]       // 裸盘符补反斜杠
     public void NormalizeWindowsPath_规范化(string? input, string? expected)
     {
-        Assert.Equal(expected, JobRunner.NormalizeWindowsPath(input));
+        Assert.Equal(expected, ExecutableResolver.NormalizeWindowsPath(input));
     }
 
     // ============ BuildExecutableCandidates ============
@@ -168,7 +168,7 @@ public class JobRunnerPureLogicTests
     public void BuildExecutableCandidates_无扩展名时补com和exe()
     {
         // .com 必须优先于 .exe（libuv 顺序）
-        Assert.Equal(new[] { "node.com", "node.exe" }, JobRunner.BuildExecutableCandidates("node"));
+        Assert.Equal(new[] { "node.com", "node.exe" }, ExecutableResolver.BuildExecutableCandidates("node"));
     }
 
     [Fact]
@@ -176,7 +176,7 @@ public class JobRunnerPureLogicTests
     {
         Assert.Equal(
             new[] { "node.exe", "node.exe.com", "node.exe.exe" },
-            JobRunner.BuildExecutableCandidates("node.exe"));
+            ExecutableResolver.BuildExecutableCandidates("node.exe"));
     }
 
     [Fact]
@@ -184,7 +184,7 @@ public class JobRunnerPureLogicTests
     {
         // 关键契约：npm 只有 npm.cmd，因此必须解析失败（ENOENT），
         // AOT 不能单方面补 .cmd 让它跑起来 —— 那会与 node 行为分歧。
-        var candidates = JobRunner.BuildExecutableCandidates("npm");
+        var candidates = ExecutableResolver.BuildExecutableCandidates("npm");
 
         Assert.Equal(new[] { "npm.com", "npm.exe" }, candidates);
         Assert.DoesNotContain(candidates, c => c.EndsWith(".cmd"));
@@ -197,7 +197,7 @@ public class JobRunnerPureLogicTests
         // "name." → "name.com" / "name.exe"（不再补第二个点）
         Assert.Equal(
             new[] { "name.com", "name.exe" },
-            JobRunner.BuildExecutableCandidates("name."));
+            ExecutableResolver.BuildExecutableCandidates("name."));
     }
 
     // ============ SplitPath ============
@@ -207,7 +207,7 @@ public class JobRunnerPureLogicTests
     {
         Assert.Equal(
             new[] { @"C:\a", @"C:\b" },
-            JobRunner.SplitPath(@"C:\a;;C:\b;").ToArray());
+            ExecutableResolver.SplitPath(@"C:\a;;C:\b;").ToArray());
     }
 
     [Fact]
@@ -216,13 +216,13 @@ public class JobRunnerPureLogicTests
         // PATH 里常见的写法："C:\Program Files\nodejs"
         Assert.Equal(
             new[] { @"C:\Program Files\nodejs" },
-            JobRunner.SplitPath("\"C:\\Program Files\\nodejs\"").ToArray());
+            ExecutableResolver.SplitPath("\"C:\\Program Files\\nodejs\"").ToArray());
     }
 
     [Fact]
     public void SplitPath_空串无输出()
     {
-        Assert.Empty(JobRunner.SplitPath(""));
+        Assert.Empty(ExecutableResolver.SplitPath(""));
     }
 
     // ============ GetEnvValue ============
@@ -232,8 +232,8 @@ public class JobRunnerPureLogicTests
     {
         var env = new Dictionary<string, string> { ["Path"] = @"C:\x" };
 
-        Assert.Equal(@"C:\x", JobRunner.GetEnvValue(env, "PATH"));
-        Assert.Equal(@"C:\x", JobRunner.GetEnvValue(env, "path"));
+        Assert.Equal(@"C:\x", ExecutableResolver.GetEnvValue(env, "PATH"));
+        Assert.Equal(@"C:\x", ExecutableResolver.GetEnvValue(env, "path"));
     }
 
     [Fact]
@@ -241,8 +241,8 @@ public class JobRunnerPureLogicTests
     {
         var env = new Dictionary<string, string> { ["A"] = "1" };
 
-        Assert.Null(JobRunner.GetEnvValue(env, "PATH"));
-        Assert.Null(JobRunner.GetEnvValue(null, "PATH"));
+        Assert.Null(ExecutableResolver.GetEnvValue(env, "PATH"));
+        Assert.Null(ExecutableResolver.GetEnvValue(null, "PATH"));
     }
 
     // ============ WindowsSearchPathJoin ============
@@ -253,20 +253,20 @@ public class JobRunnerPureLogicTests
     [InlineData(@"C:/a/", @"C:/a\")]
     public void WindowsSearchPathJoin_目录补反斜杠(string root, string expected)
     {
-        Assert.Equal(expected, JobRunner.WindowsSearchPathJoin(root, "n.exe", @"C:\cwd"));
+        Assert.Equal(expected, ExecutableResolver.WindowsSearchPathJoin(root, "n.exe", @"C:\cwd"));
     }
 
     [Fact]
     public void WindowsSearchPathJoin_空根用cwd()
     {
-        Assert.Equal(@"C:\cwd\", JobRunner.WindowsSearchPathJoin("", "n.exe", @"C:\cwd"));
+        Assert.Equal(@"C:\cwd\", ExecutableResolver.WindowsSearchPathJoin("", "n.exe", @"C:\cwd"));
     }
 
     [Fact]
     public void WindowsSearchPathJoin_空根且空cwd时返回空()
     {
         // 返回空串表示「在当前目录下直接找」，由 ProbeCandidates 用裸名探测
-        Assert.Equal("", JobRunner.WindowsSearchPathJoin("", "n.exe", ""));
+        Assert.Equal("", ExecutableResolver.WindowsSearchPathJoin("", "n.exe", ""));
     }
 
     // ============ BuildSearchRoots ============
@@ -274,7 +274,7 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildSearchRoots_带路径时只搜该目录()
     {
-        var roots = JobRunner.BuildSearchRoots(true, @"C:\dir\", null);
+        var roots = ExecutableResolver.BuildSearchRoots(true, @"C:\dir\", null);
 
         Assert.Equal(new[] { @"C:\dir\" }, roots);
     }
@@ -284,7 +284,7 @@ public class JobRunnerPureLogicTests
     {
         var env = new Dictionary<string, string> { ["PATH"] = @"C:\a;C:\b" };
 
-        var roots = JobRunner.BuildSearchRoots(false, "", env);
+        var roots = ExecutableResolver.BuildSearchRoots(false, "", env);
 
         // 首项是空串（代表 cwd），其后是 PATH 各目录
         Assert.Equal("", roots[0]);
@@ -297,7 +297,7 @@ public class JobRunnerPureLogicTests
     {
         var env = new Dictionary<string, string> { ["PATH"] = @"C:\fromenv" };
 
-        var roots = JobRunner.BuildSearchRoots(false, "", env);
+        var roots = ExecutableResolver.BuildSearchRoots(false, "", env);
 
         Assert.Contains(@"C:\fromenv", roots);
     }
@@ -307,7 +307,7 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildEnvironmentBlock_UTF16双null结尾()
     {
-        var block = JobRunner.BuildEnvironmentBlock(new Dictionary<string, string> { ["A"] = "1" });
+        var block = EnvironmentBlock.BuildEnvironmentBlock(new Dictionary<string, string> { ["A"] = "1" });
 
         // "A"=2 + "="=2 + "1"=2 + 值终止 2 = 8，再加整块终止 2 = 10
         Assert.Equal(10, block.Length);
@@ -319,14 +319,15 @@ public class JobRunnerPureLogicTests
     public void BuildEnvironmentBlock_空env必须4字节()
     {
         // 关键回归：CreateProcessW 对空环境块的要求是**两次宽 NULL 终止**。
-        // 实测确认（见 JobRunnerOrchestrationTests 的端到端验证）：
+        // 实测确认（见 JobRunnerOrchestrationTests 的端到端验证；实现已抽到
+        // EnvironmentBlock.cs，契约不变）：
         //   2 字节 → ERROR_INVALID_PARAMETER(87)
         //   4 字节 → 成功
         //
         // 这条测试原先断言 2 字节，注释却写着「2 字节会返回 87」——
         // 注释和断言互相矛盾，等于把 bug 锁死了。真实后果是
         // **host 一旦传空 env，所有 spawn 全部失败**。
-        var block = JobRunner.BuildEnvironmentBlock(new Dictionary<string, string>());
+        var block = EnvironmentBlock.BuildEnvironmentBlock(new Dictionary<string, string>());
 
         Assert.Equal(4, block.Length);
         Assert.Equal(new byte[] { 0, 0, 0, 0 }, block);
@@ -335,7 +336,7 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildEnvironmentBlock_多个变量各自编码()
     {
-        var block = JobRunner.BuildEnvironmentBlock(new Dictionary<string, string>
+        var block = EnvironmentBlock.BuildEnvironmentBlock(new Dictionary<string, string>
         {
             ["A"] = "1",
             ["B"] = "2",
@@ -348,7 +349,7 @@ public class JobRunnerPureLogicTests
     [Fact]
     public void BuildEnvironmentBlock_非ASCII值按UTF16LE编码()
     {
-        var block = JobRunner.BuildEnvironmentBlock(new Dictionary<string, string> { ["K"] = "中" });
+        var block = EnvironmentBlock.BuildEnvironmentBlock(new Dictionary<string, string> { ["K"] = "中" });
 
         // "K=" 4 字节 + '中'(U+4E2D) 2 字节 + 值终止 2 + 块终止 2 = 10
         Assert.Equal(10, block.Length);

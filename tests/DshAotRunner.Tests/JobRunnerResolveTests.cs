@@ -32,21 +32,21 @@ public class JobRunnerResolveTests
     {
         // CreateProcessW 的 lpCurrentDirectory 传 "C:/" 会返回 ERROR_INVALID_PARAMETER(87)，
         // 必须转成 "C:\"。
-        Assert.Equal(@"C:\Windows", JobRunner.NormalizeWindowsPath("C:/Windows"));
+        Assert.Equal(@"C:\Windows", ExecutableResolver.NormalizeWindowsPath("C:/Windows"));
     }
 
     [Fact]
     public void NormalizeWindowsPath_盘符根保留尾反斜杠()
     {
-        Assert.Equal(@"C:\", JobRunner.NormalizeWindowsPath("C:/"));
-        Assert.Equal(@"C:\", JobRunner.NormalizeWindowsPath("C:\\"));
+        Assert.Equal(@"C:\", ExecutableResolver.NormalizeWindowsPath("C:/"));
+        Assert.Equal(@"C:\", ExecutableResolver.NormalizeWindowsPath("C:\\"));
     }
 
     [Fact]
     public void NormalizeWindowsPath_null或空返回null()
     {
-        Assert.Null(JobRunner.NormalizeWindowsPath(null));
-        Assert.Null(JobRunner.NormalizeWindowsPath(""));
+        Assert.Null(ExecutableResolver.NormalizeWindowsPath(null));
+        Assert.Null(ExecutableResolver.NormalizeWindowsPath(""));
     }
 
     [Fact]
@@ -54,19 +54,19 @@ public class JobRunnerResolveTests
     {
         // "C:" 在 Win32 语义里是「C 盘的当前目录」，不是根。
         // 静默当成根会改变语义，所以这里补成 "C:\"。
-        Assert.Equal(@"C:\", JobRunner.NormalizeWindowsPath("C:"));
+        Assert.Equal(@"C:\", ExecutableResolver.NormalizeWindowsPath("C:"));
     }
 
     [Fact]
     public void NormalizeWindowsPath_已规范路径不变()
     {
-        Assert.Equal(@"D:\projects\x", JobRunner.NormalizeWindowsPath(@"D:\projects\x"));
+        Assert.Equal(@"D:\projects\x", ExecutableResolver.NormalizeWindowsPath(@"D:\projects\x"));
     }
 
     [Fact]
     public void NormalizeWindowsPath_UNC路径保留双反斜杠()
     {
-        var result = JobRunner.NormalizeWindowsPath(@"\\server\share\dir");
+        var result = ExecutableResolver.NormalizeWindowsPath(@"\\server\share\dir");
         Assert.StartsWith(@"\\server\share", result);
     }
 
@@ -78,7 +78,7 @@ public class JobRunnerResolveTests
         // 与 libuv 的 windowsFileNameStart / 扩展名补全一致：
         // .com 在前（历史上 .com 是命令程序）。
         // 顺序若反了，同一个名字在两套实现里会解析到不同文件 → A/B 立刻红。
-        var candidates = JobRunner.BuildExecutableCandidates("python");
+        var candidates = ExecutableResolver.BuildExecutableCandidates("python");
 
         Assert.Equal(["python.com", "python.exe"], candidates);
     }
@@ -86,7 +86,7 @@ public class JobRunnerResolveTests
     [Fact]
     public void BuildExecutableCandidates_自带扩展名时原样名字排第一()
     {
-        var candidates = JobRunner.BuildExecutableCandidates("python.exe");
+        var candidates = ExecutableResolver.BuildExecutableCandidates("python.exe");
 
         Assert.Equal("python.exe", candidates[0]);
         Assert.Contains("python.exe.com", candidates);
@@ -97,7 +97,7 @@ public class JobRunnerResolveTests
     public void BuildExecutableCandidates_尾随点的处理()
     {
         // Win32 会忽略文件名末尾的点。"python." 不该拼成 "python..com"。
-        var candidates = JobRunner.BuildExecutableCandidates("python.");
+        var candidates = ExecutableResolver.BuildExecutableCandidates("python.");
 
         Assert.Contains("python.com", candidates);
         Assert.DoesNotContain("python..com", candidates);
@@ -107,7 +107,7 @@ public class JobRunnerResolveTests
     public void BuildExecutableCandidates_单点文件名视为无扩展名()
     {
         // "." 本身不是合法扩展名，应被当成无扩展名处理。
-        var candidates = JobRunner.BuildExecutableCandidates(".");
+        var candidates = ExecutableResolver.BuildExecutableCandidates(".");
         Assert.All(candidates, c => Assert.False(c.StartsWith(".."), $"不应产生 {c}"));
     }
 
@@ -116,7 +116,7 @@ public class JobRunnerResolveTests
     [Fact]
     public void BuildSearchRoots_带路径时只搜该目录()
     {
-        var roots = JobRunner.BuildSearchRoots(true, @"C:\bin", null);
+        var roots = ExecutableResolver.BuildSearchRoots(true, @"C:\bin", null);
 
         Assert.Single(roots);
         Assert.Equal(@"C:\bin", roots[0]);
@@ -126,7 +126,7 @@ public class JobRunnerResolveTests
     public void BuildSearchRoots_不带路径时含cwd与PATH目录()
     {
         var env = new Dictionary<string, string> { ["PATH"] = @"C:\a;C:\b" };
-        var roots = JobRunner.BuildSearchRoots(false, "", env);
+        var roots = ExecutableResolver.BuildSearchRoots(false, "", env);
 
         Assert.Contains("", roots);                       // cwd 占位
         Assert.Contains(@"C:\a", roots);
@@ -139,7 +139,7 @@ public class JobRunnerResolveTests
         // host 传下来的 env 是权威来源；进程环境只是兜底。
         // 混用会导致「runner 找得到、node 找不到」的解析分歧。
         var env = new Dictionary<string, string> { ["PATH"] = @"Z:\host-path" };
-        var roots = JobRunner.BuildSearchRoots(false, "", env);
+        var roots = ExecutableResolver.BuildSearchRoots(false, "", env);
 
         Assert.Contains(@"Z:\host-path", roots);
     }
@@ -150,7 +150,7 @@ public class JobRunnerResolveTests
     public void ResolveExecutable_显式路径存在时直接命中()
     {
         var exe = Path.Combine(Environment.SystemDirectory, "cmd.exe");
-        var resolved = JobRunner.ResolveExecutable(exe, null, null);
+        var resolved = ExecutableResolver.ResolveExecutable(exe, null, null);
 
         Assert.NotNull(resolved);
         Assert.Equal(exe, resolved, ignoreCase: true);
@@ -163,7 +163,7 @@ public class JobRunnerResolveTests
         {
             ["PATH"] = Environment.SystemDirectory,
         };
-        var resolved = JobRunner.ResolveExecutable("cmd", null, env);
+        var resolved = ExecutableResolver.ResolveExecutable("cmd", null, env);
 
         Assert.NotNull(resolved);
         Assert.EndsWith("cmd.exe", resolved, StringComparison.OrdinalIgnoreCase);
@@ -172,20 +172,20 @@ public class JobRunnerResolveTests
     [Fact]
     public void ResolveExecutable_不存在的程序返回null()
     {
-        Assert.Null(JobRunner.ResolveExecutable("no-such-exe-xyz-123", null, null));
+        Assert.Null(ExecutableResolver.ResolveExecutable("no-such-exe-xyz-123", null, null));
     }
 
     [Fact]
     public void ResolveExecutable_空程序名返回null()
     {
-        Assert.Null(JobRunner.ResolveExecutable("", null, null));
+        Assert.Null(ExecutableResolver.ResolveExecutable("", null, null));
     }
 
     [Fact]
     public void ResolveExecutable_目录路径返回null()
     {
         // 指向一个目录（而非文件）不能算命中 —— 否则 CreateProcessW 会失败。
-        Assert.Null(JobRunner.ResolveExecutable(Environment.SystemDirectory, null, null));
+        Assert.Null(ExecutableResolver.ResolveExecutable(Environment.SystemDirectory, null, null));
     }
 
     // ============ 文件名起点 / PATH 拆分 / 拼接 ============
@@ -197,13 +197,13 @@ public class JobRunnerResolveTests
     [InlineData(@"\\server\share\cmd.exe", 15)]
     public void WindowsFileNameStart_定位文件名起点(string command, int expected)
     {
-        Assert.Equal(expected, JobRunner.WindowsFileNameStart(command));
+        Assert.Equal(expected, ExecutableResolver.WindowsFileNameStart(command));
     }
 
     [Fact]
     public void SplitPath_按分号拆分并去空()
     {
-        var parts = JobRunner.SplitPath(@"C:\a;;C:\b;").ToList();
+        var parts = ExecutableResolver.SplitPath(@"C:\a;;C:\b;").ToList();
 
         Assert.Equal([@"C:\a", @"C:\b"], parts);
     }
@@ -215,35 +215,35 @@ public class JobRunnerResolveTests
     [Fact]
     public void WindowsSearchPathJoin_root为空且cwd为空时返回空()
     {
-        Assert.Equal("", JobRunner.WindowsSearchPathJoin("", "cmd", ""));
+        Assert.Equal("", ExecutableResolver.WindowsSearchPathJoin("", "cmd", ""));
     }
 
     [Fact]
     public void WindowsSearchPathJoin_root为空时退回cwd并补尾分隔符()
     {
-        Assert.Equal(@"C:\work\", JobRunner.WindowsSearchPathJoin("", "cmd", @"C:\work"));
+        Assert.Equal(@"C:\work\", ExecutableResolver.WindowsSearchPathJoin("", "cmd", @"C:\work"));
     }
 
     [Fact]
     public void WindowsSearchPathJoin_root末尾补一个反斜杠()
     {
-        Assert.Equal(@"C:\bin\", JobRunner.WindowsSearchPathJoin(@"C:\bin", "cmd", ""));
+        Assert.Equal(@"C:\bin\", ExecutableResolver.WindowsSearchPathJoin(@"C:\bin", "cmd", ""));
     }
 
     [Fact]
     public void WindowsSearchPathJoin_root已带尾分隔符时不重复()
     {
         // 反斜杠与正斜杠都算分隔符：host 传来的 PATH 常是混合写法。
-        Assert.Equal(@"C:\bin\", JobRunner.WindowsSearchPathJoin(@"C:\bin\", "cmd", ""));
-        Assert.Equal(@"C:\bin\", JobRunner.WindowsSearchPathJoin(@"C:\bin/", "cmd", ""));
+        Assert.Equal(@"C:\bin\", ExecutableResolver.WindowsSearchPathJoin(@"C:\bin\", "cmd", ""));
+        Assert.Equal(@"C:\bin\", ExecutableResolver.WindowsSearchPathJoin(@"C:\bin/", "cmd", ""));
     }
 
     [Fact]
     public void WindowsSearchPathJoin_与ProbeCandidates配合能拼出完整路径()
     {
         // 这两者的契约是组合出来的：前缀 + 候选名 = 完整路径。
-        var prefix = JobRunner.WindowsSearchPathJoin(Environment.SystemDirectory, "cmd", "");
-        var found = JobRunner.ProbeCandidates(prefix, ["cmd.exe"]);
+        var prefix = ExecutableResolver.WindowsSearchPathJoin(Environment.SystemDirectory, "cmd", "");
+        var found = ExecutableResolver.ProbeCandidates(prefix, ["cmd.exe"]);
 
         Assert.NotNull(found);
         Assert.True(Path.IsPathRooted(found));
@@ -256,7 +256,7 @@ public class JobRunnerResolveTests
         // Windows 环境变量名大小写不敏感；用 Ordinal 比较会漏掉 host 传的 "Path"。
         var env = new Dictionary<string, string> { ["Path"] = "x" };
 
-        Assert.Equal("x", JobRunner.GetEnvValue(env, "PATH"));
+        Assert.Equal("x", ExecutableResolver.GetEnvValue(env, "PATH"));
     }
 
     [Fact]
@@ -264,14 +264,14 @@ public class JobRunnerResolveTests
     {
         var env = new Dictionary<string, string> { ["PATH"] = "upper", ["Path"] = "mixed" };
 
-        Assert.Equal("upper", JobRunner.GetEnvValue(env, "PATH"));
+        Assert.Equal("upper", ExecutableResolver.GetEnvValue(env, "PATH"));
     }
 
     [Fact]
     public void GetEnvValue_缺失返回null()
     {
-        Assert.Null(JobRunner.GetEnvValue(new Dictionary<string, string>(), "NOPE"));
-        Assert.Null(JobRunner.GetEnvValue(null, "PATH"));
+        Assert.Null(ExecutableResolver.GetEnvValue(new Dictionary<string, string>(), "NOPE"));
+        Assert.Null(ExecutableResolver.GetEnvValue(null, "PATH"));
     }
 
     // ============ ProbeCandidates ============
@@ -281,7 +281,7 @@ public class JobRunnerResolveTests
     {
         // basePath 是目录前缀（末尾带反斜杠），候选名拼在后面。
         var dir = Environment.SystemDirectory.TrimEnd('\\') + "\\";
-        var found = JobRunner.ProbeCandidates(dir, ["cmd.exe", "nope.exe"]);
+        var found = ExecutableResolver.ProbeCandidates(dir, ["cmd.exe", "nope.exe"]);
 
         Assert.NotNull(found);
         Assert.EndsWith("cmd.exe", found, StringComparison.OrdinalIgnoreCase);
@@ -292,7 +292,7 @@ public class JobRunnerResolveTests
     {
         var dir = Environment.SystemDirectory.TrimEnd('\\') + "\\";
         // 两个都真实存在时，必须返回列表里靠前的那个（顺序即 libuv 的解析顺序）。
-        var found = JobRunner.ProbeCandidates(dir, ["cmd.exe", "where.exe"]);
+        var found = ExecutableResolver.ProbeCandidates(dir, ["cmd.exe", "where.exe"]);
 
         Assert.NotNull(found);
         Assert.EndsWith("cmd.exe", found, StringComparison.OrdinalIgnoreCase);
@@ -302,7 +302,7 @@ public class JobRunnerResolveTests
     public void ProbeCandidates_全部不存在返回null()
     {
         var dir = Environment.SystemDirectory.TrimEnd('\\') + "\\";
-        Assert.Null(JobRunner.ProbeCandidates(dir, ["nope-a.exe", "nope-b.exe"]));
+        Assert.Null(ExecutableResolver.ProbeCandidates(dir, ["nope-a.exe", "nope-b.exe"]));
     }
 
     // ============ 错误码映射（对应 node 的 asSpawnError）============

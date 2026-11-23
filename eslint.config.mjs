@@ -115,9 +115,14 @@ export default [
     ],
   },
 
-  // 基础推荐规则（所有 JS/MJS 都适用）
+  // 基础推荐规则（所有 JS/MJS/CJS 都适用）
+  //
+  // 必须包含 `*.cjs`：这是**唯一**一处挂 BASE_RULES 的 block，漏了 cjs 就等于
+  // `bench/load-matrix.cjs` 一条正确性规则都没有 —— 它仍会被 `eslint .` 扫到，
+  // 所以不会报错、也不会出现在输出里，看起来是绿的，实际上什么都没查。
+  // 这种"零规则绿"是本项目最怕的失效模式（与 Gate 3 的 fail-open 同类）。
   {
-    files: ['**/*.js', '**/*.mjs'],
+    files: ['**/*.js', '**/*.mjs', '**/*.cjs'],
     languageOptions: { ecmaVersion: 'latest' },
     rules: BASE_RULES,
   },
@@ -179,12 +184,49 @@ export default [
   },
 
   // 仓库测试与基准（CJS，且允许更多自由度）
+  //
+  // 注意同时匹配 `.cjs`：`bench/load-matrix.cjs` 是一个真实存在的 CJS 基准，
+  // 早先这里只写 `*.js`，于是它一条规则都没拿到 —— 被检查了，但检查是空的。
+  // `test/eslint-config-coverage-selftest.mjs` 会守住这条。
   {
-    files: ['test/**/*.js', 'bench/**/*.js'],
+    files: [
+      'test/**/*.js', 'test/**/*.cjs',
+      'bench/**/*.js', 'bench/**/*.cjs',
+    ],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',
       globals: { ...NODE_GLOBALS, ...COMMONJS_GLOBALS },
+    },
+    rules: TEST_RULES,
+  },
+
+
+  // 仓库测试与基准里的 ESM（.mjs）
+  //
+  // 为什么必须单独一个 block：上面那个只匹配 `*.js` / `*.cjs`，两个 `.mjs` 自测文件
+  // （cast-audit-selftest / contract-coverage-selftest）于是落到兜底 block
+  // —— 那里既没有 node 全局变量（20 条 no-undef），又按 CJS 解析
+  // （`import`/`export` 直接报解析错误）。
+  //
+  // 后果不是"两条无关告警"：`.githooks/pre-commit` 与 `test:all` 都以
+  // ESLint 为入口，这一块红了等于**项目的全量自查入口是坏的**。
+  //
+  // 怎么防止再漏：`npm run test:eslint-config` 会断言「仓库里每个 JS 文件都被
+  // 某个 block 覆盖」，并且额外锚定 `.mjs` 必须拿到 Node 全局变量
+  // （AC-EC-1b）—— 后者是实测补上的：`.mjs` 扩展名本身就会让 ESLint 按 module
+  // 解析，所以"解析模式"不会因为少这个 block 而变红，真正丢的是 globals。
+  //
+  // ESM block 必须在 CJS block 之后，否则 .mjs 会被按 CJS 解析。
+  //
+  // 不含 COMMONJS_GLOBALS：ESM 里没有 require/module/exports，
+  // 如果真的写了（Node 20+ 的部分 ESM 里 require 可用）应该报出来。
+  {
+    files: ['test/**/*.mjs', 'bench/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: NODE_GLOBALS,
     },
     rules: TEST_RULES,
   },

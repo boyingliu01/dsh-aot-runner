@@ -95,3 +95,6 @@ bench/node-tuning/sz2-*/
 # 临时草稿（issue 正文、探针脚本等）。这类文件曾被误 add 进提交 ——
 # 它们不是产物，也不该出现在版本库里，但名字太随意容易被 `git add -A` 带走。
 .tmp-*
+
+# xp-gate / c8 的覆盖率输出（每次 dotnet test 都会产出，不是源码）
+coverage/

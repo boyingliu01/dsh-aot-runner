@@ -16,3 +16,6 @@
 {"timestamp":"2026-11-02T16:53:16.077Z","gate":"gate-8","name":"secret-scanning","status":"PASS","details":"0","duration_ms":819}
 {"timestamp":"2026-11-02T16:53:17.633Z","gate":"gate-9","name":"sast-security","status":"SKIP","details":"0","duration_ms":116}
 {"timestamp":"2026-11-06T04:26:56.419Z","gate":"gate-3","name":"complexity","status":"SKIP","details":"0","duration_ms":478}
+{"timestamp":"2026-11-22T03:56:52.450Z","gate_id":"gate-7","gate_name":"iac-security","passed":true,"issues_found":0,"duration_ms":0}
+{"timestamp":"2026-11-22T03:56:57.304Z","gate_id":"gate-8","gate_name":"secret-scanning","passed":true,"issues_found":0,"duration_ms":1350}
+{"timestamp":"2026-11-22T04:41:01.510Z","gate_id":"gate-8","gate_name":"secret-scanning","passed":true,"issues_found":0,"duration_ms":1143}

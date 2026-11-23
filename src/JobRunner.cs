@@ -10,7 +10,7 @@ namespace DshAotRunner;
 /// Windows Job runner：把一个目标命令放进 Job Object，使其可整树回收。
 /// 语义基线见 RUNNER-SPEC.md。
 /// </summary>
-internal sealed class JobRunner : IDisposable
+internal sealed partial class JobRunner : IDisposable
 {
     /// <summary>
     /// 等待超时上界（毫秒）。
@@ -243,22 +243,12 @@ internal sealed class JobRunner : IDisposable
         if (_terminateRequested)
         {
             // terminate 已到达但尚未有 job：按规范视为已终止
-            PublishResult(new ErrorResult { Error = new SerializedError { Name = "Error", Message = "runner has been terminated" } });
+            PublishTerminatedBeforeStart();
             return;
         }
 
-        SafeJobHandle job;
-        try
-        {
-            job = CreateJob();
-            job.EnableKillOnClose();                  // RUNNER-SPEC §5.3 步骤 1-2
-        }
-        catch (Win32Exception ex)
-        {
-            PublishResult(MakeJobCreateError(ex));
-            return;
-        }
-        _job = job;
+        var job = TryCreateOwnedJob();
+        if (job is null) return;                      // 错误已投递
 
         try
         {
@@ -271,27 +261,72 @@ internal sealed class JobRunner : IDisposable
             return;
         }
 
-        // 起轮询（RUNNER-SPEC §7：10ms）
-        var poller = new Thread(PollLoop) { IsBackground = true, Name = "poll" };
-        poller.Start();
+        StartPoller();
     }
 
+    /// <summary>
+    /// terminate 先于 start 到达时的终态结果。
+    /// </summary>
+    /// <remarks>
+    /// 规范把这种情况定义为「已终止」而不是「错误」：host 侧的 terminate 是
+    /// 正常操作，只是恰好早了一步。这里仍然走 Error 形状，因为 host 侧协议只认
+    /// 这一种退出通知 —— 换形状会让 node 与 AOT 两条路径给出不同的字节。
+    /// </remarks>
+    private void PublishTerminatedBeforeStart() =>
+        PublishResult(new ErrorResult
+        {
+            Error = new SerializedError { Name = "Error", Message = "runner has been terminated" },
+        });
+
+    /// <summary>
+    /// 建 Job Object 并打开 kill-on-close；失败时投递错误并返回 null。
+    /// </summary>
+    /// <remarks>
+    /// kill-on-close 是本 runner 的核心契约（RUNNER-SPEC §5.3 步骤 1-2）：
+    /// 少了它，runner 崩溃时 target 的整棵进程树会留在系统里。
+    /// </remarks>
+    private SafeJobHandle? TryCreateOwnedJob()
+    {
+        SafeJobHandle job;
+        try
+        {
+            job = CreateJob();
+            job.EnableKillOnClose();
+        }
+        catch (Win32Exception ex)
+        {
+            PublishResult(MakeJobCreateError(ex));
+            return null;
+        }
+        _job = job;
+        return job;
+    }
+
+    /// <summary>
+    /// 起轮询线程（RUNNER-SPEC §7）。后台线程，进程退出不会等它。
+    /// </summary>
+    private void StartPoller() =>
+        new Thread(PollLoop) { IsBackground = true, Name = "poll" }.Start();
+
+    /// <summary>
+    /// 把 start 请求变成一次真实的进程启动：解析 → 构造 → 继承控制 → 起进程。
+    /// </summary>
+    /// <remarks>
+    /// 这里只保留"顺序"和"任何一步失败就结束"这两件事，每一步自己的细节都在
+    /// 各自的方法里。此前它是一个 65 行的方法，读的人要同时跟踪 5 个局部变量的
+    /// 生命周期，才能确认第 4 步用的是第 2 步的哪个产物。
+    /// </remarks>
     private void SpawnTarget(StartRequest req, SafeJobHandle job)
     {
-        // ---- 1. 构建命令行 ----
+        // ---- 1. 命令行 ----
         // CreateProcessW 的第一个参数为 NULL 时，用命令行首 token 查找可执行文件。
         // 若该 token 不含路径分隔符且不在 PATH 中，会返回 ERROR_FILE_NOT_FOUND(2)。
-        // 这里先用 .NET 的查找逻辑解析成绝对路径，避免依赖 CreateProcessW 的搜索策略。
+        // 所以这里先解析成绝对路径，不依赖 CreateProcessW 自己的搜索策略。
         string cmdline;
-        using (Trace.Measure("build-cmdline"))
-        {
-            cmdline = BuildCommandLine(_argv);
-        }
+        using (Trace.Measure("build-cmdline")) cmdline = ExecutableResolver.BuildCommandLine(_argv);
+
         string? appName;
-        using (Trace.Measure("resolve-exe"))
-        {
-            appName = ResolveExecutable(_argv[0], req.Cwd, req.Env);
-        }
+        using (Trace.Measure("resolve-exe")) appName = ExecutableResolver.ResolveExecutable(_argv[0], req.Cwd, req.Env);
         if (appName is null)
         {
             // 与 node 一致：候选全部不存在 → ENOENT，文本对齐 libuv/Node 的 spawn 错误
@@ -300,45 +335,57 @@ internal sealed class JobRunner : IDisposable
             return;
         }
 
-        // ---- 2. 构建环境块（CREATE_UNICODE_ENVIRONMENT → UTF-16）----
-        // 注意：DSH_SUBPROCESS_CONTROL=pipe 由 **host** 注入（runner-launch 的
+        // ---- 2. 环境块（CREATE_UNICODE_ENVIRONMENT → UTF-16）----
+        // DSH_SUBPROCESS_CONTROL=pipe 由 **host** 注入（runner-launch 的
         // targetEnvironment / controlEnvironment），随 start 请求的 env 一起送达，
         // runner 只负责原样透传。runner 自己再注入一次会造成与 node 的分歧 ——
         // 那时 target 会看到一个 host 并没有设置的标记。
         byte[] envBlock;
-        using (Trace.Measure("env-block"))
-        {
-            envBlock = BuildEnvironmentBlock(req.Env);
-        }
+        using (Trace.Measure("env-block")) envBlock = EnvironmentBlock.BuildEnvironmentBlock(req.Env);
 
-        // ---- 3. 把 target 的 stdio 接到 host 传入的通道 ----
+        // ---- 3. target 的 stdio 接到 host 传入的通道 ----
         StdioHandles stdio;
-        using (Trace.Measure("resolve-stdio"))
-        {
-            stdio = ResolveStdioHandles();
-        }
+        using (Trace.Measure("resolve-stdio")) stdio = ResolveStdioHandles();
 
-        // ---- 3a. control channel（Issue #2）----
-        var controlRequested = req.Control == "pipe";
-        var hControl = ResolveControlHandle(controlRequested);
-        if (controlRequested && !IsValid(hControl))
-        {
-            // host 声明了 control 却没传可用的 fd 7：这是 host 侧契约违约，
-            // 不能静默降级成「无 control」，否则 target 会永远等一条不存在的通道。
-            PublishControlMissingError();
-            return;
-        }
+        // ---- 4. control channel + 精确控制继承 ----
+        if (!TryResolveControlTargets(req, stdio, out var hControl, out var inheritToggled)) return;
 
-        // ---- 3b. 精确控制继承：只放行 target 需要的句柄 ----
-        var inheritToggled = EnableInheritanceFor(CollectTargetHandles(stdio, controlRequested, hControl));
-        LaunchWithDescriptorTable(req, job, appName, cmdline, envBlock, stdio, hControl, inheritToggled);
+        LaunchWithDescriptorTable(new LaunchPlan(
+            req, job, appName, cmdline, envBlock, stdio, hControl, inheritToggled));
 
         // 说明：早期版本曾在这里用 DSH_AOT_SUPPRESS=1 开关去清 fd 0/1/2 的继承标志。
         // 那是实验残留 —— runner 是 console 程序，fd 0/1/2 由 host 映射到 target 的
         // stdout/stderr，动它们会连带关掉输出通道，而抑制继承本来就不依赖这一步。
         // 真正保证 target 拿不到协议句柄的是：fd 4/5/6 之外不额外打开可继承句柄，
         // 且 CreateProcessW 返回后立刻在 finally 里恢复所有被改过的标志。
+    }
 
+    /// <summary>
+    /// 解析 control 句柄并把 target 需要的句柄标成可继承。
+    /// </summary>
+    /// <returns>
+    /// false 表示 host 声明了 control 却没给可用的 fd 7 —— 这是 host 侧契约违约，
+    /// 错误已投递，调用方必须就此结束。不能静默降级成「无 control」，
+    /// 否则 target 会永远等一条不存在的通道。
+    /// </returns>
+    private bool TryResolveControlTargets(
+        StartRequest req,
+        StdioHandles stdio,
+        out IntPtr hControl,
+        out List<(IntPtr Handle, bool WasInheritable)> inheritToggled)
+    {
+        var controlRequested = req.Control == "pipe";
+        hControl = ResolveControlHandle(controlRequested);
+        inheritToggled = [];
+
+        if (controlRequested && !IsValid(hControl))
+        {
+            PublishControlMissingError();
+            return false;
+        }
+
+        inheritToggled = EnableInheritanceFor(CollectTargetHandles(stdio, controlRequested, hControl));
+        return true;
     }
 
     /// <summary>
@@ -385,13 +432,30 @@ internal sealed class JobRunner : IDisposable
     /// 而「分配-启动-释放」这段必须成对出现的生命周期收在一个方法里，
     /// 减少有人在中间插入 early return 而漏掉 FreeHGlobal 的机会。
     /// </remarks>
-    private void LaunchWithDescriptorTable(
-        StartRequest req, SafeJobHandle job, string appName, string cmdline,
-        byte[] envBlock, StdioHandles stdio, IntPtr hControl,
-        List<(IntPtr Handle, bool WasInheritable)> inheritToggled)
+    /// <summary>
+    /// 一次启动所需的全部已解析产物。
+    /// </summary>
+    /// <remarks>
+    /// 用记录打包而不是继续加参数：这个方法此前已经 8 个参数（xp-gate 的
+    /// too-many-params 上限是 7），而它们全都是「上游几步算出来、这里只是往下传」
+    /// 的中间产物，没有一个是真正的配置项。打成一条记录后，新增一个产物
+    /// 只会在记录上多一个字段，调用链不会随之变长。
+    /// </remarks>
+    private readonly record struct LaunchPlan(
+        StartRequest Request,
+        SafeJobHandle Job,
+        string AppName,
+        string Cmdline,
+        byte[] EnvBlock,
+        StdioHandles Stdio,
+        IntPtr ControlHandle,
+        List<(IntPtr Handle, bool WasInheritable)> InheritToggled);
+
+    private void LaunchWithDescriptorTable(LaunchPlan plan)
     {
         // CRT 描述符表：只有 control 请求时才需要（其余情况走默认标准句柄表）
-        var descriptorTable = CrtDescriptorTable.Encode(stdio.In, stdio.Out, stdio.Err, hControl);
+        var descriptorTable = CrtDescriptorTable.Encode(
+            plan.Stdio.In, plan.Stdio.Out, plan.Stdio.Err, plan.ControlHandle);
         var descriptorPtr = IntPtr.Zero;
         if (descriptorTable is not null)
         {
@@ -399,10 +463,10 @@ internal sealed class JobRunner : IDisposable
             Marshal.Copy(descriptorTable, 0, descriptorPtr, descriptorTable.Length);
         }
 
-        var si = BuildStartupInfo(stdio, descriptorTable, descriptorPtr);
+        var si = BuildStartupInfo(plan.Stdio, descriptorTable, descriptorPtr);
         try
         {
-            LaunchProcess(req, job, appName, cmdline, envBlock, si, inheritToggled);
+            LaunchProcess(plan, si);
         }
         finally
         {
@@ -581,68 +645,85 @@ internal sealed class JobRunner : IDisposable
     ///
     /// RUNNER-SPEC §5.3 步骤 3~5。任何一步失败都会 emit 错误并 Finish()。
     /// </summary>
-    private void LaunchProcess(
-        StartRequest req,
-        SafeJobHandle job,
-        string appName,
-        string cmdline,
-        byte[] envBlock,
-        Native.STARTUPINFO si,
-        List<(IntPtr Handle, bool WasInheritable)> inheritToggled)
+    private void LaunchProcess(LaunchPlan plan, Native.STARTUPINFO si)
     {
-        var envPtr = Marshal.AllocHGlobal(envBlock.Length);
+        var envPtr = Marshal.AllocHGlobal(plan.EnvBlock.Length);
         try
         {
-            Marshal.Copy(envBlock, 0, envPtr, envBlock.Length);
+            Marshal.Copy(plan.EnvBlock, 0, envPtr, plan.EnvBlock.Length);
             var flags = Native.CREATE_SUSPENDED | Native.CREATE_UNICODE_ENVIRONMENT;
             // CreateProcessW 的 lpCurrentDirectory 必须是 Windows 路径格式（反斜杠），
             // 传入 "C:/" 这类正斜杠路径会返回 ERROR_INVALID_PARAMETER(87)。
-            var cwd = NormalizeWindowsPath(req.Cwd);
+            var cwd = ExecutableResolver.NormalizeWindowsPath(plan.Request.Cwd);
 
-            // RUNNER-SPEC §5.3 步骤 3
-            Trace.Timed($"about to CreateProcessW: {appName}");
+            Trace.Timed($"about to CreateProcessW: {plan.AppName}");
             try
             {
-                if (!CreateSuspendedProcess(appName, cmdline, envPtr, cwd, flags, si, out var pi))
-                {
-                    Finish();
-                    return;
-                }
-
-                _process = new SafeKernelHandle(pi.hProcess);
-                _thread = new SafeKernelHandle(pi.hThread);
-                _targetPid = pi.dwProcessId;
-
-                Trace.Timed($"CreateProcessW ok, pid={pi.dwProcessId}");
-                // RUNNER-SPEC §5.3 步骤 4：先入 Job。
-                // 无条件执行 —— 曾经有一个 DSH_AOT_NOJOB=1 实验开关用来诊断，
-                // 但实测它会让 terminate 失效、target 进程树泄漏，属于生产路径上的
-                // 定时炸弹，已移除。Job 隔离是本 runner 的核心契约，不可绕过。
-                job.AssignProcess(pi.hProcess);
-                Trace.Timed("AssignProcessToJobObject ok");
-
-                // RUNNER-SPEC §5.3 步骤 5：再放行。
-                if (!ResumeTargetThread(pi)) return;
-
-                Trace.Timed("ResumeThread ok");
-                // 注：DSH 的 runner.js 会在 spawn 后 closeSync(4/5/6/7) 关闭自己的副本。
-                // AOT 版暂不照做 —— 现有 24 项 A/B 在不关的情况下已与 node 行为一致，
-                // 贸然改动会影响已稳定的输出通道语义。见 Issue #2 的后续评估。
+                LaunchSuspended(plan, si, envPtr, cwd, flags);
             }
             finally
             {
-                // 恢复句柄继承标志：CreateProcessW 一返回就没用了，
-                // 留着会污染 runner 后续创建的其他 target。
-                foreach (var (h, wasInheritable) in inheritToggled)
-                {
-                    if (!wasInheritable)
-                        Native.SetHandleInformation(h, Native.HANDLE_FLAG_INHERIT, 0);
-                }
+                RestoreInheritance(plan.InheritToggled);
             }
         }
         finally
         {
             Marshal.FreeHGlobal(envPtr);
+        }
+    }
+
+    /// <summary>
+    /// RUNNER-SPEC §5.3 步骤 3~5：创建挂起进程 → 入 Job → 放行线程。
+    /// </summary>
+    /// <remarks>
+    /// 三步的顺序不可交换：
+    ///   - 挂起创建：进程在入 Job 之前不能跑起来，否则它可能已经 spawn 出孙进程，
+    ///     那些孙进程会漏出 Job 的回收范围。
+    ///   - 先入 Job 再放行：反过来会有一段「进程已运行但不在 Job 里」的窗口，
+    ///     runner 在这段窗口里崩溃就泄漏整棵树。
+    /// </remarks>
+    private void LaunchSuspended(LaunchPlan plan, Native.STARTUPINFO si, IntPtr envPtr, string? cwd, uint flags)
+    {
+        if (!CreateSuspendedProcess(plan.AppName, plan.Cmdline, envPtr, cwd, flags, si, out var pi))
+        {
+            Finish();
+            return;
+        }
+
+        _process = new SafeKernelHandle(pi.hProcess);
+        _thread = new SafeKernelHandle(pi.hThread);
+        _targetPid = pi.dwProcessId;
+        Trace.Timed($"CreateProcessW ok, pid={pi.dwProcessId}");
+
+        // 步骤 4：先入 Job。
+        // 无条件执行 —— 曾经有一个 DSH_AOT_NOJOB=1 实验开关用来诊断，
+        // 但实测它会让 terminate 失效、target 进程树泄漏，属于生产路径上的
+        // 定时炸弹，已移除。Job 隔离是本 runner 的核心契约，不可绕过。
+        plan.Job.AssignProcess(pi.hProcess);
+        Trace.Timed("AssignProcessToJobObject ok");
+
+        // 步骤 5：再放行。
+        if (!ResumeTargetThread(pi)) return;
+        Trace.Timed("ResumeThread ok");
+
+        // 注：DSH 的 runner.js 会在 spawn 后 closeSync(4/5/6/7) 关闭自己的副本。
+        // AOT 版暂不照做 —— 现有 24 项 A/B 在不关的情况下已与 node 行为一致，
+        // 贸然改动会影响已稳定的输出通道语义。见 Issue #2 的后续评估。
+    }
+
+    /// <summary>
+    /// 把 <see cref="EnableInheritanceFor"/> 改过的继承标志恢复原样。
+    /// </summary>
+    /// <remarks>
+    /// 必须无条件执行（放在 finally 里）：CreateProcessW 一旦返回，这些标志就没有
+    /// 用处了，留着会让 runner 后续创建的 target 继承本不该继承的句柄。
+    /// </remarks>
+    private static void RestoreInheritance(List<(IntPtr Handle, bool WasInheritable)> toggled)
+    {
+        foreach (var (handle, wasInheritable) in toggled)
+        {
+            if (!wasInheritable)
+                Native.SetHandleInformation(handle, Native.HANDLE_FLAG_INHERIT, 0);
         }
     }
 
@@ -700,505 +781,7 @@ internal sealed class JobRunner : IDisposable
         return false;
     }
 
-    /// <summary>把路径规范化为 Windows 反斜杠格式；空值返回 null（表示继承当前目录）。</summary>
-    /// <remarks>
-    /// 三条独立规则依次应用：统一分隔符 → 去掉末尾多余反斜杠 → 裸盘符补根斜杠。
-    /// 每条规则都写成单独一行并在注释里点明「为什么」，比串成一串条件判断更容易核对。
-    /// </remarks>
-    internal static string? NormalizeWindowsPath(string? path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return null;
-
-        // 1) 统一分隔符：Windows API 与 node 侧都用反斜杠
-        var normalized = path.Replace('/', '\\');
-
-        // 2) 去掉末尾多余的反斜杠（但保留根路径如 "C:\"）
-        if (normalized.Length > 3 && normalized.EndsWith('\\'))
-            normalized = normalized.TrimEnd('\\');
-
-        // 3) 裸盘符（"C:"）补成 "C:\"，否则它表示「盘符当前目录」而非根目录
-        if (IsBareDrive(normalized)) normalized += '\\';
-
-        return normalized;
-    }
-
-    /// <summary>是否是没有任何路径部分的裸盘符（形如 <c>C:</c>）。</summary>
-    private static bool IsBareDrive(string path) => path.Length == 2 && path[1] == ':';
-
     private static bool IsValid(IntPtr h) => h != IntPtr.Zero && h != new IntPtr(-1);
-
-    /// <summary>
-    /// 把 argv[0] 解析成绝对路径，语义与 @deepseek-ai/dsh-subprocess-local 的
-    /// <c>resolveWindowsExecutable</c> 逐项对齐（见 runner-launch-*.js）。
-    ///
-    /// 对齐要点（A/B 字节级一致性要求，任何偏离都会让 node 与 AOT 两条路径
-    /// 对同一个 argv 得出不同结论）：
-    ///   1. 候选扩展名只有 .com 和 .exe，**且 .com 优先** —— 不含 .bat/.cmd。
-    ///      例：npm 只有 npm.cmd，因此 node 与 AOT 都必须解析失败（ENOENT），
-    ///      而不能由 AOT 单方面补 .cmd 让它跑起来。
-    ///   2. 自带扩展名（点号后至少 1 字符）时，只检查原样文件名一次。
-    ///   3. 不含路径分隔符时，先搜 cwd（受 NODEFAULTCURRENTDIRECTORYINEXEPATH 控制），
-    ///      再按 PATH 顺序搜。
-    ///   4. 全部候选都不存在 → 返回 null，由调用方产出 ENOENT 错误，
-    ///      而不是把裸名交给 CreateProcessW（那会产生不同的错误文本）。
-    /// </summary>
-    internal static string? ResolveExecutable(string program, string? cwd, Dictionary<string, string>? env)
-    {
-        if (string.IsNullOrEmpty(program)) return null;
-
-        // windowsFileNameStart：定位文件名起始处（跳过盘符和目录部分）
-        var nameStart = WindowsFileNameStart(program);
-        var directory = program.Substring(0, nameStart);
-        var name = program.Substring(nameStart);
-
-        var candidates = BuildExecutableCandidates(name);
-        var roots = BuildSearchRoots(nameStart != 0, directory, env);
-
-        foreach (var root in roots)
-        {
-            var basePath = WindowsSearchPathJoin(root, name, cwd ?? "");
-            var found = ProbeCandidates(basePath, candidates);
-            if (found is not null) return found;
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// 候选名顺序：自带扩展名的原样名 → .com → .exe（与 libuv 一致）。
-    /// </summary>
-    internal static List<string> BuildExecutableCandidates(string name)
-    {
-        // 扩展名判定：点号存在且不是最后一个字符
-        var dot = name.IndexOf('.');
-        var hasExtension = dot >= 0 && dot < name.Length - 1;
-        var separator = name.EndsWith('.') ? "" : ".";
-
-        var candidates = new List<string>(3);
-        if (hasExtension) candidates.Add(name);
-        candidates.Add(name + separator + "com");
-        candidates.Add(name + separator + "exe");
-        return candidates;
-    }
-
-    /// <summary>
-    /// 搜索根：带路径 → 只有该目录；不带路径 → cwd（可禁用）+ 各 PATH 目录。
-    /// </summary>
-    internal static List<string> BuildSearchRoots(bool hasPath, string directory, Dictionary<string, string>? env)
-    {
-        var roots = new List<string>(8);
-        if (hasPath)
-        {
-            roots.Add(directory);
-            return roots;
-        }
-
-        // 本进程环境决定是否搜索 cwd（与 node 的 currentEnv 视角一致）
-        var noDefaultCwd = Environment.GetEnvironmentVariable("NODEFAULTCURRENTDIRECTORYINEXEPATH");
-        if (noDefaultCwd is null) roots.Add("");
-
-        roots.AddRange(SplitPath(GetEnvValue(env, "PATH")
-            ?? Environment.GetEnvironmentVariable("PATH") ?? ""));
-        return roots;
-    }
-
-    /// <summary>在某个基准路径下依次探测候选名，返回第一个存在的。</summary>
-    internal static string? ProbeCandidates(string basePath, List<string> candidates)
-    {
-        foreach (var candidate in candidates)
-        {
-            var full = basePath.Length == 0 ? candidate : basePath + candidate;
-            // executableCandidateExists：存在且不是目录
-            //
-            // 不需要 try/catch：实测 .NET 8 的 File.Exists 对非法字符、
-            // 超长路径、无权限路径都只返回 false，不抛异常。
-            // （.NET Framework 时代它会抛，所以老代码里常见这个兜底。）
-            if (File.Exists(full)) return full;
-        }
-        return null;
-    }
-
-    /// <summary>定位文件名在整条路径中的起始索引（跳过 "C:\dir\" 这类前缀）。</summary>
-    /// <remarks>
-    /// 从尾部向前扫到第一个分隔符或盘符冒号即可 —— 用 LastIndexOfAny 表达同一意图，
-    /// 比手写递减循环少一层「i 越界 / 提前 return」的状态。
-    /// 盘符特例（"C:name" 这种无目录写法）单独一次判断，语义更直白。
-    /// </remarks>
-    internal static int WindowsFileNameStart(string command)
-    {
-        var sep = command.LastIndexOfAny(['\\', '/']);
-        if (sep >= 0) return sep + 1;
-
-        // 无分隔符但形如 "C:name"：文件名从盘符后开始
-        // （"C:" 本身也返回 2，与原实现一致：此时 name 为空串）
-        if (command.Length >= 2 && command[1] == ':') return 2;
-
-        return 0;
-    }
-
-    /// <summary>把 PATH 拆成目录列表（分号分隔，去引号与空项）。</summary>
-    internal static IEnumerable<string> SplitPath(string pathVar)
-    {
-        foreach (var raw in pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var trimmed = raw.Trim().Trim('"');
-            if (trimmed.Length > 0) yield return trimmed;
-        }
-    }
-
-    /// <summary>按大小写不敏感取环境变量值。</summary>
-    internal static string? GetEnvValue(Dictionary<string, string>? env, string key)
-    {
-        if (env is null) return null;
-        foreach (var kv in env)
-        {
-            if (string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)) return kv.Value;
-        }
-        return null;
-    }
-
-    /// <summary>把搜索根与文件名拼成基路径；根为空时用 cwd（对齐 windowsSearchPathJoin）。</summary>
-    internal static string WindowsSearchPathJoin(string root, string name, string cwd)
-    {
-        if (root.Length == 0)
-            return cwd.Length == 0 ? "" : cwd.TrimEnd('\\', '/') + "\\";
-        return root.TrimEnd('\\', '/') + "\\";
-    }
-
-    internal static string BuildCommandLine(string[] argv)
-    {
-        var sb = new StringBuilder();
-        for (var i = 0; i < argv.Length; i++)
-        {
-            if (i > 0) sb.Append(' ');
-            AppendQuoted(sb, argv[i]);
-        }
-        return sb.ToString();
-    }
-
-    /// <summary>命令行里需要加引号的字符。静态复用，避免每次构串都分配数组。</summary>
-    private static readonly char[] QuoteRequiredChars = { ' ', '\t', '"' };
-
-    /// <summary>按 Windows 命令行解析规则加引号（CommandLineToArgvW 兼容）。</summary>
-    internal static void AppendQuoted(StringBuilder sb, string arg)
-    {
-        if (arg.Length > 0 && arg.IndexOfAny(QuoteRequiredChars) < 0)
-        {
-            sb.Append(arg);
-            return;
-        }
-        sb.Append('"');
-        var backslashes = 0;
-        foreach (var c in arg)
-        {
-            if (c == '\\') { backslashes++; continue; }
-            if (c == '"')
-            {
-                sb.Append('\\', backslashes * 2 + 1);
-                sb.Append('"');
-            }
-            else
-            {
-                sb.Append('\\', backslashes);
-                sb.Append(c);
-            }
-            backslashes = 0;
-        }
-        sb.Append('\\', backslashes * 2);
-        sb.Append('"');
-    }
-
-    internal static byte[] BuildEnvironmentBlock(Dictionary<string, string> env)
-    {
-        // CREATE_UNICODE_ENVIRONMENT 要求：
-        //   每个 "KEY=VALUE" 以 \0 结尾，整块再以一个**额外的** \0 结尾（双 null 终止）。
-        // 注意：不能用 StringBuilder + Encoding.Unicode.GetBytes —— 空 env 时
-        // 实测只得到 2 字节，导致 CreateProcessW 返回 ERROR_INVALID_PARAMETER(87)。
-        // 必须直接构造字节数组。
-        var bytes = new List<byte>(256);
-
-        void AppendWide(string s)
-        {
-            foreach (var ch in s)
-            {
-                bytes.Add((byte)(ch & 0xFF));
-                // cast-audit:ignore char 右移 8 位后必然落在 0..255
-                bytes.Add((byte)(ch >> 8));
-            }
-        }
-
-        foreach (var kv in env)
-        {
-            AppendWide(kv.Key);
-            bytes.Add((byte)'=');
-            bytes.Add(0);
-            AppendWide(kv.Value);
-            bytes.Add(0);
-            bytes.Add(0);
-            // 注意：每个变量的    是「宽字符终止符」，不是块终止符。
-        }
-
-        // 块终止符：额外再补一个宽  （双 NUL 收尾）。
-        //
-        // 空 env 时整个块就是这 2 字节 —— 但 CreateProcessW 会返回
-        // ERROR_INVALID_PARAMETER(87)。实测确认：
-        //   2 字节 → err=87，4 字节 → 成功。
-        // 所以空 env 必须补两次宽  （4 字节）。
-        //
-        // 这个分支此前产出 2 字节，意味着 **host 一旦传空 env，所有 spawn 都失败**。
-        // 现有单测当时写的是「断言 2 字节」，注释却写着「2 字节会返回 87」——
-        // 注释与断言互相矛盾，测试反而把 bug 锁住了。
-        bytes.Add(0);
-        bytes.Add(0);
-        if (bytes.Count == 2)
-        {
-            // 只有块终止符、没有任何变量 → 再补一对，凑成 4 字节。
-            bytes.Add(0);
-            bytes.Add(0);
-        }
-        return bytes.ToArray();
-    }
-
-    // ---------------- poll ----------------
-
-    /// <summary>轮询线程主体：等进展 → 处理，直到 finished。</summary>
-    private void PollLoop()
-    {
-        while (!ShouldStopPolling())
-        {
-            WaitForProgress();
-
-            try
-            {
-                (PollHook ?? Poll)();
-            }
-            catch (Exception ex)
-            {
-                PublishResult(MakePollError(ex));
-                return;
-            }
-        }
-    }
-
-    /// <summary>轮询是否该停下：已收尾或结果已投递。</summary>
-    /// <remarks>
-    /// 从 <see cref="PollLoop"/> 里抽出来，让循环条件本身读得懂「什么情况下该停」。
-    /// 顺带把这几个分支从 PollLoop 的圈复杂度里移走 —— lizard 会把
-    /// lock 块和每个 return 都算进 CCN，原来的写法在工具眼里是 21，
-    /// 而真实逻辑只有两个判断。
-    /// </remarks>
-    private bool ShouldStopPolling()
-    {
-        lock (_gate)
-        {
-            return _finished || _resultDelivered;
-        }
-    }
-
-    /// <summary>
-    /// 等一个「可能有进展」的时刻：target 退出、job 变空、或超时。
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// 原实现是无条件 <c>Thread.Sleep(10)</c>，每轮固定睡满 10ms。这个 10ms 的来历是
-    /// node 版 <c>lib/runner.js</c> 的 <c>setInterval(..., 10)</c>：Node 的定时器分辨率
-    /// 决定了它做不到更细，于是把轮询间隔当成了「协议的一部分」抄了过来。
-    /// <b>但 C# 没有这个限制。</b>
-    /// <para>
-    /// <b>关于收益的诚实记录</b>：改成事件等待后，端到端耗时<b>测不出可测量的改善</b>。
-    /// trace 显示 target 从 ResumeThread 到退出本身就要几十毫秒（<c>cmd.exe</c> 的启动成本），
-    /// 原来那 10ms 的睡眠被这段时间完全掩盖了。收益只在「target 在 poll 线程就绪之前
-    /// 就已退出」时才会显现，属少数场景。保留此实现是因为它<b>语义更正确</b>
-    /// （不无条件睡满一个周期），而不是因为测到了提速 —— 不要据此宣称性能提升。
-    /// </para>
-    /// </para>
-    /// <para>
-    /// target 的 process 句柄是可等待对象，<c>WaitForSingleObject</c> 会在它退出的瞬间返回，
-    /// 不必等满一个轮询周期。这就是本方法存在的原因：
-    /// <b>有句柄可等就等句柄，没句柄可等才睡</b>。
-    /// </para>
-    /// <para>
-    /// 保留 <see cref="PollIntervalMs"/> 作为超时上界，是因为 <see cref="Poll"/>
-    /// 还有第二个职责 —— 检查 job 是否已空（整棵进程树回收完）。「job 变空」没有对应的
-    /// 可等待句柄，只能靠周期性复查。所以超时不是遗留物，是 job 收尾路径的唯一驱动。
-    /// </para>
-    /// </remarks>
-    internal void WaitForProgress()
-    {
-        var process = _process;
-        if (!HasWaitableProcess(process))
-        {
-            // 没有可等的进程句柄（未 start / 已退出 / 已释放）时，
-            // 只能靠超时驱动 job 收尾检查。
-            Thread.Sleep(PollIntervalMs);
-            return;
-        }
-
-        // 返回值无需判别：WAIT_OBJECT_0（已退出）与 WAIT_TIMEOUT（仍在跑）
-        // 之后都走同一个 Poll()，它自己会用 GetExitCodeProcess 判定。
-        // WAIT_FAILED 同理 —— 等错了句柄不值得让 runner 崩溃，
-        // 退化成「睡满一个周期再查」即可。
-        _ = Native.WaitForSingleObject(process!.DangerousGetHandle(), (uint)PollIntervalMs);
-    }
-
-    /// <summary>
-    /// 该句柄是否值得用于等待。不可用时退化成定时轮询。
-    /// </summary>
-    /// <remarks>
-    /// 单独成静态方法的理由：这是「能否用事件驱动」的判断，与「怎么等」无关，
-    /// 因此可以在没有真实进程句柄的单元测试里直接覆盖三个边界
-    /// （null / 无效 / 已关闭），而不必构造真实进程。
-    /// </remarks>
-    internal static bool HasWaitableProcess(SafeKernelHandle? process) =>
-        process is not null && !process.IsInvalid && !process.IsClosed;
-
-    private void Poll()
-    {
-        // 先看 target 是否已退出；退出了就不必再管 job
-        if (TryPublishExit(_process)) return;
-
-        // target 还在跑（或已无 process 句柄）时，检查 job 是否已空。
-        // job 空 = 里面没有活着的进程 = 整棵进程树都已回收。
-        if (IsJobEmptiable() && _resultDelivered) Finish();
-    }
-
-    /// <summary>
-    /// job 存在且为空时释放它并返回 true；否则返回 false。
-    /// </summary>
-    /// <remarks>
-    /// 「是否为空」的四个前提（非 null / 有效 / 未关闭 / IsEmpty）本身就是一个复合判断，
-    /// 单独抽出来让 <see cref="Poll"/> 只表达「空了就收尾」这一个意图，
-    /// 而不是把四个句柄状态检查揉进主循环里。
-    /// </remarks>
-    /// <summary>
-    /// 注入一个 job 句柄 —— 仅供测试。
-    /// </summary>
-    /// <remarks>
-    /// 生产路径的 job 只能由 HandleStart 创建，但那要求真的 spawn 一个 target。
-    /// 为了单独验证 <see cref="IsJobEmptiable"/> 的四种句柄状态判断
-    /// （null / 无效 / 已关闭 / 非空），必须能直接放一个 job 进去。
-    /// </remarks>
-    internal void SetJobForTest(SafeJobHandle job) => _job = job;
-
-    /// <summary>是否已有进程句柄（target 已启动）—— 仅供测试断言。</summary>
-    internal bool HasProcessForTest => _process is not null;
-
-    /// <summary>当前 job 句柄 —— 仅供测试清理。</summary>
-    internal SafeJobHandle? JobForTest => _job;
-
-    /// <summary>创建 job 的钩子；测试可替换为「必失败」实现以覆盖 EJOBCREATE 分支。</summary>
-    internal Func<SafeJobHandle> CreateJob { get; set; } = SafeJobHandle.Create;
-
-    /// <summary>spawn 的钩子；默认就是真实的 <see cref="SpawnTarget"/>。</summary>
-    /// <remarks>
-    /// 默认值必须指向真实实现 —— 否则一旦有人忘记设置，生产路径会静默不 spawn，
-    /// 表现为「runner 起来了但 target 从未执行」。测试只在需要模拟
-    /// CreateProcessW 抛异常时才替换它。
-    /// </remarks>
-    internal Action<StartRequest, SafeJobHandle>? SpawnTargetHook { get; set; }
-
-    /// <summary>轮询钩子；默认就是真实的 <see cref="Poll"/>。</summary>
-    /// <remarks>
-    /// 主循环的异常兜底需要「Poll 抛异常」才能触发，而真实的 Poll
-    /// 只在句柄被外部破坏等极端情况下才抛。用钩子替换后即可验证：
-    /// 异常必须变成 EPOLL 错误投递给 host，而不是让 runner 静默死掉。
-    /// </remarks>
-    internal Action? PollHook { get; set; }
-
-    internal bool IsJobEmptiable()
-    {
-        var job = _job;
-        if (job is null || job.IsInvalid || job.IsClosed) return false;
-        if (!job.IsEmpty()) return false;
-
-        job.Dispose();
-        _job = null;
-        return true;
-    }
-
-    /// <summary>
-    /// target 已退出则投递 target-exit 并收尾，返回 true。
-    /// 尚未退出、或没有可用的 process 句柄时返回 false。
-    /// </summary>
-    private bool TryPublishExit(SafeKernelHandle? process)
-    {
-        if (!TryReadExitCode(process, out var code)) return false;
-
-        Trace.Timed($"target exited code={code}");
-
-        process!.Dispose();
-        _process = null;
-        // RUNNER-SPEC §6.1：投递 target-exit
-        // 不做 (int) 强转：退出码是无符号 32 位，最高位为 1 时强转会翻成负数，
-        // 而 host 侧要求 exitCode >= 0，收到负数会直接判协议非法。
-        PublishResult(new TargetExitResult { ExitCode = code });
-        return true;
-    }
-
-    /// <summary>
-    /// 读取 target 的退出码；尚未退出（含句柄不可用）时返回 false。
-    /// </summary>
-    /// <remarks>
-    /// 把「句柄是否可读」和「是否仍在运行」这两组前置判断从
-    /// <see cref="TryPublishExit"/> 里分出来，后者就只剩「退出码处理」一个意图。
-    /// </remarks>
-    internal static bool TryReadExitCode(SafeKernelHandle? process, out uint code)
-    {
-        code = 0;
-        if (process is null || process.IsInvalid || process.IsClosed) return false;
-        if (!Native.GetExitCodeProcess(process.DangerousGetHandle(), out code)) return false;
-        return code != Native.STILL_ACTIVE;
-    }
-
-    // ---------------- terminate ----------------
-
-    internal void RequestTermination()
-    {
-        lock (_gate)
-        {
-            if (_terminateRequested) return;      // 幂等（RUNNER-SPEC §4.2）
-            _terminateRequested = true;
-        }
-        TryTerminateJob(_job);
-    }
-
-    /// <summary>终止 job；失败静默吞掉。</summary>
-    /// <remarks>
-    /// terminate 与 target 正常退出天然存在竞态：target 可能刚好在这一刻退出，
-    /// 于是 TerminateJobObject 失败（job 已空）。这不是错误，
-    /// 但也不能让它把 runner 的收尾流程打断 —— 否则已经拿到的结果都投递不出去。
-    /// </remarks>
-    /// <summary>把轮询异常包装成 EPOLL 错误结果。</summary>
-    /// <remarks>
-    /// 主循环里任何未预料的异常都必须变成一条**明确的错误结果**投递给 host，
-    /// 而不是让 runner 静默死掉。host 收到 EPOLL 能立刻知道「runner 内部出错了」，
-    /// 否则只会看到子进程退出，误判成 target 自己的问题。
-    /// </remarks>
-    internal static ErrorResult MakePollError(Exception ex) => new()
-    {
-        Error = new SerializedError { Name = "Error", Message = ex.Message, Code = "EPOLL" },
-    };
-
-    internal static void TryTerminateJob(SafeJobHandle? job) =>
-        TryTerminateJob(job, h => h.Terminate(1));
-
-    /// <summary>TryTerminateJob 的接缝版本：终止动作可注入。</summary>
-    /// <remarks>
-    /// 「TerminateJobObject 抛异常」需要 target 恰好在同一刻退出，是竞态，
-    /// 无法稳定复现。这里注入一个必抛的动作来验证兜底确实吞掉了异常 ——
-    /// 兜底写错（比如漏了 catch）会让 runner 在收尾阶段崩溃，
-    /// 连已经拿到的结果都投递不出去。
-    /// </remarks>
-    internal static void TryTerminateJob(SafeJobHandle? job, Action<SafeJobHandle> terminate)
-    {
-        try
-        {
-            if (job is not null) terminate(job);
-        }
-        catch
-        {
-            // terminate 失败不应 crash runner
-        }
-    }
 
     private void OnDisconnect()
     {
@@ -1396,73 +979,5 @@ internal sealed class JobRunner : IDisposable
             _disposed = true;
         }
         ReleaseOwnedJob();
-    }
-}
-
-/// <summary>按行读取 stdin（不依赖 Console.ReadLine 的编码假设）。</summary>
-internal sealed class LineReader
-{
-    private readonly Stream _stream;
-    private readonly byte[] _chunk = new byte[64 * 1024];
-    private int _chunkPos;
-    private int _chunkLen;
-    private readonly List<byte> _buffer = new(4096);
-
-    public LineReader(Stream stream) => _stream = stream;
-
-    public string? ReadLine()
-    {
-        // 逐字节 ReadByte() 会让每个字节都变成一次 IO 调用。
-        // 实测（Issue #9）：46KB 的 start 请求（大 env）比 3.4KB 的多花 **33ms**，
-        // 而 node runner 在同一对比下是 0ms —— 差异全在这里。
-        // 改为整块读入 64KB 缓冲，再从内存里切行。
-        while (true)
-        {
-            if (_chunkPos >= _chunkLen && !Refill()) return TakeTail();
-
-            var span = _chunk.AsSpan(_chunkPos, _chunkLen - _chunkPos);
-            var nl = span.IndexOf((byte)'\n');
-            if (nl >= 0) return TakeLine(span, nl);
-
-            // 缓冲里没有换行：整块吞掉，继续读
-            _buffer.AddRange(span.ToArray());
-            _chunkPos = _chunkLen;
-        }
-    }
-
-    /// <summary>
-    /// 从底层流再读一块。读到 EOF 返回 false。
-    /// </summary>
-    private bool Refill()
-    {
-        _chunkLen = _stream.Read(_chunk, 0, _chunk.Length);
-        _chunkPos = 0;
-        return _chunkLen > 0;
-    }
-
-    /// <summary>
-    /// 切出 <paramref name="nl"/> 位置之前的一行（并消费掉该换行符）。
-    /// </summary>
-    private string TakeLine(ReadOnlySpan<byte> span, int nl)
-    {
-        _buffer.AddRange(span[..nl].ToArray());
-        _chunkPos += nl + 1;
-        var line = Encoding.UTF8.GetString(_buffer.ToArray()).TrimEnd('\r');
-        _buffer.Clear();
-        return line;
-    }
-
-    /// <summary>
-    /// EOF 时把缓冲区里残留的半行交出去；没有残留则返回 null。
-    /// </summary>
-    /// <remarks>
-    /// 最后一行可能不带换行符 —— 直接丢弃会让最后一条消息静默消失。
-    /// </remarks>
-    private string? TakeTail()
-    {
-        if (_buffer.Count == 0) return null;
-        var tail = Encoding.UTF8.GetString(_buffer.ToArray());
-        _buffer.Clear();
-        return tail;
     }
 }

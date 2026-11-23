@@ -3,6 +3,64 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.5] - 2026-11-22
+
+**内部重构与工具链修复，无对外行为变更。建议升级，但不是必须。**
+
+### 变更
+
+- **拆分 `JobRunner` 的三个独立职责。** 原 `src/JobRunner.cs` 1468 行、65 个方法，
+  同时承担「子进程启动」「退出检测」「环境块组装」「可执行文件解析」「行缓冲读取」
+  五件事。本次把后三件抽成独立文件（`LineReader` / `EnvironmentBlock` /
+  `ExecutableResolver`），退出检测改成 `partial class` 单独成文件
+  （`JobRunner.Polling.cs`）。主文件降到 983 行、45 个方法。
+
+  全部为逐行等价搬迁，不改逻辑：`ExecutableResolver` 的搬迁做过脚本化比对
+  （227 行完全一致），322 个单元测试全通过。
+
+  另外把 `LaunchProcess` 的 8 个位置参数收敛成 `LaunchPlan` 结构体 ——
+  其中 4 个是同源数据（一次启动的完整输入），拆开后调用点看得更清楚。
+
+### 修复
+
+- **`npm run lint` 在 0.2.4 上是红的（issue #29）。** 两个 `.mjs` 自测文件
+  不在任何 ESLint 配置块覆盖范围内，导致 `npm run lint` 报 20 条
+  `'console' is not defined`。由于 `.githooks/pre-commit` 与 `test:all`
+  都以 ESLint 为入口，这等于**项目的全量自查入口是坏的**。
+
+  同时修掉一个更隐蔽的同类问题：`bench/load-matrix.cjs` 落到通用配置块之外，
+  **一条正确性规则都没拿到** —— 它仍会被 `eslint .` 扫到，所以不报错、
+  不出现在输出里，看起来是绿的，实际什么都没查。
+
+- **新增 `test/eslint-config-coverage-selftest.mjs`。** 5 条行为断言锁住上述两类
+  失效模式，已接入 `npm run lint` 与 `test:all`。
+
+  值得记录的是它的判据演进：最初版本只断言「文件有没有被某个带规则的块覆盖」，
+  但实测发现**删掉 ESM 配置块后它依然全绿**，而 `eslint .` 同时红着 20 条。
+  根因是 `.mjs` 扩展名本身就让 ESLint 按 module 解析，所以「解析模式」不会因
+  少一个块而变红 —— 真正丢的是 `NODE_GLOBALS`。判据改为直接断言
+  `console`/`process` 是合法全局变量后，变异测试（删块 → 红）才真正生效。
+
+### 文档
+
+- `docs/XP-GATE-BASELINE.md` 重写失真内容（issue #30）：修正了「期望输出：空」
+  但实测 39 条的命令、`139 → 322` 单测数、`194 info` 的口径混淆
+  （`src/` 实际 8 条，全树 613 条，原文把两个口径混为一谈）、
+  覆盖率 `32.6% → 100%`，以及多处「xp-gate 看不见 C#」的过期表述。
+
+- 新增 §7 记录一个**尚未归档到上游**的 xp-gate 缺陷：C# 适配器的
+  `long-function` 会报出与真实长度无关的数字（`EmitSpawnEnoent` 实测 7 行报 58 行）。
+  附 80 行已验证可复现的最小片段。这解释了 `src/` 剩余 3 条 `long-function`
+  告警 —— **它们是误报，不是技术债，不要去"修"**。
+
+- 新增 `docs/TODO.md`：全部待办的整理（含 WSL 迁移前必须决策的事项）。
+
+### 其他
+
+- `.gitignore` 增加 `coverage/`。
+
+---
+
 ## [0.2.4] - 2026-11-11
 
 **修复发布：0.2.3 在目标进程退出码 ≥ 2^31 时会报协议错误、导致工具调用失败。建议升级。**

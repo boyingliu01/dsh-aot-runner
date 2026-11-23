@@ -701,7 +701,7 @@ public class EdgePathCoverageTests
         var tooLong = new string('x', 40000) + ".exe";
         var candidates = new List<string> { tooLong, "cmd.exe" };
 
-        var result = JobRunner.ProbeCandidates(@"C:\Windows\System32\", candidates);
+        var result = ExecutableResolver.ProbeCandidates(@"C:\Windows\System32\", candidates);
 
         Assert.Equal(@"C:\Windows\System32\cmd.exe", result);
     }
@@ -741,7 +741,7 @@ public class EdgePathCoverageTests
         // 这条用例守的是行为本身：坏候选被跳过，查找继续。
         var candidates = new List<string> { "in?valid*.exe", "cmd.exe" };
 
-        var result = JobRunner.ProbeCandidates(@"C:\Windows\System32\", candidates);
+        var result = ExecutableResolver.ProbeCandidates(@"C:\Windows\System32\", candidates);
 
         Assert.Equal(@"C:\Windows\System32\cmd.exe", result);
     }
