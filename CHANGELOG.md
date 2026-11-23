@@ -55,6 +55,13 @@
 
 - `clean-code.long-function` 报出 8 条，实际最长函数 48 行（阈值 50），
   且被点名的多数是接口声明行 —— xp-gate [#861](https://github.com/boyingliu01/xp-gate/issues/861)。
+- Gate 12 `no-eof-newline` 误报：22/22 暂存文件末字节均为 `0a`，仍报告 9 个缺失，
+  且清单每次提交都不一样。**已归档为 [#863](https://github.com/boyingliu01/xp-gate/issues/863)**，
+  附逐字节对照表与 hook 插桩记录。WARN 级、非阻断。
+- **Gate 6 的架构规则不覆盖 C#。** `archlint 10.0/10` 只描述 JS/TS 的 71 个文件，
+  `src/` 的 7 个 C# 文件从未被架构规则检查过（`@archlinter/cli` 不支持 C#）。
+  已知盲区，当前靠领域拆分 + 人工 review 守住，**不要**用空 `arch-csharp.yaml` 造出假 PASS。
+  见 `docs/TODO.md` §1.9。
 - `clean-code.god-class` / `solid.srp`：`JobRunner` 21 个方法（阈值 15）。
   剩余方法全部围绕同一份 runner 状态（`_gate`/`_finished`/`_process`），
   再拆需要把这些字段的所有权切碎，收益为负。`JobRunner.Polling.cs` 的作者

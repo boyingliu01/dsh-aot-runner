@@ -191,7 +191,44 @@ archlint 仍报这 5 个文件为 `Dead Code MEDIUM`。**已逐个确认它们�
 **影响**：Gate 12 是 **WARN 级、非阻断**，不影响提交。**不要去"修"文件** ——
 文件是对的，加/删换行只会让下一次报告换一批文件名。
 
-**下一步**：按 §2 的规矩，归档到上游并附上上面的对照表 + 插桩脚本。
+**下一步**：**已归档为 [#863](https://github.com/boyingliu01/xp-gate/issues/863)**
+（2026-11-23）。附了逐字节对照表、干净仓库里"真缺失能被正确报出"的证明、
+hook 插桩抓到真实 `paths` 的记录，以及多字节 UTF-8 让 `length($0)+1` 失真的线索。
+
+### TODO-1.9 Gate 6 的架构规则**完全不覆盖 C#**（已知盲区，暂不投入）
+
+**症状**：Gate 6 在 pre-commit 里对 C# 是 SKIP：
+
+```
+ℹ️  No arch-csharp.yaml found - skipping C# architecture
+⏭️  SKIPPED - C# architecture validation (no config)
+```
+
+**澄清一个容易误读的地方**：`archlint .` 单独跑确实报
+`🕸️ Nodes: 71` / `10.0/10，0 smells`，但那 **71 个文件全是 JS/TS**。
+`src/` 下的 7 个 C# 文件**从来没有被任何架构规则检查过** ——
+`@archlinter/cli` 本身不支持 C#，它要的 `arch-csharp.yaml` 本项目也装不出来。
+
+所以「archlint 10.0/10」这个数字对本项目的核心代码**没有意义**，
+它描述的是 `scripts/`、`test/`、`plugin/` 那些 JS 部分。
+
+**三个可选方向**：
+
+| 方案 | 成本 | 收益 |
+|---|---|---|
+| A. 写个空的 `arch-csharp.yaml` 占位 | 低 | **无效且有害** —— archlint 不解析 C#，只会把 SKIP 变成假 PASS |
+| B. Roslyn 分析器 + `dotnet format analyzers` 做架构规则 | 中 | 真实有效，能机器化检查组件依赖方向 |
+| C. 维持现状，靠领域拆分 + 人工 review | 零 | 当前 `JobRunner` 21 方法、边界清晰，风险可控 |
+
+**当前决策：选 C。**
+
+理由：本轮刚把 `JobRunner` 从 46 个方法降到 21 个，把
+`ProcessLauncher`（纯函数、可单测）、`TargetSpawner`（启动编排）、
+`RunnerErrors`（错误工厂）拆了出去，**依赖方向目前是人能一遍看清的**。
+这时候上 Roslyn 分析器是在给一个已经理顺的结构加机器约束，投入产出不划算。
+
+**触发条件**：如果 `JobRunner` 再长回去（比如回到 30+ 方法），
+或者出现新的跨组件耦合，就该上方案 B。**永远不要选 A。**
 
 ---
 

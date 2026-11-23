@@ -297,6 +297,7 @@ hook 判 `✅ PASSED - Principles checker (no errors found)`（error 计数为 0
 | [#768](https://github.com/boyingliu01/xp-gate/issues/768) | Gate 5 不解析 csharp 适配器唯一产出的 cobertura 格式 | C# 覆盖率即使已产出合法报告也永远"无法确定"而 BLOCK | **已在 0.38.82 修复** |
 | [#730](https://github.com/boyingliu01/xp-gate/issues/730) | （既有）`LANGUAGE_REGISTRY` 无 `csharp` | `detect-languages`/`check-tools` 看不到 C#，且生成的配置文件会**关掉**扩展名回退 | 既有 open；对 Gate 4 已无影响（路由已修） |
 | [#774](https://github.com/boyingliu01/xp-gate/issues/774) | Gate 3 在 >64KB 输入上 fail-open：`pipefail` + `awk` 提前 `exit` → SIGPIPE(141) 被当成「无函数」 | 24 个代码文件即触发，复杂度门禁**静默跳过**并报 SKIPPED（假通过） | open |
+| [#863](https://github.com/boyingliu01/xp-gate/issues/863) | Gate 12 的 `no-eof-newline` 在混合语言仓库上误报 | 22/22 暂存文件末字节均为 `0a`（含仅 6 字节的 `VERSION`），仍报告 9 个缺失；报告清单**每次提交都不一样**。scanner 本身正确（干净仓库里"真缺失"能精确报出），差异在 hook 的 awk 调用环境；多字节 UTF-8 让 `length($0)+1` 失真为线索 | open（WARN 级、非阻断） |
 
 > 曾误提 #765（与 #763 重复），已关闭并标记 duplicate。
 
