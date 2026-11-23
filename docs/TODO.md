@@ -1,102 +1,67 @@
 # TODO — dsh-aot-runner 待办清单
 
-> **生成时间**：2026-11-22
-> **基准提交**：`7085b65`（0.2.5，已推送到 `origin/main`）
-> **工具版本**：xp-gate v0.38.82 / .NET SDK 10.0.404 / Node 22+
-> **当前状态**：`build.sh --check` 全绿，322 C# 测试通过，生产源码覆盖率 100%，ESLint exit 0
+> **最后核实**：2026-11-23（xp-gate **v0.38.125**）
+> **基准提交**：`52c33f6`（0.2.5，已推送到 `origin/main`）
+> **工具版本**：xp-gate v0.38.125 / .NET SDK 10.0.404 / Node 22+
+> **当前状态**：`build.sh --check` 全绿，322 C# 测试通过，生产源码覆盖率 100%，
+> `npm run lint` exit 0，`principles src/` 0 error / 7 warning / 1 info
 >
-> 本文档记录**重建开发环境（WSL）之后仍需处理的事**。每条都标注了
-> 「已验证 / 未验证」，避免把推断当结论。
+> ## 环境决策（2026-11-23 已定）
+>
+> **本项目不迁移到 WSL，保留 Windows 开发环境。**
+>
+> 理由：本项目是 Windows **原生** runner —— `CreateProcessW`、Job Object、
+> `ucrtbase.dll` 的 `_get_osfhandle`/`_dup2`、CRT 描述符表注入，全部是 Win32 API；
+> 322 个测试里绝大多数要真实 Win32 调用。搬到 Linux 不是"兼容性调整"，
+> 而是**换一个项目**。
+>
+> 连带结论：**Windows 开发环境必须持续保留**，其他项目的 Windows 兼容性
+> 也仍然需要它来验证。WSL 只能作为补充，不能替代。
+>
+> 因此本文件已**删除**原先的「WSL 迁移」章节 —— 那些事项不再适用。
+> 若将来真的要评估跨平台，单开一份文档，不要复用这份。
 
 ---
 
-## 0. 迁移到 WSL 前必须先决定的事
+## 0. 当前剩余任务总览
 
-这几条不是代码待办，而是环境重建的前提。**没想清楚就迁，会在 WSL 里撞墙。**
+2026-11-23 用 xp-gate **v0.38.125** 全量复核后的真实剩余量。
 
-### TODO-0.1 确认 AOT 交叉编译在你选的 WSL 发行版上可行
+| 类别 | 剩余 | 性质 |
+|---|---|---|
+| 项目自身技术债 | **3 项** | 可做，全部是低风险清理 |
+| 上游 xp-gate 缺陷 | **3 项** | 已归档 #859/#860/#861，**本项目修不了** |
+| 待关闭的 issue | **2 项** | #29/#30 已修复待关闭 |
+| 有意不动 | 1 类 | 见 §1.6，**不要去改** |
+| 可选长期项 | 2 项 | 不阻塞任何事 |
 
-本项目是 **Windows 原生** runner：`CreateProcessW`、Job Object、
-`ucrtbase.dll` 的 `_get_osfhandle`/`_dup2`、CRT 描述符表注入 —— 全部是 Win32 API。
+**一句话结论**：没有任何「必须立刻做」的事。剩下的都是「做了更好，不做也不影响」。
 
-| 问题 | 现状 |
-|---|---|
-| `dotnet publish -r win-x64` 能否在 Linux 上跑？ | **理论可以**（NativeAOT 支持交叉编译到 win-x64），但需要 Linux 上的 `clang` + `lld` + `objcopy`，且**未经本机验证** |
-| 能不能在 WSL 里跑 C# 单测？ | **不能**。322 个测试里绝大多数要真实 Win32 调用（`FdLayoutHost` 直接改进程 fd 表）。WSL 里 `dotnet test` 会大面积失败 |
-| 那 WSL 里能跑什么？ | 纯逻辑测试（`JobRunnerPureLogicTests` 的一部分）、ESLint、JS 测试、覆盖率统计脚本、文档 |
+### 已确认修复（本轮复核，不需再投入）
 
-**结论与建议**：
+- [x] **#29** lint 红 → `npm run lint` exit 0（含 5 条自测）
+- [x] **#30** 文档失真 → 已重写，实测数字全部对齐
+- [x] **#31** 上帝类 → 1468 → 983 行、65 → 45 方法、`large-file` 已消除（**部分完成**，见 §1.4）
+- [x] `.gitignore` 的 `coverage/` 误伤 → 已收窄为 `coverage/tmp/`
+- [x] `package-lock.json` 版本漂移 → 已同步到 0.2.5
 
-- [ ] 决定 WSL 是否只做**编辑 + JS 侧 + 静态检查**，C# 的构建/测试仍回 Windows 跑
-- [ ] 或者：在 WSL 里搭好 `dotnet publish -r win-x64` 的交叉编译链，把构建也迁过来（需先验证）
-- [ ] 若选前者，把「必须在 Windows 上跑的命令」写进 `CLAUDE.md` / `AGENTS.md`，否则会被反复踩
+### 上游已归档、等对方修（**不要在本项目里绕**）
 
-**证据（已核实到源码，不是推断）**：
-
-```
-$ grep -ln "DllImport\|CreateProcess\|JobObject" tests/DshAotRunner.Tests/*.cs
-CrtDescriptorTableTests.cs   EdgePathCoverageTests.cs   FdLayoutHost.cs
-JobRunnerErrorPathTests.cs   JobRunnerOrchestrationTests.cs
-JobRunnerPureLogicTests.cs   JobRunnerResolveTests.cs   TraceAndJobHandleTests.cs
-```
-
-`FdLayoutHost.cs` 的文件头写得很直白：它用 `CreatePipe` + `_open_osfhandle` + `_dup2`
-在测试进程里造出真实的 fd 3/4/5/6/7 布局，因为「**直接 new JobRunner 去 spawn 会让
-xunit 宿主进程崩溃**」—— 也就是说 322 个测试里的绝大部分**在 WSL 上根本没有可执行的语义**，
-不是"跑得慢"，是"跑不了"。
-
-**这意味着**：`./build.sh --check`（含 322 测试 + 覆盖率门槛）整个不能在 WSL 跑。
-迁移后如果 CI 也搬到 Linux，会**直接丢失 C# 的回归保护** —— 这是本次迁移最大的风险点。
-
-### TODO-0.2 确认 e2e 仍然无法在 WSL 跑（已知缺失）
-
-*验证状态：**已确认**（本机无 VS C++ `link.exe`，AOT 链接失败）*
-
-- [ ] 迁移后重新确认：WSL 里是否反而**能**跑 AOT 链接（Linux 有 clang，但仍需 win-x64 目标）
-- [ ] 如果能跑通，把 `test/e2e-plugin-verify.js` 等 e2e 纳入 CI —— 现在它们长期未被执行
-
-### TODO-0.3 Windows 上的本地产物（已被 gitignore，**不需要特殊处理**）
-
-*验证状态：**已确认***
-
-- [x] `tests/DshAotRunner.Tests/TestResults/` 有 **126 个**历史 cobertura 报告目录，但已被 `.gitignore:84` 忽略
-- [x] 因此 clone 不会带上它们，**无需归档、无需清理**
-- [ ] 可选：这些目录约占几百 MB，迁移后如果想回收磁盘，直接 `rm -rf tests/**/TestResults` 即可（不重建也行）
-
-### TODO-0.4 行尾符（CRLF vs LF）—— 迁移最容易出问题的一处
-
-**核查结果（2026-11-22 实测）**：仓库内**存储**全是 LF（`i/lf`），这是好消息 ——
-WSL clone 出来直接就是 LF。但当前 Windows 工作区有 **13 个文件是 CRLF**（`w/crlf`），
-其中 `.gitattributes` 明确要求 `eol=lf` 的就有 9 个：
-
-```
-bench/aot-observe.js          lib/bench-verdict.mjs
-plugin/lib/index.js           scripts/check-release.mjs
-test/bench-verdict-verify.js  test/contract-fingerprint-verify.js
-test/e2e-plugin-verify.js     test/race-verify.js
-test/runner-client.js
-（另 4 个是 text=auto 的：DshAotRunner.sln、ROADMAP.md、plugin/README.md、
-  plugin/test/degrade-observability.test.js）
-```
-
-它们在 Windows 上能跑（Node 接受 CRLF），所以一直没暴露。**在 WSL 下也不会坏** ——
-因为 clone 会按 `i/lf` 重新检出成 LF，工作区里这 13 个脏状态不会跟着过去。
-
-- [x] 确认仓库存储是 LF（`git ls-files --eol` 全为 `i/lf`）
-- [ ] **迁移后**跑 `git ls-files --eol | grep -c 'w/crlf'`，预期 **0**。若不为 0，
-      说明 `core.autocrlf` 被设成了 `true`（WSL 上应该是 `input` 或 `false`）
-- [ ] `.githooks/pre-commit`、`.githooks/pre-push` 在 WSL 下需要 `chmod +x`
-      （当前 Windows 上已是 `-rwxr-xr-x`，但执行位经 git 传输后在 Linux 上应保留；
-      若丢失则 `git update-index --chmod=+x` 修一次）
-- [ ] `git config core.hooksPath .githooks` 需在新 clone 里重设（**不随仓库传输**）
+| 上游 issue | 内容 | 本项目实测 |
+|---|---|---|
+| [#861](https://github.com/boyingliu01/xp-gate/issues/861) | C# 适配器 `long-function` 失步 | 0.38.125 上 **4/4 完整复现** |
+| [#860](https://github.com/boyingliu01/xp-gate/issues/860) | Gate 3 只判 CCN 列，丢掉 length 列 | 已复现：1103 行函数被判 `✅ PASSED` |
+| [#859](https://github.com/boyingliu01/xp-gate/issues/859) | `test-layers` 对 .NET 报假零 | 已复现：32 个测试文件报 `Tests: 0` |
 
 ---
 
-## 1. 本项目自身的技术债（可在 WSL 里直接做）
+## 1. 本项目自身的技术债
 
 ### TODO-1.1 补齐 `.archlint.yaml` 入口脚本白名单（issue #32）
 
-*验证状态：**已确认未做*** —— 2026-11-22 实测白名单仍只有 3 条
+*验证状态：**已确认未做*** —— 2026-11-23 用 0.38.125 复核，白名单仍只有 3 条，
+archlint 仍报这 5 个文件为 `Dead Code MEDIUM`。**已逐个确认它们都被真实引用**
+（分别被 8 / 8 / 6 / 7 / 10 处引用），确属误报。
 
 - [ ] `bench/load-matrix.cjs`
 - [ ] `scripts/check-js-syntax.mjs`
@@ -110,7 +75,8 @@ test/runner-client.js
 
 ### TODO-1.2 处理两个**真实**的 archlint smell（issue #32）
 
-*验证状态：**未验证**（迁移后需重跑确认）*
+*验证状态：**已确认未做*** —— 2026-11-23 复核：`summarizeRuntime` 仍在
+`contract-branch-coverage.mjs:172`，认知复杂度 16；54 token 重复仍在 `202-209` ↔ `64-72`。
 
 - [ ] `scripts/contract-branch-coverage.mjs` 的 `summarizeRuntime` 认知复杂度 16 → 拆成「取值/格式化/汇总」
 - [ ] `contract-branch-coverage.mjs:202-209` ↔ `contract-fingerprint.mjs:64-72` 的 54 token 重复 → 抽公共小工具
@@ -172,11 +138,17 @@ test/runner-client.js
 
 ## 2. 上游（xp-gate）待跟踪
 
-这些**在本仓库修不了**，只能等上游。列出来避免重复投入。
+这些**在本仓库修不了**，只能等上游。列出来避免重复投入 ——
+**尤其避免下一个人再去「修」由误报产生的告警。**
 
 ### TODO-2.1 xp-gate C# 适配器 `long-function` 失步 —— **已归档为 [#861](https://github.com/boyingliu01/xp-gate/issues/861)**
 
 *验证状态：**已用三个实验证死**；issue 已提（2026-11-22）*
+
+> **2026-11-23 复测（v0.38.125）：4/4 完整复现，数字一字不差。**
+> 已在 [#861 评论](https://github.com/boyingliu01/xp-gate/issues/861#issuecomment-7092628851)
+> 补充了复测结果 + 三个触发必要条件的精确刻画。
+> **这意味着：这 4 条告警在可预见的将来都会一直在 `principles src/` 里。不要试图消除它们。**
 
 | 报出 | 函数 | 实测行数 |
 |---|---|---|
@@ -203,7 +175,16 @@ test/runner-client.js
 
 ### TODO-2.2 xp-gate 的两个漏检 —— 已分别归档为 [#860](https://github.com/boyingliu01/xp-gate/issues/860) / [#859](https://github.com/boyingliu01/xp-gate/issues/859)
 
-*验证状态：**已确认 2026-11-22 仍存在***
+*验证状态：**2026-11-23 用 v0.38.125 实测，两个缺陷都还在***
+
+> **本轮亲手复现了 #860**：造一个 1103 行的 C# 函数，`lizard` 明确报
+> `!!!! Warnings (cyclomatic_complexity > 15 or length > 1000 ...) !!!!` 且退出码 1，
+> 但同一个文件被 Gate 3 判 `✅ PASSED - All functions within complexity threshold (5).`
+> —— 因为它只读 CCN 列（该函数 CCN=1）。
+>
+> **也复现了 #859**：本仓库实际有 32 个测试文件（`test/*.js` 15 个、
+> `plugin/test/*.js` 3 个、`tests/*.cs` 14 个）、322 个 xunit 用例，
+> 而 `xp-gate test-layers` 输出 `Sources: 0 files / Tests: 0 total`。
 
 本仓库 issue **#33** 是"跟踪用的汇总"，真正的上游修复点在下面两个 issue：
 
@@ -275,50 +256,63 @@ test/runner-client.js
 
 ---
 
-## 4. WSL 环境重建检查清单
+## 4. Windows 环境的健康检查（每周或大改后跑一次）
 
-> **先读 [`docs/开发环境.md`](./开发环境.md)** —— 那是**Windows** 环境的完整搭建/验证/排查手册
-> （工具链版本、`vswhere` 检查 MSVC、A/B 验证怎么跑）。本节只列**迁移到 WSL 时
-> 额外需要注意**的部分，不重复它的内容。
+> **完整搭建/排查手册见 [`docs/开发环境.md`](./开发环境.md)**（工具链版本、`vswhere` 检查 MSVC、
+> A/B 验证怎么跑）。本节只列**日常确认环境没坏**的最小集合。
 
-重建后按顺序验证，任何一步失败就先停下来修环境，别往下走：
+按顺序跑，任何一步失败先停下来修环境：
 
-- [ ] `git clone` 后确认 `git ls-files --eol | grep -c 'w/crlf'` 为 0（或只在你预期的文件上）
-- [ ] `git config core.hooksPath .githooks && chmod +x .githooks/pre-commit`
-- [ ] `dotnet --version` 是 10.x；`node --version` ≥ 22
-  - **注意**：`docs/开发环境.md` 写的是 .NET SDK 8.0.427，但当前机器**只装了 10.0.404**，
-    而项目 `TargetFramework` 仍是 `net8.0`。10.x SDK 能正常构建 net8.0 目标，本轮全部验证都是在这个组合下完成的。
-    WSL 里装 8.x 或 10.x 应该都可以，但**如果你在 WSL 用 8.x 而 Windows 用 10.x，两边构建产物可能不一致** ——
-    建议两边统一（推荐 10.x，与当前已验证状态一致）
-- [ ] `npm ci`
-- [ ] **`npm run lint`** → exit 0（含新增的 `test:eslint-config` 自测，5 条用例）
-- [ ] **`./build.sh --check`** → 全绿，322 测试，覆盖率 100%
-- [ ] `xp-gate principles src/` → 0 error / 7 warning / 1 info（其中 3 条是 TODO-2.1 的误报）
-- [ ] `xp-gate check 6` → 8.5/10，0 high/critical
-- [ ] 如需改 C#：确认 Windows 侧仍能构建，或先解决 TODO-0.1
+```bash
+# 1. 工具链在位
+dotnet --version            # 需 8.x 或 10.x（当前 10.0.404，构建 net8.0）
+node --version              # ≥ 22
 
-### TODO-4.1 迁移后立刻做一次「门禁自检是否还活着」
+# 2. 项目门禁（约 40s）
+./build.sh --check          # 期望：全部通过，322 测试，生产源码 100%
 
-**理由**：这一轮最大的收获不是修了几个 issue，而是发现**门禁会假绿**——
-ESLint 的「零规则绿」、我第一版自测的空跑、xp-gate 的 `long-function` 误报，都属于
-「看起来通过，实际什么都没测」。
+# 3. Lint 链（约 10s）
+npm run lint                # 期望：exit 0，含 5 条 eslint-config 自测
 
-- [ ] 对每条新增的自检做一次**变异测试**：故意改坏被测对象，确认自检会红
-- [ ] 已在 `test/eslint-config-coverage-selftest.mjs` 上做过这个实验（删 ESM block → 红），**保持这个习惯**
+# 4. xp-gate 门禁
+xp-gate principles src/     # 期望：0 error / 7 warning / 1 info
+xp-gate check 6             # 期望：8.5/10，0 high/critical
+
+# 5. MSVC 在不在（AOT 链接必需）
+"/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"   -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+```
+
+### TODO-4.1 保持「变异测试」的习惯
+
+**理由**：这一轮最大的收获不是修了几个 issue，而是发现**门禁会假绿**：
+
+- ESLint 的「零规则绿」（文件被扫到，但一条规则都没挂）
+- 我第一版 eslint 自测**空跑**（删掉配置块它仍全绿，而 `eslint .` 红着 20 条）
+- xp-gate 的 `long-function` 误报（报 58 行，实际 7 行）
+
+三者都是「看起来通过，实际什么都没测」。
+
+- [ ] 新增任何自检后，**故意改坏被测对象，确认它会红**
+- [x] `test/eslint-config-coverage-selftest.mjs` 已做过（删 ESM block → `AC-EC-1b` 红）
+
+### TODO-4.2 临时探针文件必须清理
+
+**踩过的坑（本轮）**：为验证 Gate 3 缺陷，我造了一个 1100 行的 `.tmp-BigProbe.cs`。
+`.tmp-*` 被 `.gitignore` 挡住 → `git status` 里看不见 → 我以为删干净了，
+但它**留在磁盘上**，被 `dotnet format` 扫到，`build.sh --check` 直接 FAIL。
+
+- [ ] 造探针文件时优先放**仓库外**（或 `%TEMP%`）
+- [ ] 必须放仓库内时，用完立刻 `rm`，并跑一次 `build.sh --check` 确认恢复
 
 ---
 
-## 5. 长期建议（可选，不阻塞迁移）
+## 5. 可选长期项（不做也不影响任何事）
 
 - [ ] **e2e 进 CI**：`test/e2e-plugin-verify.js` 等长期未被执行，等于没有回归保护。
-      若 WSL 能跑通 AOT 交叉编译，这是最大的收益点
-- [ ] **Gate 5 的本地等价物**：`build.sh --check` 已覆盖覆盖率门槛，但 xp-gate 的 Gate 5
-      只在 commit 时跑。考虑在 CI 里显式跑一次 `xp-gate check 5` 的等价逻辑
-- [x] `.gitignore` 只忽略 `coverage/tmp/`，**保留 `coverage/coverage-summary.json`**
-  - 踩过的坑：一度写成忽略整个 `coverage/`，而那正是 xp-gate Gate 5 判定覆盖率门槛时
-    **唯一**会读的路径（`gate-5-entry.sh` 的 `_gate5_coverage_usable`）。整目录忽略
-    会让报告进不了版本库 → CI 上 Gate 5 永远找不到它
-  - **迁移后复查**：若引入 c8/vitest，确认 `coverage-summary.json` 能正常生成且不被忽略
+      本机缺 VS C++ `link.exe` 跑不了 AOT，但 **GitHub Actions 的 `windows-latest` 有**
+      —— CI 里的「Windows 构建 + A/B」job 已经在跑 AOT，可以考虑把 e2e 也挂上去
+- [ ] **`docs/开发环境.md` 的 SDK 版本过期**：写的是 8.0.427，实际是 10.0.404。
+      不是错误（10.x 能构建 net8.0），但读者会困惑，值得补一句说明
 
 ---
 
