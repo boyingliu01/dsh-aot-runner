@@ -42,6 +42,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { resolvePackageDir as locatePackageDir } from './lib/locate-contract-package.mjs';
 
 // createRequire 曾经用来读 CommonJS 版本的 runner-launch，改成静态分析源码后
 // 不再需要。留着会让 ESLint 报 no-unused-vars，也容易让人以为这里还在做运行时加载。
@@ -59,26 +60,9 @@ const AS_JSON = args.includes('--json');
  * 不需要校验 runner 可用性 —— 只读源码提取契约。
  */
 function resolvePackageDir() {
-  const candidates = [];
-
-  const roots = [];
-  if (process.env.DSH_HOME) {
-    // DSH_HOME 通常是 .dsh 目录，workspace 在用户目录下
-    roots.push(path.join(process.env.DSH_HOME, '..', '.workbuddy', 'binaries', 'node', 'workspace'));
-  }
-  if (process.env.USERPROFILE) {
-    roots.push(path.join(process.env.USERPROFILE, '.workbuddy', 'binaries', 'node', 'workspace'));
-  }
-  roots.push(REPO);
-
-  for (const r of roots) {
-    candidates.push(path.join(r, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local'));
-  }
-
-  for (const c of candidates) {
-    if (fs.existsSync(path.join(c, 'lib'))) return c;
-  }
-  return null;
+  // 查找逻辑与 contract-branch-coverage.mjs 共用（见 lib/locate-contract-package.mjs）。
+  // 两个脚本是「契约漂移检测」的两半，必须用同一套候选目录与优先级。
+  return locatePackageDir(REPO);
 }
 
 /** 读文件；读不到直接抛 —— 提取失败必须显式暴露，不能静默跳过。 */
@@ -126,19 +110,36 @@ function extractStartRequestFields(source) {
   const m = fn[1].match(/hasExactKeys\(\s*value\s*,\s*\[([^\]]*)\]\s*,\s*\[([^\]]*)\]\s*\)/);
   if (!m) throw new Error('parseWindowsStartRequest 里没找到 hasExactKeys 调用（校验方式变了）');
 
-  const parseList = (x) => x.split(',').map((t) => t.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
-  const required = parseList(m[1]);
-  const optional = parseList(m[2]);
-
-  // 自校验：start 请求必然有 type 字段，且必有 type/cwd/env 三件套之一。
-  // 没有这些说明抓错了结构 —— 与其保存一个错误的基线，不如报错。
-  if (!required.includes('type') || !required.includes('cwd') || !required.includes('env')) {
-    throw new Error(
-      `提取到的必需字段 [${required.join(', ')}] 不像 start 请求（应含 type/cwd/env）。\n`
-      + '很可能抓到了别的 hasExactKeys 调用 —— 拒绝保存这个基线。',
-    );
-  }
+  const required = parseFieldList(m[1]);
+  const optional = parseFieldList(m[2]);
+  assertLooksLikeStartRequest(required);
   return { required, optional };
+}
+
+/** 把 `"a", 'b', c` 这样的字段清单解析成数组。 */
+function parseFieldList(raw) {
+  return raw
+    .split(',')
+    .map((t) => t.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean);
+}
+
+/**
+ * 自校验：start 请求必然带 type/cwd/env。
+ *
+ * 没有这些说明抓错了结构 —— 与其保存一个错误的基线，不如报错。
+ * 单独成函数是为了让 extractStartRequestFields 只表达「怎么提取」，
+ * 而「提取到的像不像 start 请求」是另一个可以独立演进的问题。
+ */
+function assertLooksLikeStartRequest(required) {
+  const mandatory = ['type', 'cwd', 'env'];
+  const missing = mandatory.filter((f) => !required.includes(f));
+  if (missing.length === 0) return;
+
+  throw new Error(
+    `提取到的必需字段 [${required.join(', ')}] 不像 start 请求（缺少 ${missing.join('/')}）。\n`
+    + '很可能抓到了别的 hasExactKeys 调用 —— 拒绝保存这个基线。',
+  );
 }
 
 /**
@@ -185,42 +186,71 @@ function extractSpawnErrorCodes(source) {
  *   如果当初静默跳过，就会得到一个「契约没变」的假结论。）
  */
 function extractExecutableResolution(source) {
-  const namesFn = source.match(/function windowsExecutableNames\([^)]*\)\s*\{([\s\S]*?)\n\}/);
-  if (!namesFn) throw new Error('未能定位 windowsExecutableNames 函数体（候选扩展名的真正来源）');
+  const namesBody = locateFunctionBody(
+    source,
+    /function windowsExecutableNames\([^)]*\)\s*\{([\s\S]*?)\n\}/,
+    'windowsExecutableNames 函数体（候选扩展名的真正来源）',
+  );
+  const resolveBody = locateFunctionBody(
+    source,
+    /function resolveWindowsExecutable\([^)]*\)\s*\{([\s\S]*?)\n\}/,
+    'resolveWindowsExecutable 函数体',
+  );
 
-  const resolveFn = source.match(/function resolveWindowsExecutable\([^)]*\)\s*\{([\s\S]*?)\n\}/);
-  if (!resolveFn) throw new Error('未能定位 resolveWindowsExecutable 函数体');
-
-  // 扩展名是 `${command}${separator}com` 形式 → 取最后那个裸词
-  const fromTemplates = [...namesFn[1].matchAll(/\}\s*([a-z]{2,5})`/g)].map((x) => x[1]);
-  // 也兼容直接写字面量的实现
-  const fromLiterals = [...namesFn[1].matchAll(/["']\.([a-z]{2,5})["']/gi)].map((x) => x[1].toLowerCase());
-  const extensions = [...new Set([...fromTemplates, ...fromLiterals])];
-
-  if (!extensions.length) {
-    throw new Error(
-      'windowsExecutableNames 里没有提取到任何候选扩展名。\n'
-      + '实现可能被重写了 —— 这本身就是需要人工核对的信号。',
-    );
-  }
-
-  // 搜索顺序：主函数里 roots 的构造方式决定先查什么
-  const body = resolveFn[1];
-  const searchOrder = [];
-  if (/NODEFAULTCURRENTDIRECTORYINEXEPATH/.test(body)) searchOrder.push('cwd-unless-disabled');
-  if (/windowsPathDirectories/.test(body)) searchOrder.push('PATH');
-  if (/hasPath/.test(body)) searchOrder.unshift('explicit-directory');
-
-  if (!searchOrder.length) {
-    throw new Error('未能从 resolveWindowsExecutable 提取搜索顺序');
-  }
+  const extensions = extractCandidateExtensions(namesBody);
+  const searchOrder = extractSearchOrder(resolveBody);
 
   return {
     // .com 在 .exe 之前 —— 顺序有语义，不能排序
     candidateExtensions: extensions,
     searchOrder,
-    respectsNoDefaultCurrentDir: /NODEFAULTCURRENTDIRECTORYINEXEPATH/.test(body),
+    respectsNoDefaultCurrentDir: /NODEFAULTCURRENTDIRECTORYINEXEPATH/.test(resolveBody),
   };
+}
+
+/** 抓到指定函数的体；抓不到就抛 —— 提取失败必须显式暴露。 */
+function locateFunctionBody(source, pattern, label) {
+  const m = source.match(pattern);
+  if (!m) throw new Error(`未能定位 ${label}`);
+  return m[1];
+}
+
+/**
+ * 提取候选扩展名（去重，保持首次出现顺序）。
+ *
+ * 两种写法都支持：模板串 `${command}${separator}com` 与直接字面量 `.exe`。
+ */
+function extractCandidateExtensions(body) {
+  // 扩展名是 `${command}${separator}com` 形式 → 取最后那个裸词
+  const fromTemplates = [...body.matchAll(/\}\s*([a-z]{2,5})`/g)].map((x) => x[1]);
+  // 也兼容直接写字面量的实现
+  const fromLiterals = [...body.matchAll(/["']\.([a-z]{2,5})["']/gi)].map((x) => x[1].toLowerCase());
+  const extensions = [...new Set([...fromTemplates, ...fromLiterals])];
+
+  if (extensions.length === 0) {
+    throw new Error(
+      'windowsExecutableNames 里没有提取到任何候选扩展名。\n'
+      + '实现可能被重写了 —— 这本身就是需要人工核对的信号。',
+    );
+  }
+  return extensions;
+}
+
+/**
+ * 从 resolveWindowsExecutable 的体推断搜索顺序。
+ *
+ * 顺序有语义：显式目录优先，其次 current-directory（除非被禁用标志关掉），最后 PATH。
+ */
+function extractSearchOrder(body) {
+  const order = [];
+  if (/NODEFAULTCURRENTDIRECTORYINEXEPATH/.test(body)) order.push('cwd-unless-disabled');
+  if (/windowsPathDirectories/.test(body)) order.push('PATH');
+  if (/hasPath/.test(body)) order.unshift('explicit-directory');
+
+  if (order.length === 0) {
+    throw new Error('未能从 resolveWindowsExecutable 提取搜索顺序');
+  }
+  return order;
 }
 
 /**
@@ -306,28 +336,35 @@ function fingerprintOf(contracts) {
 
 /** 逐项比较，返回人类可读的差异列表。 */
 function diffContracts(before, after) {
-  const diffs = [];
-  const keys = Object.keys(after);
-
-  for (const key of keys) {
-    const a = before?.[key];
-    const b = after[key];
-    if (a === undefined) {
-      diffs.push({ item: key, before: '(基线中不存在)', after: JSON.stringify(b) });
-      continue;
-    }
-    const sa = JSON.stringify(a);
-    const sb = JSON.stringify(b);
-    if (sa !== sb) {
-      diffs.push({ item: key, before: sa, after: sb });
-    }
-  }
+  // 现在有的每一项：新增或改变
+  const changed = Object.keys(after)
+    .map((key) => diffOne(before?.[key], after[key], key))
+    .filter(Boolean);
 
   // 基线有、现在没有的项也算漂移（契约项消失是重大变化）
-  for (const key of Object.keys(before || {})) {
-    if (!(key in after)) diffs.push({ item: key, before: JSON.stringify(before[key]), after: '(已消失)' });
+  return [...changed, ...diffRemoved(before, after)];
+}
+
+/** 基线里有、现在已消失的契约项。 */
+function diffRemoved(before, after) {
+  return Object.keys(before || {})
+    .filter((key) => !(key in after))
+    .map((key) => ({ item: key, before: JSON.stringify(before[key]), after: '(已消失)' }));
+}
+
+/**
+ * 比较单个契约项。无差异返回 null。
+ *
+ * 三种情况：基线里没有（新增）、值变了（修改）、完全相同（无差异）。
+ */
+function diffOne(beforeValue, afterValue, key) {
+  if (beforeValue === undefined) {
+    return { item: key, before: '(基线中不存在)', after: JSON.stringify(afterValue) };
   }
-  return diffs;
+
+  const before = JSON.stringify(beforeValue);
+  const after = JSON.stringify(afterValue);
+  return before === after ? null : { item: key, before, after };
 }
 
 function main() {
@@ -343,30 +380,42 @@ function main() {
   }
 
   const currentFp = fingerprintOf(current.contracts);
+  if (UPDATE) return saveBaseline(current, currentFp);
 
-  if (UPDATE) {
-    const record = {
-      dshVersion: current.dshVersion,
-      capturedAt: new Date().toISOString(),
-      fingerprint: currentFp,
-      contracts: current.contracts,
-    };
-    fs.writeFileSync(FINGERPRINT_FILE, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-    console.log(`已保存契约指纹: ${path.relative(REPO, FINGERPRINT_FILE)}`);
-    console.log(`  DSH 版本: ${current.dshVersion}`);
-    console.log(`  指纹: ${currentFp.slice(0, 16)}…`);
-    return 0;
-  }
+  const baseline = loadBaseline();
+  if (!baseline) return 1;
 
+  return compareAndReport(baseline, current, currentFp);
+}
+
+/** --update：把当前契约写成新基线。 */
+function saveBaseline(current, currentFp) {
+  const record = {
+    dshVersion: current.dshVersion,
+    capturedAt: new Date().toISOString(),
+    fingerprint: currentFp,
+    contracts: current.contracts,
+  };
+  fs.writeFileSync(FINGERPRINT_FILE, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+  console.log(`已保存契约指纹: ${path.relative(REPO, FINGERPRINT_FILE)}`);
+  console.log(`  DSH 版本: ${current.dshVersion}`);
+  console.log(`  指纹: ${currentFp.slice(0, 16)}…`);
+  return 0;
+}
+
+/** 读基线；不存在时报错并给出补救命令。 */
+function loadBaseline() {
   if (!fs.existsSync(FINGERPRINT_FILE)) {
     console.error(`❌ 没有基线指纹: ${path.relative(REPO, FINGERPRINT_FILE)}`);
     console.error('先运行: node scripts/contract-fingerprint.mjs --update');
-    return 1;
+    return null;
   }
+  return JSON.parse(fs.readFileSync(FINGERPRINT_FILE, 'utf8'));
+}
 
-  const baseline = JSON.parse(fs.readFileSync(FINGERPRINT_FILE, 'utf8'));
+/** 比对并输出结果；返回退出码（0 = 未漂移）。 */
+function compareAndReport(baseline, current, currentFp) {
   const diffs = diffContracts(baseline.contracts, current.contracts);
-
   const report = {
     verdict: diffs.length ? 'DRIFT' : 'STABLE',
     baselineDshVersion: baseline.dshVersion,
@@ -376,16 +425,25 @@ function main() {
     diffs,
   };
 
-  if (AS_JSON) {
-    console.log(JSON.stringify(report, null, 2));
-    return diffs.length ? 1 : 0;
-  }
+  if (AS_JSON) return printJsonReport(report, diffs.length > 0);
 
   if (!diffs.length) {
     console.log(`✅ 契约未漂移（DSH ${current.dshVersion}，基线抓取于 ${baseline.capturedAt?.slice(0, 10) ?? '未知'}）`);
     return 0;
   }
 
+  printDrift(diffs, baseline, current);
+  return 1;
+}
+
+/** --json 模式：输出机器可读报告，返回退出码。 */
+function printJsonReport(report, drifted) {
+  console.log(JSON.stringify(report, null, 2));
+  return drifted ? 1 : 0;
+}
+
+/** 打印漂移详情与下一步指引。 */
+function printDrift(diffs, baseline, current) {
   console.log(`⚠️  契约漂移：DSH ${baseline.dshVersion} → ${current.dshVersion}`);
   console.log('');
   for (const d of diffs) {
@@ -398,7 +456,6 @@ function main() {
   console.log('  1. 人工确认这些变化是否影响本项目的兼容层');
   console.log('  2. 补充对应的 A/B 用例（现有 28 项可能覆盖不到新分支）');
   console.log('  3. 确认无误后执行 --update 更新基线，并在 ROADMAP 兼容矩阵里记一笔');
-  return 1;
 }
 
 process.exit(main());

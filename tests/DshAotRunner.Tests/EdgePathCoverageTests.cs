@@ -574,7 +574,7 @@ public class EdgePathCoverageTests
     {
         // host 声明了 control 却没传 fd 7 → 必须明确报 EPROTOCOL。
         // 静默降级会让 target 永远等一条不存在的通道（表现为随机挂起）。
-        var r = JobRunner.MakeControlMissingError();
+        var r = RunnerErrors.ControlMissing();
 
         Assert.Equal("EPROTOCOL", r.Error.Code);
         Assert.Contains("control channel", r.Error.Message);
@@ -584,7 +584,7 @@ public class EdgePathCoverageTests
     [Fact]
     public void MakeJobCreateError_是EJOBCREATE并保留原始消息()
     {
-        var r = JobRunner.MakeJobCreateError(new Win32Exception(5, "CreateJobObjectW failed"));
+        var r = RunnerErrors.JobCreateFailed(new Win32Exception(5, "CreateJobObjectW failed"));
 
         Assert.Equal("EJOBCREATE", r.Error.Code);
         Assert.Contains("CreateJobObjectW failed", r.Error.Message);
@@ -598,7 +598,7 @@ public class EdgePathCoverageTests
         using var ch = new RecordingChannel();
         using var runner = new JobRunner([@"C:\nope\x.exe"], ch);
 
-        var r = runner.MakeSpawnError(new Win32Exception(2, "file not found"));
+        var r = RunnerErrors.SpawnFailed(new Win32Exception(2, "file not found"), runner.ProgramName);
 
         Assert.Equal("ENOENT", r.Error.Code);
         Assert.Equal("spawn", r.Error.Syscall);
@@ -611,7 +611,7 @@ public class EdgePathCoverageTests
         using var ch = new RecordingChannel();
         using var runner = new JobRunner([], ch);
 
-        var r = runner.MakeSpawnError(new Win32Exception(2, "boom"));
+        var r = RunnerErrors.SpawnFailed(new Win32Exception(2, "boom"), null);
 
         Assert.Null(r.Error.Path);
     }

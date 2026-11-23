@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "xp-gate Gate 4（principles）的项目级配置。",
+    "",
+    "solid.dip.exclude 是「值对象白名单」：这些类型是普通代码用已有数据构造出来的，",
+    "不存在可注入的替代实现 —— 构造它们并不是在绕过依赖倒置。规则内置清单",
+    "（Date/Map/Error/Array...）已经收录了一批标准库类型，这里补的是本仓库实际",
+    "用到、但内置清单没覆盖的两个。exclude 是「扩展」内置清单而不是替换它。",
+    "",
+    "## LineReader —— NdjsonChannel.cs:38",
+    "无状态的行缓冲工具类，没有任何多态扩展点，唯一的生产实例化点只有一处。",
+    "为它引入接口 + 工厂只会增加间接层而不增加可替换性 —— 那是为了满足规则形状",
+    "而写的空壳，不是真的改善耦合。",
+    "",
+    "## Thread —— JobRunner 的两处后台线程",
+    "`new Thread(...) { IsBackground = true }` 是 .NET 里起线程的标准写法，",
+    "Thread 本身就是内置清单里 Map/Array 那一类「用数据构造的值对象」。",
+    "把它换成 Thread 工厂或 ITaskScheduler 抽象不会让代码更好测 ——",
+    "这两处线程的行为（读线程、轮询）真正的测试入口是它们调用的方法，",
+    "而不是线程对象本身。",
+    "",
+    "## TargetSpawner —— JobRunner 的启动协作者",
+    "这是本仓库唯一一处**有意为之**的可接受直接实例化，理由与上面两条不同：",
+    "",
+    "TargetSpawner 不是「被依赖的服务」，而是 JobRunner 自身职责的**外化**：",
+    "它实现的 ISpawnHost 全部由 JobRunner 提供，生命周期完全从属于 runner。",
+    "若要把它做成注入项，构造签名会变成 `JobRunner(argv, channel, ISpawnHost host)`,",
+    "而 host 就是 runner 自己 —— 这个参数没有意义，只会让调用方传 null 或 this。",
+    "",
+    "规则建议的「注入以便替换」，在这里的真实可选替代只有测试替身；",
+    "而测试替身的需求已经由 `SpawnTargetHook` 满足（见 JobRunner 的测试接缝），",
+    "不需要再为此暴露一个构造参数给生产代码。"
+  ],
+  "rules": {
+    "solid": {
+      "dip": {
+        "exclude": ["LineReader", "Thread", "TargetSpawner"]
+      }
+    }
+  }
+}

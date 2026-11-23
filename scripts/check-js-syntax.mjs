@@ -42,22 +42,30 @@ const JS_EXT = new Set(['.js', '.cjs', '.mjs']);
 
 /** 递归收集仓库内需要检查的 JS 文件（返回相对路径）。 */
 function collect(dir, out = []) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return out; // 目录不可读：跳过，而不是让整个检查崩掉
-  }
+  const entries = safeReadDir(dir);
   for (const e of entries) {
     const abs = join(dir, e.name);
-    if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name)) continue;
-      collect(abs, out);
-    } else if (e.isFile() && JS_EXT.has(extname(e.name))) {
-      out.push(relative(REPO_ROOT, abs));
-    }
+    if (shouldSkip(e)) continue;
+
+    if (e.isDirectory()) collect(abs, out);
+    else out.push(relative(REPO_ROOT, abs));
   }
   return out;
+}
+
+/** 读目录；不可读时返回空数组 —— 跳过，而不是让整个检查崩掉。 */
+function safeReadDir(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+/** 该条目是否跳过：保留目录白名单（node_modules 等）与非 JS 文件。 */
+function shouldSkip(entry) {
+  if (entry.isDirectory()) return SKIP_DIRS.has(entry.name);
+  return !(entry.isFile() && JS_EXT.has(extname(entry.name)));
 }
 
 /**

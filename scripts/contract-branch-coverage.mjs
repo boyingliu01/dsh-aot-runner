@@ -45,6 +45,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { findLibFiles } from './lib/locate-contract-package.mjs';
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const JSON_OUT = process.argv.includes('--json');
@@ -111,38 +112,55 @@ function mergeCoverage(covDir) {
   const merged = new Map();
 
   for (const file of readdirSync(covDir)) {
-    let data;
-    try {
-      data = JSON.parse(readFileSync(path.join(covDir, file), 'utf8'));
-    } catch {
-      continue; // 半写入的文件跳过
-    }
-
-    for (const entry of data.result) {
-      if (!CONTRACT_FILE_RE.test(entry.url)) continue;
-
-      const prev = merged.get(entry.url);
-      if (!prev) {
-        // 深拷贝，避免改到原对象
-        merged.set(entry.url, entry.functions.map((f) => ({
-          functionName: f.functionName,
-          ranges: f.ranges.map((r) => ({ ...r })),
-        })));
-        continue;
-      }
-
-      prev.forEach((fn, i) => {
-        const other = entry.functions[i];
-        if (!other) return;
-        fn.ranges.forEach((rg, j) => {
-          const o = other.ranges[j];
-          if (o && o.count > rg.count) rg.count = o.count;
-        });
-      });
-    }
+    const data = readCoverageJson(path.join(covDir, file));
+    if (data) mergeFileCoverage(merged, data);
   }
 
   return merged;
+}
+
+/** 读一个覆盖 JSON；半写入或被截断的文件返回 null（跳过而不是崩）。 */
+function readCoverageJson(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    return null; // 半写入的文件跳过
+  }
+}
+
+/** 把一个文件的覆盖数据并进累计表。 */
+function mergeFileCoverage(merged, data) {
+  for (const entry of data.result) {
+    if (!CONTRACT_FILE_RE.test(entry.url)) continue;
+
+    const prev = merged.get(entry.url);
+    if (!prev) {
+      merged.set(entry.url, cloneFunctions(entry.functions));
+      continue;
+    }
+
+    mergeFunctions(prev, entry.functions);
+  }
+}
+
+/** 深拷贝函数覆盖数据，避免改到原对象。 */
+function cloneFunctions(functions) {
+  return functions.map((f) => ({
+    functionName: f.functionName,
+    ranges: f.ranges.map((r) => ({ ...r })),
+  }));
+}
+
+/** 同一函数的多份区间取命中次数最大值。 */
+function mergeFunctions(prev, other) {
+  prev.forEach((fn, i) => {
+    const peer = other[i];
+    if (!peer) return;
+    fn.ranges.forEach((rg, j) => {
+      const o = peer.ranges[j];
+      if (o && o.count > rg.count) rg.count = o.count;
+    });
+  });
 }
 
 /** 从源码静态数判定点。 */
@@ -168,54 +186,62 @@ function countStaticBranches(src) {
   return { total, detail };
 }
 
+/**
+ * 统计**单个函数**的覆盖情况。
+ *
+ * 拆出来之前 summarizeRuntime 的认知复杂度是 16（阈值 15）—— 三重嵌套循环
+ * 加上一个 else-if，全部挤在一个函数里。这里把「一个函数怎么算」与
+ * 「所有函数怎么汇总」分开，两段各自都能一眼读完。
+ */
+function tallyFunction(fn) {
+  const hit = fn.ranges.some((r) => r.count > 0);
+  const coveredRanges = fn.ranges.filter((r) => r.count > 0).length;
+  return {
+    covered: hit,
+    ranges: fn.ranges.length,
+    coveredRanges,
+    // 只登记「没被执行到**且**有名字」的函数：匿名函数没有可读标识，
+    // 报出来对使用者没有信息量。
+    name: hit ? null : fn.functionName || null,
+  };
+}
+
+/** 把一批 tally 累加进滚动汇总。 */
+function accumulate(totals, tally) {
+  totals.totalFns += 1;
+  if (tally.covered) totals.coveredFns += 1;
+  if (tally.name) totals.uncovered.push(tally.name);
+  totals.totalRanges += tally.ranges;
+  totals.coveredRanges += tally.coveredRanges;
+}
+
 /** 从合并后的覆盖数据算运行时覆盖。 */
 function summarizeRuntime(functionsByUrl) {
-  let totalFns = 0;
-  let coveredFns = 0;
-  let totalRanges = 0;
-  let coveredRanges = 0;
-  const uncovered = [];
+  const totals = {
+    totalFns: 0,
+    coveredFns: 0,
+    totalRanges: 0,
+    coveredRanges: 0,
+    uncovered: [],
+  };
 
   for (const functions of functionsByUrl.values()) {
-    for (const fn of functions) {
-      totalFns++;
-      const hit = fn.ranges.some((r) => r.count > 0);
-      if (hit) coveredFns++;
-      else if (fn.functionName) uncovered.push(fn.functionName);
-
-      for (const rg of fn.ranges) {
-        totalRanges++;
-        if (rg.count > 0) coveredRanges++;
-      }
-    }
+    for (const fn of functions) accumulate(totals, tallyFunction(fn));
   }
 
   return {
-    functions: { covered: coveredFns, total: totalFns },
-    ranges: { covered: coveredRanges, total: totalRanges },
-    uncoveredFunctions: uncovered.sort(),
+    functions: { covered: totals.coveredFns, total: totals.totalFns },
+    ranges: { covered: totals.coveredRanges, total: totals.totalRanges },
+    uncoveredFunctions: totals.uncovered.sort(),
   };
 }
 
 /** 找契约文件（用于静态统计）。 */
 function findContractFiles() {
-  const roots = [];
-  if (process.env.DSH_HOME) {
-    roots.push(path.join(process.env.DSH_HOME, '..', '.workbuddy', 'binaries', 'node', 'workspace'));
-  }
-  if (process.env.USERPROFILE) {
-    roots.push(path.join(process.env.USERPROFILE, '.workbuddy', 'binaries', 'node', 'workspace'));
-  }
-  roots.push(REPO_ROOT);
-
-  for (const root of roots) {
-    const lib = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib');
-    try {
-      const files = readdirSync(lib).filter((f) => CONTRACT_FILE_RE.test(f));
-      if (files.length > 0) return { lib, files };
-    } catch { /* 该 root 下没有，继续 */ }
-  }
-  return null;
+  // 查找逻辑与 contract-fingerprint.mjs 共用（见 lib/locate-contract-package.mjs）：
+  // 两个脚本是「契约漂移检测」的两半，候选目录与优先级必须一致，
+  // 各写一份迟早会出现「指纹能算、覆盖率算不了」的分裂。
+  return findLibFiles(REPO_ROOT, CONTRACT_FILE_RE);
 }
 
 const pct = (c, t) => (t === 0 ? '0.0' : ((c / t) * 100).toFixed(1));

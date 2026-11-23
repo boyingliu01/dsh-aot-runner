@@ -3,6 +3,65 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.6] - 2026-11-23
+
+**技术债清零，无对外行为变更。** 335 个测试通过（+12），生产源码覆盖率保持 100%。
+
+本版是对 xp-gate v0.38.125 全量复核后的一次集中清理：凡是「工具报出来的真实问题」
+全部修掉，凡是「工具自己报错的」全部归档到上游并写明为什么不要在本仓库绕。
+
+### 变更
+
+- **拆分 `JobRunner` 的启动职责，取出 3 个类。** 46 → 21 个方法：
+  - `ProcessLauncher` —— CreateProcessW 的原语（句柄继承开关、STARTUPINFO 构造、
+    ResumeThread 判定）。全部 static 纯函数，**首次可以被单独测试**。
+  - `TargetSpawner` —— 完整的启动编排（解析 → 构造 → 继承控制 → 起进程 → 入 Job → 放行），
+    通过窄接口 `ISpawnHost` 取依赖，不直接摸 runner 字段。
+  - `RunnerErrors` —— 协议错误结果工厂。
+- **进程句柄改为返回值。** 原先 `LaunchSuspended` 直接写 `_process`/`_thread`/`_targetPid`，
+  现在一次性返回 `SpawnedProcess`：「启动成功」有了单一表达点，中间状态不再可见。
+- **`ResumeThread` 的判定逻辑统一到 `ProcessLauncher.ResumeSuspendedThread`。**
+  此前 `JobRunner` 与 `TargetSpawner` 各有一份实现，只有一份被测试覆盖 ——
+  这是覆盖率骗局的经典来源。现在两边共用，变异测试确认两层测试都能抓到。
+- **`scripts/` 抽出 `lib/locate-contract-package.mjs`。** `contract-branch-coverage.mjs`
+  与 `contract-fingerprint.mjs` 各有一份 54 token 的包查找逻辑。删除重复的同时
+  消除了「指纹能算、覆盖率算不了」这种分裂的隐患。
+- **`summarizeRuntime` 认知复杂度 16 → 5。** 拆成 `tallyFunction`（一个函数怎么算）
+  与 `accumulate`（所有函数怎么汇总）。
+- **Gate 3 突破：所有函数 CCN ≤ 5。** 提交时 Gate 3 拦下 6 个高复杂度函数
+  （`ResolveStdioHandles` 8、`extractExecutableResolution` 8、`main` 10、
+  `diffContracts` 7、`mergeCoverage` 6、`extractStartRequestFields` 6），
+  逐个按职责拆分。最终 `lizard -C 5` 的 warning 计数为 **0**。
+
+### 修复
+
+- **`.archlint.yaml` 入口脚本白名单补齐 5 条**（issue #32）。此前白名单停在 3 条，
+  而实际入口脚本已有 8 个，导致 5 个文件被报成 Dead Code。archlint 从
+  **8.5/10 / 7 smells → 10.0/10 / 0 smells**。
+- **新增白名单防漂移自检**（`test/archlint-whitelist-selftest.mjs`，接进 `npm run lint`）。
+  双向都能报警：漏登记（被引用但不在白名单）与僵尸条目（白名单里有但指向不存在的文件）。
+  已对两个方向各做一次变异测试。
+- **新增 `.principlesrc`。** 用规则**自身**的 `solid.dip.exclude` 机制豁免 3 个值对象
+  （`LineReader`、`Thread`、`TargetSpawner`），每条都写清了理由。没有放宽任何阈值。
+- **补齐 12 个测试**：`ProcessLauncher` 的 `cbReserved2` WORD 上限、句柄有效性、
+  ResumeThread 三条支路；`TargetSpawner` 的失败上报路径。
+
+### 文档
+
+- `docs/TODO.md` 重写为「剩余任务清单」，删除已不适用的 WSL 迁移章节，
+  并按 2026-11-23 的实测结果更新每一条的验证状态。
+
+### 已知但**不做**（工具误报，已在文档中逐条证伪）
+
+- `clean-code.long-function` 报出 8 条，实际最长函数 48 行（阈值 50），
+  且被点名的多数是接口声明行 —— xp-gate [#861](https://github.com/boyingliu01/xp-gate/issues/861)。
+- `clean-code.god-class` / `solid.srp`：`JobRunner` 21 个方法（阈值 15）。
+  剩余方法全部围绕同一份 runner 状态（`_gate`/`_finished`/`_process`），
+  再拆需要把这些字段的所有权切碎，收益为负。`JobRunner.Polling.cs` 的作者
+  已在文件头论证过为什么 partial 而不是独立类，本版维持该判断。
+- `clean-code.too-many-params`（info 级）：`Native.CreateProcessW` 是 P/Invoke 签名，
+  参数由 Win32 ABI 决定，不可能改。
+
 ## [0.2.5] - 2026-11-22
 
 **内部重构与工具链修复，无对外行为变更。建议升级，但不是必须。**

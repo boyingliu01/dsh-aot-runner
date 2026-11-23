@@ -44,6 +44,20 @@ ignore:
   - 'scripts/coverage-summary.py'
   - 'eslint.config.mjs'
 
+  # 2026-11-23 补齐（issue #32）：白名单此前只维护了 3 条，而实际入口脚本
+  # 已有 8 个，于是新增的 5 个全被报成 Dead Code —— 承诺的「保证将来真新增的
+  # 孤儿模块仍会被检出来」被误报噪声稀释了。逐个核实过引用位置：
+  #   bench/load-matrix.cjs                 README/ROADMAP/docs/ci.yml 等 8 处引用
+  #   scripts/check-js-syntax.mjs           package.json lint:syntax + ci.yml（8 处）
+  #   scripts/check-release.mjs             build.sh prepublishOnly 调用（6 处）
+  #   scripts/contract-branch-coverage.mjs  ci.yml 三处调用（7 处）
+  #   scripts/contract-fingerprint.mjs      package.json 两个 script + ci.yml（10 处）
+  - 'bench/load-matrix.cjs'
+  - 'scripts/check-js-syntax.mjs'
+  - 'scripts/check-release.mjs'
+  - 'scripts/contract-branch-coverage.mjs'
+  - 'scripts/contract-fingerprint.mjs'
+
   # ---- 非源码 / 生成物 ----
   - '.git/**'
   - 'node_modules/**'

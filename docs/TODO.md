@@ -3,8 +3,9 @@
 > **最后核实**：2026-11-23（xp-gate **v0.38.125**）
 > **基准提交**：`52c33f6`（0.2.5，已推送到 `origin/main`）
 > **工具版本**：xp-gate v0.38.125 / .NET SDK 10.0.404 / Node 22+
-> **当前状态**：`build.sh --check` 全绿，322 C# 测试通过，生产源码覆盖率 100%，
-> `npm run lint` exit 0，`principles src/` 0 error / 7 warning / 1 info
+> **当前状态**：`build.sh --check` 全绿，335 C# 测试通过，生产源码覆盖率 100%（813/813），
+> `npm run lint` exit 0，`principles src/` 0 error。Gate 3 零 CCN 警告，
+> Gate 6 archlint 10.0/10（0 smells）。
 >
 > ## 环境决策（2026-11-23 已定）
 >
@@ -133,6 +134,64 @@ archlint 仍报这 5 个文件为 `Dead Code MEDIUM`。**已逐个确认它们�
 | `test/` 下 CCN > 5 | 约 9 个函数 | e2e 验证脚本，本机跑不了，**无法验证重构等价性 → 不动** |
 | `bench/node-tuning/` CCN > 5 | 34 | 一次性实验脚本，刻意自包含（`.archlint.yaml` 有说明） |
 | `package-lock.json` 自重复 | 1 | 生成物，不可手改 |
+
+### TODO-1.7 `test:coverage` 不产出 Gate 5 需要的 `coverage-summary.json`（**已修**）
+
+**症状**：任何改动都会被 pre-commit 的 Gate 5 拦住：
+
+```
+❌ BLOCKED - coverage/coverage-summary.json not found.
+   No coverage could be measured, so the 80% floor could not be checked.
+```
+
+**根因**：`npm run test:coverage` 原来是 `c8 node --test ...`，而 c8 的**默认 reporter
+只有 `text`** —— 它打印到终端，不写文件。Gate 5 要的是 istanbul 格式的
+`coverage/coverage-summary.json`，本项目从来没产出过它。
+
+`.gitignore` 第 101 行的注释早就预见到「不能整目录忽略 coverage/」，
+但没人注意到那个被保护的文件其实**根本不存在**。
+
+**修复**：`test:coverage` 加上 `--reporter=json-summary`：
+
+```json
+"test:coverage": "c8 --reporter=text --reporter=json-summary node --test plugin/test/index.test.js"
+```
+
+实测产出：lines 89.48%（门槛 80%）。
+
+**注意**：Gate 5 还有 freshness 检查（mtime 必须晚于本次 hook 启动），
+所以**每次提交前都要重跑** `npm run test:coverage`。这是 Gate 5 的设计，
+不是本项目的额外要求。
+
+### TODO-1.8 Gate 12 的 `no-eof-newline` 在多语言仓库上报假阳性（**上游缺陷，待归档**）
+
+**症状**：pre-commit 的 Gate 12 报告一批文件缺 EOF 换行，但逐字节验证
+全部以 LF（0x0a）结尾：
+
+```
+⚠️  Missing EOF newline in:
+   - .archlint.yaml  - VERSION  - package.json  ...
+```
+
+**已做的验证**：
+
+| 验证 | 结果 |
+|---|---|
+| `git cat-file blob :<f> \| tail -c 1 \| xxd`，20 个 staged 文件 | 全部 `0a` |
+| 在干净仓库里造一个**真**缺换行的文件 | scanner **正确**报出 `c.txt` |
+| 用与 hook 完全相同的 `paths` 手工喂 scanner | 输出**空**（无 NOEOF） |
+| 在 hook 里插桩，抓真实的 `paths` 与 `_out` | `paths` 与我手工的一致；`_out` 却有 `NOEOF:` |
+
+即：**同一份 scanner、同一份输入，手工跑是空，在 hook 里跑却报错。**
+差异只可能来自 hook 的运行环境（`GATE_DIR` 解析、`awk` 版本/locale、
+或 `adapters/` 与 `hooks/` 两份实现的交互）—— 已在
+`~/.config/xp-gate/` 下确认存在 `adapters/gate-12-file-hygiene.sh`
+和 `hooks/gate-entries/gate-12-entry.sh` 两个入口，前者被后者 source。
+
+**影响**：Gate 12 是 **WARN 级、非阻断**，不影响提交。**不要去"修"文件** ——
+文件是对的，加/删换行只会让下一次报告换一批文件名。
+
+**下一步**：按 §2 的规矩，归档到上游并附上上面的对照表 + 插桩脚本。
 
 ---
 
