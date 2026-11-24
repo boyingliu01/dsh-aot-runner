@@ -212,6 +212,50 @@ archlint 仍报这 5 个文件为 `Dead Code MEDIUM`。**已逐个确认它们�
 （2026-11-23）。附了逐字节对照表、干净仓库里"真缺失能被正确报出"的证明、
 hook 插桩抓到真实 `paths` 的记录，以及多字节 UTF-8 让 `length($0)+1` 失真的线索。
 
+### TODO-1.10 Gate 0 的版本扇出只暂存仓库根 `package.json`（**已修，0.2.7**）
+
+*验证状态：**已修复并端到端验证***
+
+**症状**（0.2.7 提交时真实踩到两次）：
+
+1. 改生产源码提交，Gate 0 拦下并提示：
+
+   ```
+   ERROR: Committing production source to a protected branch without a VERSION/CHANGELOG update.
+   Run the fan-out to repair them:
+     node scripts/sync-version.cjs
+   ```
+
+   照着执行 → `Cannot find module 'D:\...\scripts\sync-version.cjs'`。
+
+2. 补上该文件后，Gate 0 的自动扇出**报 PASSED**，但实际只暂存了仓库根的
+   `package.json` —— `plugin/package.json` 与 `package-lock.json` 被改了却没进暂存区。
+   下一次提交才因为版本漂移被拦下。
+
+**根因**：`gate-0-entry.sh:166` 只在 `scripts/sync-version.cjs` 存在时才自动扇出，
+**但 :362-363 的报错文案是无条件打印的**；而它的暂存清单是写死的路径
+（`package.json`、`src/npm-package/**`），不认识本仓库的 `plugin/package.json`。
+
+**修法**（全部在项目侧，不改上游钩子）：
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/check-version.mjs --sync` | 以 `VERSION` 为准写齐 4 处（含 `package-lock.json` 的**两个** version 字段），幂等 |
+| `scripts/check-version.mjs --staged` | 抓「已同步到磁盘但没暂存」的文件，直接给出 `git add ...` 命令 |
+| `scripts/sync-version.cjs` | 适配层，把名字对齐到 xp-gate 期望的，逻辑仍只有一份 |
+| `test/check-version-verify.js` | 7 个测试，在临时仓库里跑，重点覆盖失败分支 |
+| `npm run sync:version` / `check:version` | 手工入口 |
+
+**端到端验证**（真实提交，非模拟）：
+
+```
+🔄 Gate 0: VERSION staged — running sync-version to fan out...
+✅ PASSED - Gate 0: Version Consistency Check
+```
+
+**踩过的坑**：临时仓库里跑 `git commit` 会触发全局 pre-commit 钩子，
+13 道门禁在空仓库上必然失败、耗时 20s。测试里必须传 `-c core.hooksPath=`。
+
 ### TODO-1.9 Gate 6 的架构规则**完全不覆盖 C#**（已知盲区，暂不投入）
 
 **症状**：Gate 6 在 pre-commit 里对 C# 是 SKIP：

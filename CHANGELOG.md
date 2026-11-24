@@ -3,6 +3,54 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.8] - 2026-11-24
+
+**主题：修好版本号扇出 —— 让 Gate 0 的提示不再指向一个不存在的脚本。**
+
+### 问题
+
+0.2.7 提交时连续撞了两次：
+
+1. 改生产源码提交，Gate 0 拦下并提示执行 `node scripts/sync-version.cjs`。
+   照做 → `Cannot find module`。**这个脚本在本仓库从来不存在。**
+
+2. 把脚本补上之后，Gate 0 的自动扇出报 **PASSED**，但只暂存了仓库根的
+   `package.json` —— `plugin/package.json` 和 `package-lock.json` 改了却没进暂存区。
+   下一次提交才因为版本漂移被拦。
+
+根因在 `gate-0-entry.sh`：**报错文案无条件打印** `scripts/sync-version.cjs`，
+而自动扇出只在文件存在时才跑；且它的暂存清单是写死的路径，不认识本仓库布局。
+
+### 修法（全部在项目侧，不改上游钩子）
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/check-version.mjs --sync` | 以 `VERSION` 为准写齐 4 处，含 `package-lock.json` 的**两个** version 字段；幂等 |
+| `scripts/check-version.mjs --staged` | 抓「已同步到磁盘但没暂存」的文件，直接给 `git add ...` 命令 |
+| `scripts/sync-version.cjs` | 适配层，名字对齐 xp-gate 期望，逻辑仍只有一份 |
+| `test/check-version-verify.js` | 7 个测试，临时仓库里跑，重点覆盖失败分支 |
+| `npm run sync:version` / `check:version` | 手工入口 |
+
+另外修了 ESLint 的一个**配置缺口**：`scripts/**/*.cjs` 原先落到兜底 block，
+没有 node 全局变量，`sync-version.cjs` 因此被报 5 条 `no-undef`——那是配置问题不是代码问题。
+
+### 验证
+
+真实提交（非模拟）：
+
+```
+🔄 Gate 0: VERSION staged — running sync-version to fan out...
+✅ PASSED - Gate 0: Version Consistency Check
+```
+
+`--sync` 往返测试：改 `VERSION` → sync → 五处一致 → 再 sync 报「无需改动」（幂等）。
+`--staged` 反向测试：只暂存 `package.json` 时，精确报出漏掉的另外两个文件。
+
+### 踩坑
+
+临时仓库里跑 `git commit` 会触发全局 pre-commit 钩子，13 道门禁在空仓库上
+必然失败且耗时 20s。测试里必须传 `-c core.hooksPath=`。
+
 ## [0.2.7] - 2026-11-24
 
 **主题：把 `JobRunner` 的 god-class 告警清零 —— xp-gate principles 对 `src/` 的可修项全部消除。**

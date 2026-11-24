@@ -183,6 +183,21 @@ export default [
     },
   },
 
+  // 仓库脚本里的 CJS
+  //
+  // 为什么单独一条：`scripts/sync-version.cjs` 是 xp-gate Gate 0 按名字调用的适配层
+  // （它只认 `scripts/sync-version.cjs`），必须是 CommonJS。而上面的 `test/`+`bench/`
+  // block 不覆盖 `scripts/`，于是它落到兜底 block，因为没有 node 全局变量
+  // 报出 5 条 no-undef —— 那些是**配置缺口**，不是代码问题。
+  {
+    files: ['scripts/**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'commonjs',
+      globals: { ...NODE_GLOBALS, ...COMMONJS_GLOBALS },
+    },
+  },
+
   // 仓库测试与基准（CJS，且允许更多自由度）
   //
   // 注意同时匹配 `.cjs`：`bench/load-matrix.cjs` 是一个真实存在的 CJS 基准，
