@@ -6,7 +6,7 @@
 > **最新发布**：2026-11-24 重新构建并本机升级，85 项验证全过（含 A/B 53/53），
 > 新二进制已生效（首个实例 PID 20212 启动于 11:46:40）。
 >
-> **当前状态**：`build.sh --check` 全绿，335 C# 测试通过，生产源码覆盖率 100%（813/813），
+> **当前状态**：`build.sh --check` 全绿，339 C# 测试通过，生产源码覆盖率 100%（878/878），
 > `npm run lint` exit 0，`principles src/` 0 error。Gate 3 零 CCN 警告，
 > Gate 6 archlint 10.0/10（0 smells）。
 >
@@ -96,25 +96,39 @@ archlint 仍报这 5 个文件为 `Dead Code MEDIUM`。**已逐个确认它们�
 **理由**：白名单承诺「保证将来真新增的孤儿模块仍会被检出来」，但这个承诺已经失效过一次
 （3 条白名单 vs 5+ 个入口脚本）。靠人记得补是不可靠的，要机器盯。
 
-### TODO-1.4 JobRunner 仍偏大（issue #31 的收尾）
+### TODO-1.4 JobRunner 拆分（issue #31）—— **已完成（0.2.7）**
 
-*验证状态：**已确认当前数值***
+*验证状态：**已完成，`xp-gate principles src/JobRunner.cs` 零违规***
 
-| 指标 | 本轮前 | 当前 | 阈值 |
-|---|---|---|---|
-| `src/JobRunner.cs` | 1468 行 | **983 行** | 1150（`large-file` 已过） |
-| `god-class` | 65 方法 | **45 方法** | 15 |
+| 指标 | 起点 | 0.2.6 | **0.2.7** | 阈值 |
+|---|---|---|---|---|
+| `src/JobRunner.cs` | 1468 行 | 493 行 | **约 460 行** | 1150 |
+| `god-class` 方法数 | 65 | 21 | **15** | 15 ✅ |
+| `large-file` | 超 | 过 | 过 | 1150 |
+| `long-function` | 4 条 | 0 条 | **0 条** | 50 |
+| `too-many-params` | 1 条 | 0 条 | **0 条** | 7 |
 
-已完成的部分（**不要回退**）：抽出 `LineReader.cs`、`EnvironmentBlock.cs`、
-`ExecutableResolver.cs`、`JobRunner.Polling.cs`。每一项都做过逐行等价验证（227 行完全相同）。
+**0.2.7 抽出的 5 个类**（每个对应一条真实职责边界，不是为凑数字）：
 
-- [ ] 可选：继续把「结果投递」（`SerializeResult` / `PublishResult` / `EmitSpawnEnoent` /
-      `WindowsSpawnErrorCodes` / `NodeSpawnDetailCodes`）抽成 `JobRunner.Results.cs`
-- [ ] **不建议**为凑数字拆到 15 个方法以下 —— 那会拆散「进程生命周期」这个真实职责
+| 新类 | 职责 | 独立理由 |
+|---|---|---|
+| `IpcReader` | 读通道 → inbox 后台线程 | 并发边界。不变量：无论 EOF 还是读异常，inbox 恰好收到一个 `null` |
+| `MessageType` | 一行 JSON 的 `type` 解析 | 纯函数；返回 error 而非回调，避免与传输层绑死 |
+| `StartRequestParser` | start 请求解析 | 前置条件写进注释，不留永不进入的分支 |
+| `ResourceReleaser` | §8/§9 释放顺序 | 顺序是协议契约，独立后只有一处可读 |
+| `PollerLauncher` | §7 轮询线程启动 | — |
 
-> **重要**：`xp-gate principles src/` 目前报的 3 条 `long-function`（`EmitSpawnEnoent` 58 行
-> 实为 7 行、`Finish` 57 行实为 12 行）是 **xp-gate 的测量缺陷，不是技术债**。
-> 详见 `docs/XP-GATE-BASELINE.md` §7（含 80 行可复现片段）。**不要去"修"它们。**
+**合并的重复**：`Finish` 与 `OnDisconnect` 原是两份逐字相同的骨架（加锁 → 判重 →
+置 finished → 释放资源），只差一个 `ExitCode`。合并为 `Finish(int? exitCode = null)`。
+
+> ⚠️ **踩过的坑**：内联 `HandleEof` 会让 `PumpMessages` 的 CCN 从 5 升到 6。
+> **方法数门禁和复杂度门禁会互相拉扯** —— 只看其中一个会把另一个推红。
+> 每次改完都要同时跑 `xp-gate principles` 和 `lizard -C 5`。
+
+> **重要**：`xp-gate principles src/` 仍报的 8 条 `long-function`（`EmitProtocolError`
+> 实际 29 行报 71 行、`Trace.Timed` 根本不存在却报 52 行、`TargetSpawner` 最长函数
+> 实际 27 行报 59~373 行）是 **xp-gate #861 的测量失步，不是技术债**。
+> 详见 `docs/XP-GATE-BASELINE.md` §7。**不要去"修"它们。**
 
 ### TODO-1.5 `NdjsonChannel` 的 `solid.dip` 告警
 
