@@ -58,6 +58,15 @@ ignore:
   - 'scripts/contract-branch-coverage.mjs'
   - 'scripts/contract-fingerprint.mjs'
 
+  # 2026-11-24（0.2.8）：sync-version.cjs 不是被 import 的模块，而是
+  # **按文件名约定被外部工具调用**的适配层 —— xp-gate 的 Gate 0 在 VERSION
+  # 被暂存时执行 `node scripts/sync-version.cjs`（gate-0-entry.sh:166）。
+  # 它对「有没有被 import」的判据必然误报，与上面几个入口脚本同类。
+  # 这是 issue #32 那类问题的复发：**新增入口脚本时忘了同步白名单**。
+  # 自测 `test/archlint-whitelist-selftest.mjs` 只守「条目没有僵尸」，
+  # 守不住「新增了入口却没登记」，只能靠 archlint 在 CI 里报出来。
+  - 'scripts/sync-version.cjs'
+
   # ---- 非源码 / 生成物 ----
   - '.git/**'
   - 'node_modules/**'
