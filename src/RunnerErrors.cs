@@ -43,6 +43,17 @@ internal static class RunnerErrors
         },
     };
 
+    /// <summary>协议层错误（EPROTOCOL）：非法帧、未知 type、重复 start 等。</summary>
+    /// <remarks>
+    /// 这一类全部是 host 侧违约，不是 Win32 失败 —— 所以不带 syscall/path。
+    /// 归到工厂里而不是留在 JobRunner 上：错误形状只该有一处定义，
+    /// 否则 node 与 AOT 两条路径的字节迟早会漂。
+    /// </remarks>
+    internal static ErrorResult ProtocolViolation(string message) => new()
+    {
+        Error = new SerializedError { Name = "Error", Message = message, Code = "EPROTOCOL" },
+    };
+
     /// <summary>Job Object 创建失败的错误结果。</summary>
     internal static ErrorResult JobCreateFailed(Win32Exception ex) => new()
     {

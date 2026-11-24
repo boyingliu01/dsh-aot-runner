@@ -3,6 +3,67 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.7] - 2026-11-24
+
+**主题：把 `JobRunner` 的 god-class 告警清零 —— xp-gate principles 对 `src/` 的可修项全部消除。**
+
+### 目标
+
+xp-gate 对 `src/JobRunner.cs` 的两条告警是本次唯一**可修**的项：
+
+```
+clean-code.god-class  Class "JobRunner" has too many methods: 21 (maximum: 15)
+solid.srp             同上
+```
+
+其余 10 条逐条证伪后确认不可修（见下）。
+
+### 抽出的 5 个类，每个对应一条真实的职责边界
+
+| 新类 | 职责 | 为什么值得独立 |
+|---|---|---|
+| `IpcReader` | 读通道 → 投递 inbox 的后台线程 | 并发边界，不认识 runner 状态。关键不变量：无论 EOF 还是读异常，inbox 都恰好收到一个 `null` |
+| `MessageType` | 一行 JSON 的 `type` 解析 | 纯函数。返回 error 而非回调投递，避免与传输层绑死 |
+| `StartRequestParser` | start 请求解析 | 前置条件写进注释，不保留永远进不去的分支 |
+| `ResourceReleaser` | §8/§9 释放顺序 | 顺序（TerminateJob → CloseJob → CloseProcess）是协议契约，独立后只有一处可读 |
+| `PollerLauncher` | §7 轮询线程启动 | — |
+
+### 合并的重复
+
+`Finish` 与 `OnDisconnect` 原本是两份**逐字相同**的骨架（加锁 → 判重 → 置 finished →
+释放资源），只差一个 `ExitCode`。合并为 `Finish(int? exitCode = null)`，
+「一次终态只清理一次」这个不变量从两条实现变成一条。
+
+### 过程中自己引入、又修掉的两个问题
+
+1. **覆盖率从 100% 掉到 99.4%（873/878）。** `IpcReader` 的异常分支与
+   `SpawnTargetHook` 成功分支无人覆盖。后者是**原有缺口**——该 hook 只被
+   「抛异常」的用例用过，成功路径从未执行过。
+   补 4 个测试后回到 **100%（878/878）**。
+
+2. **内联 `HandleEof` 让 `PumpMessages` 的 CCN 从 5 升到 6**，超出门禁阈值。
+   改回独立方法后 CCN 0 警告、方法数同时达标（15）。
+   这暴露了一个陷阱：方法数门禁和复杂度门禁会互相拉扯，**只看其中一个会把另一个推红**。
+
+### 结果
+
+| 指标 | 修前 | 修后 |
+|---|---|---|
+| `src/JobRunner.cs` 违规 | 2 条 | **0 条** |
+| `JobRunner` 方法数 | 21 | **15** |
+| lizard `-C 5` 警告 | 0 | **0**（167 函数） |
+| 测试 | 335 | **339 全过** |
+| 生产源码覆盖率 | 100% | **100%（878/878）** |
+| archlint | 0 smells / 10.0 | 0 smells / 10.0 |
+
+### 仍然存在、但确认不可修的 10 条
+
+- **8 条 `long-function` 是 xp-gate #861 的失步 bug**：`EmitProtocolError` 实际 29 行被报 71 行；
+  `Trace.Timed` 根本不存在却报 52 行；`TargetSpawner` 各函数实际最长 27 行，被报 59~373 行。
+  实测 `lizard` 对整个 `src/` 的判定是 **0 条超长函数**。
+- **1 条 `too-many-params`（INFO）** 在 `Native.CreateProcessW` —— Win32 ABI 签名，不可改。
+- **Gate 6 不覆盖 C#**（`archlint` 不支持 C#，见 `docs/TODO.md` §1.9）。
+
 ## [0.2.6] - 2026-11-23
 
 **技术债清零，无对外行为变更。** 335 个测试通过（+12），生产源码覆盖率保持 100%。

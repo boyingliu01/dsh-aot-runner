@@ -116,7 +116,7 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
         // 这套结构对 IPC 同样必要：Windows 管道上的 ReadFile 会真阻塞，
         // 且 disconnect 后返回的是 ERROR_BROKEN_PIPE 而非 0 字节。
         var inbox = new BlockingCollection<string?>(new ConcurrentQueue<string?>());
-        var readerThread = StartReaderThread(inbox);
+        var readerThread = IpcReader.Start(_channel, inbox);
 
         try
         {
@@ -132,38 +132,6 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
         return 0;
     }
 
-    /// <summary>
-    /// 启动后台读线程，把通道消息（含 EOF 的 null）投进 <paramref name="inbox"/>。
-    /// </summary>
-    /// <remarks>
-    /// 单独抽出的理由：线程体里既有正常读取循环，又有异常转换（读失败等同 EOF），
-    /// 这两件事和主循环的「等待-分发」逻辑互不相干，混在一个方法里
-    /// 会让 <see cref="Run"/> 同时负责线程管理与协议推进。
-    /// </remarks>
-    private Thread StartReaderThread(BlockingCollection<string?> inbox)
-    {
-        var readerThread = new Thread(() =>
-        {
-            try
-            {
-                while (true)
-                {
-                    var message = _channel.ReadMessage();
-                    inbox.Add(message);
-                    if (message is null) break;      // EOF 之后不再产出
-                }
-            }
-            catch (Exception ex)
-            {
-                // 读失败（帧非法或 I/O 错误）等同于通道结束，但要留下痕迹
-                Trace.Write($"ipc reader stopped: {ex.GetType().Name}: {ex.Message}");
-                inbox.Add(null);
-            }
-        })
-        { IsBackground = true, Name = "ipc-reader" };
-        readerThread.Start();
-        return readerThread;
-    }
 
     /// <summary>
     /// 主循环：从 <paramref name="inbox"/> 取消息并处理，直到 finished。
@@ -192,43 +160,30 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
     }
 
     /// <summary>
-    /// 通道 EOF 时的收尾：已 Finish 过属正常结束，否则是 host 断开。
+    /// 通道 EOF 时的收尾：已 Finish 过属正常结束，否则是 host 中途断开。
     /// </summary>
+    /// <remarks>
+    /// Finish 之后到来的 EOF 是预期内收尾（host 收完结果才断开），
+    /// 此时不能再走断开路径 —— 那会重复投递一次错误结果。
+    ///
+    /// 单独成方法（而非内联进 <see cref="PumpMessages"/>）有两个原因：
+    /// 一是「判 EOF → 判是否已结束 → 断开清理」三步叠加会把主循环推到 CCN 6；
+    /// 二是它和 <see cref="Finish"/> 语义不同 —— 前者特指「host 先走了」，
+    /// 后者是 runner 自己收尾。混在一起读代码的人会以为两者可以互换。
+    /// </remarks>
     private void HandleEof()
     {
-        // Finish 之后到来的 EOF 是预期内收尾（host 收完结果才断开），
-        // 此时不能再走 OnDisconnect —— 那会重复投递一次错误结果。
-        if (!_finished) OnDisconnect();
-    }
-
-    /// <summary>取消息的 type 字段；非法或缺失时投递协议错误并返回 null。</summary>
-    /// <remarks>
-    /// 从 <see cref="HandleMessage"/> 抽出来，让后者只剩「按 type 分发」一个意图。
-    ///
-    /// 解析方式的选择很重要：只用 JsonDocument（启动开销 ~33ms），
-    /// 绝不能用 JsonSerializer.Deserialize —— AOT 下会多付 ~1.2s 启动代价。
-    /// </remarks>
-    private string? PeekMessageType(string line)
-    {
-        string? type;
-        string? jsonError;
-        using (Trace.Measure("json-peek-type"))
-        {
-            type = ProtocolJson.PeekType(line, out jsonError);
-        }
-        if (jsonError is not null)
-        {
-            FailProtocol($"invalid JSON: {jsonError}");
-            return null;
-        }
-        if (type is null) FailProtocol("message missing 'type'");
-        return type;
+        // RUNNER-SPEC §4.2：父进程断开 → releaseOwnedJob + finish(127)
+        if (!_finished) Finish(127);
     }
 
     private void HandleMessage(string line)
     {
-        var type = PeekMessageType(line);
-        if (type is null) return;      // 已投递协议错误，调用方无需再处理
+        if (!MessageType.TryPeek(line, out var type, out var typeError))
+        {
+            PublishResult(RunnerErrors.ProtocolViolation(typeError));
+            return;
+        }
 
         switch (type)
         {
@@ -236,42 +191,26 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
                 RequestTermination();
                 return;
             case "start":
-                HandleStartMessage(line);
+                DispatchStart(line);
                 return;
             default:
-                FailProtocol($"unknown message type: {type}");
+                PublishResult(RunnerErrors.ProtocolViolation($"unknown message type: {type}"));
                 return;
         }
     }
 
-    /// <summary>
-    /// 处理 start 消息：校验重复、解析请求、交给 <see cref="HandleStart"/>。
-    /// </summary>
-    /// <remarks>
-    /// 从 <see cref="HandleMessage"/> 分出来，让后者只做「type → 分派」的扁平判断，
-    /// 而 start 自己的三条前置校验（重复 start / 解析失败 / 正常）独立成段。
-    /// </remarks>
-    private void HandleStartMessage(string line)
+    /// <summary>重复 start 校验 + 解析 + 交给 <see cref="HandleStart"/>。</summary>
+    private void DispatchStart(string line)
     {
         if (_startSeen)
         {
             // RUNNER-SPEC §4.2：重复 start 报错
-            FailProtocol("received more than one Windows start request");
+            PublishResult(RunnerErrors.ProtocolViolation("received more than one Windows start request"));
             return;
         }
 
         _startSeen = true;
-        StartRequest? req;
-        string? parseError;
-        using (Trace.Measure("json-parse-start"))
-        {
-            req = ProtocolJson.ParseStart(line, out parseError);
-        }
-        // 这里不需要再判 req is null：
-        // HandleMessage 已经用 PeekType 校验过「JSON 合法 + root 是对象 + type 是字符串」，
-        // 而 ParseStart 只在「JSON 非法」或「root 非对象」时返回 null —— 两者都被前置拦下了。
-        // 保留一个永远进不去的分支比删掉更糟：它会让读者以为还有一条错误路径要维护。
-        HandleStart(req!);
+        HandleStart(StartRequestParser.Parse(line));
     }
 
     // ---------------- start ----------------
@@ -289,8 +228,11 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
     {
         if (_terminateRequested)
         {
-            // terminate 已到达但尚未有 job：按规范视为已终止
-            PublishTerminatedBeforeStart();
+            // terminate 已到达但尚未有 job：按规范视为已终止，仍走 Error 形状
+            PublishResult(new ErrorResult
+            {
+                Error = new SerializedError { Name = "Error", Message = "runner has been terminated" },
+            });
             return;
         }
 
@@ -305,7 +247,7 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
             }
             else
             {
-                SpawnViaSpawner(req, job);
+                ApplySpawn(req, job);
             }
         }
         catch (Win32Exception ex)
@@ -315,27 +257,18 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
             return;
         }
 
-        StartPoller();
+        PollerLauncher.Start(PollLoop);
     }
-
-    /// <summary>
-    /// terminate 先于 start 到达时的终态结果。
-    /// </summary>
-    /// <remarks>
-    /// 规范把这种情况定义为「已终止」而不是「错误」：host 侧的 terminate 是
-    /// 正常操作，只是恰好早了一步。这里仍然走 Error 形状，因为 host 侧协议只认
-    /// 这一种退出通知 —— 换形状会让 node 与 AOT 两条路径给出不同的字节。
-    /// </remarks>
-    private void PublishTerminatedBeforeStart() =>
-        PublishResult(new ErrorResult
-        {
-            Error = new SerializedError { Name = "Error", Message = "runner has been terminated" },
-        });
 
     /// <summary>
     /// 走真实的 TargetSpawner 启动 target，并把产出的句柄接收到 runner 上。
     /// </summary>
-    private void SpawnViaSpawner(StartRequest req, SafeJobHandle job)
+    /// <remarks>
+    /// 延迟建 spawner 而不是在构造函数里 new：TargetSpawner 需要把 JobRunner
+    /// 当作 <see cref="ISpawnHost"/> 持有，在构造函数中交出 this 会让外部对象
+    /// 看到一个只初始化了一半的 runner。同时「从不 start 的 runner」也不必付构造成本。
+    /// </remarks>
+    private void ApplySpawn(StartRequest req, SafeJobHandle job)
     {
         (_spawner ??= new TargetSpawner(this)).Spawn(req, job, out var spawned);
         if (spawned is null) return;          // 错误已投递，runner 已 Finish
@@ -369,11 +302,6 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
         return job;
     }
 
-    /// <summary>
-    /// 起轮询线程（RUNNER-SPEC §7）。后台线程，进程退出不会等它。
-    /// </summary>
-    private void StartPoller() =>
-        new Thread(PollLoop) { IsBackground = true, Name = "poll" }.Start();
 
 
     /// <summary>
@@ -406,28 +334,21 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
         return false;
     }
 
-    private void OnDisconnect()
-    {
-        // RUNNER-SPEC §4.2：父进程断开 → releaseOwnedJob + finish(127)
-        lock (_gate)
-        {
-            if (_finished) return;
-            _finished = true;
-        }
-        ReleaseOwnedJob();
-        Environment.ExitCode = 127;
-    }
-
-
-    private void FailProtocol(string message)
-    {
-        PublishResult(new ErrorResult
-        {
-            Error = new SerializedError { Name = "Error", Message = message, Code = "EPROTOCOL" }
-        });
-    }
-
-    private void Finish()
+    /// <summary>
+    /// 进入终态：置 <c>_finished</c> 并释放全部内核句柄。幂等。
+    /// </summary>
+    /// <param name="exitCode">
+    /// 需要设置的进程退出码；省略表示不改（正常收尾）。
+    /// </param>
+    /// <remarks>
+    /// Finish 与 OnDisconnect 原本是两份逐字相同的骨架，只差一个 ExitCode：
+    /// 「加锁 → 判重 → 置 finished → 释放资源」。合并成一处之后，
+    /// 「一次终态只清理一次」这个不变量只有一条实现，不会有第二处走样。
+    ///
+    /// 置位 _finished 之后主循环在 TryTake(50ms) 上自行退出 ——
+    /// 不要改成主动断流，见 Run() 的说明。
+    /// </remarks>
+    private void Finish(int? exitCode = null)
     {
         lock (_gate)
         {
@@ -435,45 +356,24 @@ internal sealed partial class JobRunner : IDisposable, ISpawnHost
             _finished = true;
         }
         ReleaseOwnedJob();
-
-        // 主循环在 lines.TryTake(50ms) 上等读线程，_finished 置位后 ≤50ms 内自行退出。
-        // 不再需要在这里主动断流 —— 见 Run() 中的说明。
+        if (exitCode.HasValue) Environment.ExitCode = exitCode.Value;
     }
+
 
     /// <summary>
-    /// RUNNER-SPEC §8 / §9 清理顺序：TerminateJob → CloseJob → CloseProcess
-    /// 顺序不可调换（架构专家指出：Job 先关会导致子进程逃逸）
+    /// 在 runner 的锁内释放全部内核句柄。
     /// </summary>
     /// <remarks>
-    /// 三个句柄的释放形状完全一致（终止/关闭 + 置 null + 吞掉异常），
-    /// 所以收敛成 <see cref="ReleaseHandle{T}"/> 一处实现。
-    /// 这样改的是「每个句柄只声明自己的释放动作」，而不是重复三遍
-    /// 同样的 try/catch 骨架 —— 少掉的重复也正好是原先的复杂度来源。
+    /// lock 留在这里而不是搬进 <see cref="ResourceReleaser"/>：
+    /// 锁保护的是 JobRunner 的字段状态，释放器只是被它调用的纯操作。
+    /// 让释放器去拿别人的锁会把并发边界藏起来，反而更容易出错。
     /// </remarks>
     private void ReleaseOwnedJob()
     {
         lock (_gate)
         {
-            _job = ReleaseHandle(_job, static j => j.Terminate(1));
-            _process = ReleaseHandle(_process, static _ => { });
-            _thread = ReleaseHandle(_thread, static _ => { });
+            ResourceReleaser.ReleaseAll(ref _job, ref _process, ref _thread);
         }
-    }
-
-    /// <summary>
-    /// 释放一个可选句柄：先执行 <paramref name="beforeDispose"/>，再 Dispose，
-    /// 任何异常都吞掉（清理路径不该因为单个句柄失败而中断），最后返回 null。
-    /// </summary>
-    /// <remarks>
-    /// 泛型 + 约束到 IDisposable：Job/Process/Thread 三种句柄走同一条清理路径，
-    /// 调用方只描述「额外要先做什么」，不必再写一遍 try/catch/置 null。
-    /// </remarks>
-    private static T? ReleaseHandle<T>(T? handle, Action<T> beforeDispose) where T : class, IDisposable
-    {
-        if (handle is null) return null;
-        try { beforeDispose(handle); } catch { }
-        try { handle.Dispose(); } catch { }
-        return null;
     }
 
     /// <summary>

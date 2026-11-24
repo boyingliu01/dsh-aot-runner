@@ -236,6 +236,24 @@ public class JobRunnerErrorPathTests
     }
 
     [Fact]
+    public void HandleStart_注入SpawnTargetHook成功_不投递错误()
+    {
+        // SpawnTargetHook 的**成功**分支：hook 正常返回时不投递任何错误结果。
+        // 这条路径原先只被「hook 抛异常」的用例覆盖过，成功分支从未执行 ——
+        // 于是「hook 返回后是否误投递」这个行为没有任何测试在守。
+        var ch = new RecordingChannel();
+        using var runner = new JobRunner([@"C:\\prog.exe"], ch);
+
+        var called = false;
+        runner.SpawnTargetHook = (_, _) => called = true;
+
+        runner.HandleStartForTest(ParseStartMsg());
+
+        Assert.True(called, "注入的 hook 应当被调用");
+        Assert.Empty(ch.Sent);
+    }
+
+    [Fact]
     public void HandleStart_spawn抛Win32异常_投递ENOENT带path()
     {
         // CreateProcessW 抛异常（区别于返回 false）→ 错误必须带 path（RUNNER-SPEC §6.2）。
