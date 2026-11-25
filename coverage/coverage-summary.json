@@ -1,4 +1,0 @@
-{"total": {"lines":{"total":580,"covered":519,"skipped":0,"pct":89.48},"statements":{"total":580,"covered":519,"skipped":0,"pct":89.48},"functions":{"total":32,"covered":26,"skipped":0,"pct":81.25},"branches":{"total":73,"covered":53,"skipped":0,"pct":72.6},"branchesTrue":{"total":0,"covered":0,"skipped":0,"pct":"Unknown"}}
-,"D:\\projects\\dsh-aot-runner\\plugin\\lib\\circuit-breaker.js": {"lines":{"total":89,"covered":78,"skipped":0,"pct":87.64},"functions":{"total":7,"covered":4,"skipped":0,"pct":57.14},"statements":{"total":89,"covered":78,"skipped":0,"pct":87.64},"branches":{"total":7,"covered":5,"skipped":0,"pct":71.42}}
-,"D:\\projects\\dsh-aot-runner\\plugin\\lib\\index.js": {"lines":{"total":491,"covered":441,"skipped":0,"pct":89.81},"functions":{"total":25,"covered":22,"skipped":0,"pct":88},"statements":{"total":491,"covered":441,"skipped":0,"pct":89.81},"branches":{"total":66,"covered":48,"skipped":0,"pct":72.72}}
-}

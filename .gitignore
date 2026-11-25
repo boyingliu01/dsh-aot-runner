@@ -101,12 +101,20 @@ bench/node-tuning/sz2-*/
 
 # c8 / vitest 在测量期间产生的原始片段（每次运行都会生成，不是源码）。
 #
-# 注意**不能**整目录忽略 coverage/：coverage/coverage-summary.json 是
-# xp-gate Gate 5 判定覆盖率门槛时**唯一**会去读的路径（见
-# xp-gate/hooks/gate-entries/gate-5-entry.sh 的 _gate5_coverage_usable）。
-# 整目录忽略会让那份报告进不了版本库，CI 上等于 Gate 5 永远找不到它。
-# 所以这里只忽略中间产物 coverage/tmp/，把摘要文件留出来。
-coverage/tmp/
+# coverage-summary.json **不能**进版本库，两条原因：
+#
+# 1. 它是生成物，里面存的是**写它那台机器的绝对路径**。本机在仓库里跑一次
+#    test:coverage，就会把它改成本机路径并弄脏工作区；在 worktree 里跑则会
+#    写成 .worktrees/sprint/xxx/... —— 提交上去别人拉下来就是错的路径。
+# 2. CI 的「检查是否误提交构建产物」把 coverage/ 整目录列为禁止提交。
+#    先前 .gitignore 的注释主张「留出来给 Gate 5 读」，与这条 CI 规则**直接
+#    冲突**，结果是 main 上 CI 连续两次同一个原因变红（run 45364201037、
+#    45644761189）。
+#
+# Gate 5 的覆盖率判据本来也不读这份文件：build.sh 每次现场跑
+# scripts/coverage-summary.py 得出结果并以退出码判定（见该脚本的 THRESHOLDS）。
+# 版本库里那份只是历史遗留的产物副本，删掉不影响任何门禁。
+coverage/
 
 # sprint-flow 的隔离工作区（Phase 1 PREP 创建，完成任务后由 Phase 6 CLOSE 删除）。
 # 不忽略的话 `git status` 会把每个 worktree 的整棵树当成未跟踪文件列出来。
