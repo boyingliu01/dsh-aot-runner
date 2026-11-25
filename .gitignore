@@ -101,20 +101,22 @@ bench/node-tuning/sz2-*/
 
 # c8 / vitest 在测量期间产生的原始片段（每次运行都会生成，不是源码）。
 #
-# coverage-summary.json **不能**进版本库，两条原因：
+# 注意**不能**整目录忽略 coverage/：coverage/coverage-summary.json 是
+# xp-gate Gate 5 判定 80% 覆盖率地板时**唯一**会去读的路径
+# （见 xp-gate/hooks/gate-entries/gate-5-entry.sh 的 _gate5_coverage_usable）。
+# Gate 5 的测试命令是 `node --test test/ab-verify.js`，不产覆盖率报告，
+# 所以它也无法在门禁期间现生成 —— 这份文件必须**事先就在版本库里**，
+# 否则 Gate 5 直接 `BLOCKED - coverage/coverage-summary.json not found`，提交被拦死（实测）。
 #
-# 1. 它是生成物，里面存的是**写它那台机器的绝对路径**。本机在仓库里跑一次
-#    test:coverage，就会把它改成本机路径并弄脏工作区；在 worktree 里跑则会
-#    写成 .worktrees/sprint/xxx/... —— 提交上去别人拉下来就是错的路径。
-# 2. CI 的「检查是否误提交构建产物」把 coverage/ 整目录列为禁止提交。
-#    先前 .gitignore 的注释主张「留出来给 Gate 5 读」，与这条 CI 规则**直接
-#    冲突**，结果是 main 上 CI 连续两次同一个原因变红（run 45364201037、
-#    45644761189）。
-#
-# Gate 5 的覆盖率判据本来也不读这份文件：build.sh 每次现场跑
-# scripts/coverage-summary.py 得出结果并以退出码判定（见该脚本的 THRESHOLDS）。
-# 版本库里那份只是历史遗留的产物副本，删掉不影响任何门禁。
-coverage/
+# 代价与对策：它是生成物，内容里存的是生成那台机器的绝对路径
+# （实测 D:\projects\dsh-aot-runner\plugin\lib\...）。因此：
+#   · CI 的「检查是否误提交构建产物」已把它单独列为允许项
+#     （见 .github/workflows/ci.yml，其余 coverage/ 文件仍然拦）
+#   · 改动 plugin/ 代码后要重跑 `npm run test:coverage` 更新它，
+#     并用 `git update-index --assume-unchanged` 之外的正常方式提交差异 ——
+#     路径差异本身就是「这份摘要来自哪台机器」的证据
+# 所以这里只忽略中间产物 coverage/tmp/，把摘要文件留出来。
+coverage/tmp/
 
 # sprint-flow 的隔离工作区（Phase 1 PREP 创建，完成任务后由 Phase 6 CLOSE 删除）。
 # 不忽略的话 `git status` 会把每个 worktree 的整棵树当成未跟踪文件列出来。

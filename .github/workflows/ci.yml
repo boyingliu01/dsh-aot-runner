@@ -100,7 +100,18 @@ jobs:
       - name: 检查是否误提交构建产物
         run: |
           set -e
-          bad=$(git ls-files | grep -E '^(bin|obj|dist|coverage|node_modules)/' || true)
+          # coverage/coverage-summary.json 是**唯一**允许进版本库的生成物，
+          # 因此要先从候选里剔除它，再按目录规则判。
+          #
+          # 为什么必须留它在版本库里：xp-gate 的 Gate 5（pre-commit 全局门禁）
+          # 会读这个文件判 80% 覆盖率地板，**文件不存在就直接 BLOCKED**，
+          # 提交被拦死（实测）。而 Gate 5 自己的测试命令是
+          # `node --test test/ab-verify.js`，不产覆盖率报告，所以它也无法
+          # 在门禁期间现生成一份 —— 也就是说这个文件必须事先就在版本库里。
+          #
+          # 为什么仍然要拦 coverage/ 下其它文件：那些才是真正的中间产物
+          # （coverage/tmp/ 等），每次运行都会变。
+          bad=$(git ls-files             | grep -E '^(bin|obj|dist|coverage|node_modules)/'             | grep -vx 'coverage/coverage-summary.json'             || true)
           if [ -n "$bad" ]; then
             echo "::error::以下构建产物被误提交："
             echo "$bad"

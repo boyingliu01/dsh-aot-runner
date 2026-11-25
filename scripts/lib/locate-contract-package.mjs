@@ -49,7 +49,38 @@ export function candidateWorkspaceRoots(repoRoot) {
   }
 
   roots.push(repoRoot);
+
+  // 仓库内的**一层子目录**也算候选。
+  //
+  // 为什么需要：release.yml 为了不与本仓库的 node_modules 混在一起，把 A/B 基线
+  // 包单独装到 `baseline/` 下（`baseline/node_modules/@deepseek-ai/...`）。
+  // 而查找逻辑原先只认 `<root>/node_modules/<pkg>`，于是同一个包在
+  // 「装到仓库根」时能找到、装到 `baseline/` 时就找不到 —— 发布 job 上的
+  // 契约覆盖率门禁因此直接 exit 3，把整个发布拦了下来。
+  //
+  // 这里刻意**不硬编码 `baseline/`**：那是某个 workflow 的局部约定，
+  // 写进共享查找逻辑会让下一个人以为它是通用契约。改成枚举一层子目录，
+  // 任何「在本仓库内单独装一份依赖」的布局都能被覆盖。
+  //
+  // 子目录排序保证结果稳定（readdir 顺序不保证），且只取一层 ——
+  // 递归会遍历 node_modules 内部，既慢又会命中嵌套依赖里同名的包。
+  for (const sub of listSubdirectories(repoRoot)) {
+    roots.push(sub);
+  }
   return roots;
+}
+
+/** 列出仓库根下的一层子目录（绝对路径，已排序）。读不了就返回空数组。 */
+function listSubdirectories(root) {
+  try {
+    return fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules')
+      .map((e) => path.join(root, e.name))
+      .sort();
+  } catch {
+    return [];
+  }
 }
 
 /**
