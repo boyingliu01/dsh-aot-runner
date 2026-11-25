@@ -223,6 +223,8 @@ jobs:
       #   · 本 workflow 上一步装的是**钉死版本 0.2.0-rc.2**，那个版本
       #     **确实带 runner-launch-B2zsQ1Dz.js**。所以在这里 exit 3
       #     意味着「本该能测却没测到」—— 那是真异常，必须拦。
+      #     注意「装了」不等于「脚本能找到」：装到 baseline/ 之后还要用下面的
+      #     DSH_RUNNER 显式指过去，否则 runner 找不到、覆盖采集静默失败。
       #   · 而且 tag 构建只在发布时跑一次，**发布恰恰是唯一必须知道
       #     「这一版是不是少测了」的时刻**。在这里放过，等于门禁在最需要
       #     它的地方永不执行，比不要门禁更糟：它制造「已经检查过」的假象。
@@ -232,6 +234,18 @@ jobs:
       # 不是「一个严一个松」。
       - name: 契约覆盖率棘轮
         shell: bash
+        env:
+          # 必须显式指过去，和下面的 A/B 步骤同一个 runner。
+          #
+          # 为什么不能靠自动查找：覆盖率脚本要驱动真实 runner 跑一遍用例表，
+          # 而 test/runner-client.js 的候选顺序是
+          #   DSH_RUNNER → NODE_RUNNER → 仓库根 node_modules → DSH_HOME/USERPROFILE 推断
+          # 本 workflow 把包装在 `baseline/`，**不在任何候选里**。
+          # 找不到 runner 时 launchRunner 会抛错，而 COVERAGE_CASES 的每次调用
+          # 都包在 try/catch 里（单条用例失败不该中断统计），于是错误被静默吞掉，
+          # 最后表现为「采到了覆盖数据，但没有一个是契约文件」——
+          # 一个看起来像契约问题的环境问题（实测 run 45721544418 就是这个）。
+          DSH_RUNNER: ${{ github.workspace }}\baseline\node_modules\@deepseek-ai\dsh-subprocess-local\lib\runner.js
         run: |
           set +e
           node scripts/contract-branch-coverage.mjs --check

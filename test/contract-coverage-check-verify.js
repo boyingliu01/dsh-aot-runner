@@ -327,6 +327,21 @@ test('release.yml 的覆盖率步骤在 DSH 包安装之后 —— 否则必然 
   );
 });
 
+test('覆盖率步骤显式指定 DSH_RUNNER —— 否则 runner 找不到、采集静默失败', () => {
+  // 实测 run 45721544418：包已经装到 baseline/ 了，但覆盖率脚本要**驱动**
+  // 那个 runner 跑用例表，而 test/runner-client.js 的候选路径里没有 baseline/。
+  // launchRunner 抛错被 COVERAGE_CASES 的 try/catch 吞掉，最终表现成
+  // 「采到了覆盖数据，但没有一个是契约文件」—— 一个看起来像契约问题的环境问题。
+  const text = readFileSync(path.join(REPO, '.github', 'workflows', 'release.yml'), 'utf8');
+  const gate = text.slice(text.indexOf('契约覆盖率棘轮'));
+  assert.match(
+    gate.slice(0, 3000),
+    /DSH_RUNNER:\s*\$\{\{ github\.workspace \}\}/,
+    '覆盖率步骤必须显式传 DSH_RUNNER，指向 baseline/ 下那份 runner',
+  );
+  assert.match(gate.slice(0, 3000), /baseline/, 'DSH_RUNNER 必须指向 baseline/ 布局');
+});
+
 test('覆盖率步骤在 A/B 回归**之前** —— 它是发布前最后一道闸，要尽早失败', () => {
   // 专家评审建议补的：只锁「在装包之后」不够。挪到 A/B 之后仍能跑，
   // 但白白浪费一次 45 分钟的构建才发现覆盖率回退。
