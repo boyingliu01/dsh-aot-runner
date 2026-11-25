@@ -87,8 +87,12 @@ function readWhitelist() {
  */
 function collectCandidates() {
   const out = [];
+  // scripts/ 下同时有 .mjs 与 .cjs 入口：sync-version.cjs 是 xp-gate Gate 0
+  // 按文件名约定调用的适配层（`node scripts/sync-version.cjs`），不匹配 .cjs
+  // 会让它永远进不了候选集，于是白名单里那条**稳定误报**成「指向不存在的脚本」，
+  // 进而让 test:all 永远红。2026-11-25 修。
   const patterns = [
-    ['scripts', /\.(mjs|py)$/],
+    ['scripts', /\.(mjs|cjs|py)$/],
     ['bench', /\.cjs$/],
     ['.', /^eslint\.config\.mjs$|^jscpd\.conf\.json$/],
   ];

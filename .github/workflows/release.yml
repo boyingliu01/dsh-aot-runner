@@ -209,6 +209,51 @@ jobs:
           if (!(Test-Path $runner)) { throw "基线 runner.js 缺失: $runner" }
           Write-Host "基线 runner: $runner"
 
+      # ---- 0.5 契约覆盖率棘轮（tag 构建例外：升级为阻塞）----
+      #
+      # 这里与 ci.yml **刻意不同**，理由见设计文档
+      # `docs/plans/2026-11-25-release-and-coverage-gate-design.md` §风险表：
+      #
+      #   「CI 拿不到契约源 → 沿用既有 ::warning::；**tag 构建例外，升级为阻塞**」
+      #
+      # 为什么 ci.yml 可以放过 exit 3 而这里不行 —— 关键在**上一步装了什么**：
+      #   · ci.yml 装的是 `@latest`，而 npm 上 `@latest` 是**早期占位版**
+      #     （0.0.x，无 runner-launch-*.js）。「拿不到契约源」在那个 job 里
+      #     是稳定且已知的环境事实；判红等于 CI 永久红，最后所有人学会忽略它。
+      #   · 本 workflow 上一步装的是**钉死版本 0.2.0-rc.2**，那个版本
+      #     **确实带 runner-launch-B2zsQ1Dz.js**。所以在这里 exit 3
+      #     意味着「本该能测却没测到」—— 那是真异常，必须拦。
+      #   · 而且 tag 构建只在发布时跑一次，**发布恰恰是唯一必须知道
+      #     「这一版是不是少测了」的时刻**。在这里放过，等于门禁在最需要
+      #     它的地方永不执行，比不要门禁更糟：它制造「已经检查过」的假象。
+      #
+      # 这就是设计文档 §风险表里那条「CI 拿不到契约源 → 沿用 warning；
+      # **tag 构建例外，升级为阻塞**」的全部依据。两侧环境不同，所以判据不同，
+      # 不是「一个严一个松」。
+      - name: 契约覆盖率棘轮
+        shell: bash
+        run: |
+          set +e
+          node scripts/contract-branch-coverage.mjs --check
+          COV_RC=$?
+          set -e
+          case "$COV_RC" in
+            0) echo "✅ 契约覆盖率未回退" ;;
+            1) echo "::error title=契约覆盖率回退::发布 tag 上不得回退。该补用例了。"
+               exit 1 ;;
+            3) echo "::error title=契约覆盖率未测得（发布 tag 不允许）::"
+               echo "  这个 job 拿不到契约源（缺 runner-launch-*.js），所以**没查**，" 
+               echo "  不是「覆盖率 0」，也不是「回退」。"
+               echo "  但发布是唯一必须知道结论的时刻，所以这里不放过。"
+               echo "  补救：1) 本机带真实 DSH 包跑 npm run contract:coverage 并附结果；"
+               echo "        2) 或让本 workflow 能拿到契约包后再发版。"
+               exit 1 ;;
+            4) echo "::error title=契约覆盖率基线过期::契约变了，需 --update 重标定后再发布。"
+               exit 1 ;;
+            *) echo "::error title=契约覆盖率检查异常::退出码 $COV_RC。"
+               exit 1 ;;
+          esac
+
       - name: A/B 一致性 + IPC 回归
         env:
           AOT_RUNNER: ${{ github.workspace }}\dist\dsh-aot-runner.exe
@@ -262,29 +307,16 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
-          body: |
-            ## 安装
-
-            **方式 A：只想要原生 exe**（不经插件）
-            下载 `dsh-aot-runner-${{ github.ref_name }}-win-x64.zip`，解压即得
-            `dsh-aot-runner.exe`。校验完整性：
-
-            ```powershell
-            Get-FileHash dsh-aot-runner.exe -Algorithm SHA256   # 对照 SHA256SUMS
-            ```
-
-            **方式 B：接入 DSH**（推荐）
-            ```bash
-            npm install -g @boyingliu01/dsh-aot-runner
-            ```
-            ⚠️ 在 DSH 0.2.0-rc.2 上还需一行上游补丁才能生效，见 README 顶部说明。
-
-            ## 构建信息
-
-            - 目标：`win-x64`，NativeAOT 自包含
-            - 无 VC++ 运行时依赖、无 .NET 运行时依赖（已验证）
-            - 由 CI 从 tag 对应 commit 构建，可复现
+          # generate_release_notes 生成的是「自上一个 tag 以来」的 commit 列表。
+          # 本次 v0.2.8 之前的 tag 停在 v0.2.4，而 0.2.5/0.2.6/0.2.7 从未发版 ——
+          # 自动列表会把四个版本混成一锅，且表达不了最要紧的那句话：
+          # 「0.2.4 上有一个会导致工具调用失败的 bug，请直接升到 0.2.8」。
+          # 所以正文手写，自动列表只作附录。
+          generate_release_notes: false
+          # 注意：`body_path` 与 `body` **不能同时给** —— action-gh-release 里
+          # body 优先，body_path 会被静默忽略。所以正文只留 body_path 一处，
+          # 安装说明合并进了那个文件。
+          body_path: docs/RELEASE-NOTES-0.2.8.md
           files: |
             release/dsh-aot-runner-${{ github.ref_name }}-win-x64.zip
             release/dsh-aot-runner.exe
@@ -333,17 +365,28 @@ jobs:
 
           # 判断能否走 OIDC：ACTIONS_ID_TOKEN_REQUEST_URL 由 actions 在
           # permissions.id-token=write 时注入。存在即说明 OIDC 通道已打开。
+          # 结果会被「校验 npm 发布结果」那一步读走。
+          # 默认 false：宁可漏记成功，也不要把「没发」记成「发了」。
+          "NPM_PUBLISHED=false" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
           if ($env:ACTIONS_ID_TOKEN_REQUEST_URL) {
             Write-Host "检测到 OIDC 通道 —— 尝试 Trusted Publishing 发布"
             npm publish --access public --provenance
-            if ($LASTEXITCODE -eq 0) { Write-Host "✅ 已通过 OIDC 发布"; exit 0 }
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✅ 已通过 OIDC 发布"
+              "NPM_PUBLISHED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              exit 0
+            }
             Write-Host "::warning::OIDC 发布失败（可能是该包尚未配置 Trusted Publisher）。回退到 NPM_TOKEN。"
           } else {
             Write-Host "未检测到 OIDC 通道（可能是首次发布或未开 id-token 权限）"
           }
 
           if (-not $env:NODE_AUTH_TOKEN) {
-            Write-Host "::warning::既没有 OIDC 也没有 NPM_TOKEN —— 跳过 npm 发布。"
+            # 注意：**这里不再是终点**。以前这里 exit 0，于是「OIDC 没配 + 没有
+            # NPM_TOKEN」= job 全绿而 npm 上什么都没有，且没有任何失败信号。
+            # 现在只记录状态，由末尾的「校验 npm 发布结果」按 tag 决定算不算失败。
+            Write-Host "::warning::既没有 OIDC 也没有 NPM_TOKEN —— 没有发布 npm。"
             Write-Host "  GitHub Release（含二进制）已正常发布，不受影响。"
             Write-Host "  需要发 npm 时：优先在 npm 包设置页配 Trusted Publisher（推荐，无需密钥）；"
             Write-Host "  或用 granular access token 配成仓库 secret NPM_TOKEN（90 天需轮换）。"
@@ -352,4 +395,53 @@ jobs:
 
           npm config set //registry.npmjs.org/:_authToken $env:NODE_AUTH_TOKEN
           npm publish --access public
+          if ($LASTEXITCODE -eq 0) {
+            "NPM_PUBLISHED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      # ---- 8. 校验 npm 发布结果（fail-closed）----
+      #
+      # 为什么需要这一步：release.yml 里 `permissions.id-token: write` 是常开的，
+      # 所以上面的 `if ($env:ACTIONS_ID_TOKEN_REQUEST_URL)` **恒为真**。
+      # Trusted Publisher 没配时 publish 失败只打 ::warning::，然后落到
+      # 「没有 NPM_TOKEN」分支 —— 老版本在那里 `exit 0`。
+      # 结果：job 全绿、GitHub Release 成功、npm 上什么都没有、零失败信号。
+      #
+      # 修法：**期望值是推导出来的，不是人填的**。
+      # `refs/tags/vX.Y.Z` 触发就代表「这次必须发 npm」，没发出去就是失败。
+      # 早期设计用过环境变量 NPM_PUBLISH_EXPECTED 显式声明，被评审否掉了：
+      # 那只是把「靠人记得」这个缺陷搬了个位置 —— 忘了设就等于静默跳过。
+      #
+      # 正则锚定到严格的 semver，避免 `vtest` 这类误打 tag 被当成发布。
+      - name: 校验 npm 发布结果
+        if: always()
+        env:
+          NPM_PUBLISHED: ${{ env.NPM_PUBLISHED }}
+          GIT_REF: ${{ github.ref }}
+        shell: pwsh
+        run: |
+          $isReleaseTag = $env:GIT_REF -match '^refs/tags/v\d+\.\d+\.\d+$'
+          Write-Host "ref: $env:GIT_REF"
+          Write-Host "是否发布 tag: $isReleaseTag"
+          Write-Host "NPM_PUBLISHED: $env:NPM_PUBLISHED"
+
+          if ($env:NPM_PUBLISHED -eq "true") {
+            Write-Host "::notice title=npm 发布成功::本次已把包发到 npm。"
+            exit 0
+          }
+
+          if (-not $isReleaseTag) {
+            # 非 tag 触发（workflow_dispatch 等）：本来就不要求发 npm。
+            Write-Host "::notice title=npm 未发布（本次不要求）::触发方式不是发布 tag，不要求发 npm。"
+            exit 0
+          }
+
+          Write-Host "::error title=npm 未发布::这是发布 tag（$env:GIT_REF），但 npm 上什么都没发出去。"
+          Write-Host "  GitHub Release 已成功，但 npm 用户拿不到新版本。"
+          Write-Host "  最可能的原因：该包未配置 Trusted Publisher，且仓库没有 NPM_TOKEN。"
+          Write-Host "  修法：在 npm 包设置页配 Trusted Publisher（推荐，无需密钥），"
+          Write-Host "        或把 granular access token 配成仓库 secret NPM_TOKEN（90 天需轮换）。"
+          Get-Content $env:GITHUB_STEP_SUMMARY -ErrorAction SilentlyContinue | Out-Null
+          "## ❌ npm 未发布`n`n这是发布 tag \`$env:GIT_REF\`，但 npm 上没有发出任何版本。`n`nGitHub Release 已成功；npm 用户拿不到新版本。`n`n### 修法`n- 在 npm 包里配置 **Trusted Publisher**（推荐，无需密钥），或`n- 把 granular access token 配成仓库 secret \`NPM_TOKEN\`（90 天需轮换）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          exit 1
 

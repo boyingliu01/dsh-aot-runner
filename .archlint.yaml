@@ -67,6 +67,15 @@ ignore:
   # 守不住「新增了入口却没登记」，只能靠 archlint 在 CI 里报出来。
   - 'scripts/sync-version.cjs'
 
+  # 2026-11-25（issue #35 阻塞B）：发布前预检，由 package.json 的
+  # `release:precheck` 调用，不是被 import 的模块。
+  #
+  # 注意与 scripts/lib/contract-coverage-gate.mjs 的区别：那个是被
+  # scripts/contract-branch-coverage.mjs import 的纯函数模块，**不需要**登记 ——
+  # 登记了反而会让「真孤儿模块」被白名单掩盖。
+  # 判据始终是「有没有被 import」，只有入口脚本才该进来。
+  - 'scripts/check-release-slot.mjs'
+
   # ---- 非源码 / 生成物 ----
   - '.git/**'
   - 'node_modules/**'
