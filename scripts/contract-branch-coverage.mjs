@@ -335,6 +335,21 @@ function installedDshVersion(libDir) {
   }
 }
 
+/**
+ * 当前 Node 的主版本号。
+ *
+ * 为什么覆盖率要记这个：V8 的函数与区间划分随 Node 版本变。实测同一份契约文件
+ * （sha256 相同、DSH 版本都是 0.2.0-rc.2）：
+ *   · Node 26 → 20/114 函数、43/159 区间
+ *   · Node 22 → 20/95  函数、42/137 区间
+ * 函数**总数**都不同，说明不是「少跑了用例」而是「块怎么切」变了。
+ * 所以覆盖率数字只在同一主版本内可比，基线必须记住它是哪个版本上标的。
+ */
+function nodeMajorOf() {
+  const m = /^v?(\d+)\./.exec(process.version);
+  return m ? Number(m[1]) : null;
+}
+
 /** 读基线；不存在返回 null，读坏了抛错（不能把「读坏了」当成「没有」）。 */
 function readBaseline() {
   if (!existsSync(BASELINE_FILE)) return null;
@@ -459,7 +474,10 @@ function printBaselineStale(verdict) {
   line();
   // 措辞要跟着原因走：契约变了和容差常量改了是两回事，
   // 笼统说「契约变了」会把人引向错误的排查方向。
-  if (verdict.reasons.some((r) => r.includes('容差'))) {
+  if (verdict.reasons.some((r) => r.includes('Node 主版本'))) {
+    line('   换了 Node 主版本 —— V8 的分支划分随之改变，覆盖率数字不可跨版本比较。');
+    line('   这不是回退：用与基线相同的 Node 版本重跑即可（本项目 CI 用 Node 22）。');
+  } else if (verdict.reasons.some((r) => r.includes('容差'))) {
     line('   容差常量改了但基线还是旧标定 —— 两者描述的不是同一件事，比出来的结论不可信。');
   } else {
     line('   契约（DSH 版本）变了，分支总数本来就会跟着变，此时拿旧基线比没有意义。');
@@ -546,6 +564,7 @@ function measureOnce() {
     void merged;
     const identity0 = {
       dshVersion: installedDshVersion(contractFiles.lib),
+      nodeMajor: nodeMajorOf(),
       contractSha256: contractSha256(contractFiles.lib, contractFiles.files),
     };
     return {
@@ -554,6 +573,7 @@ function measureOnce() {
         __contractSha: identity0.contractSha256,
         contractFiles: contractFiles.files,
         dshVersion: identity0.dshVersion,
+        nodeMajor: identity0.nodeMajor,
         static: { total: data.static, detail: [] },
         runtime,
         collectOk: data.collectOk,
@@ -581,6 +601,7 @@ function measureOnce() {
 
   const identity = {
     dshVersion: installedDshVersion(contractFiles.lib),
+    nodeMajor: nodeMajorOf(),
     contractSha256: contractSha256(contractFiles.lib, contractFiles.files),
   };
 
@@ -590,6 +611,7 @@ function measureOnce() {
       __contractSha: identity.contractSha256,
       contractFiles: contractFiles.files,
       dshVersion: identity.dshVersion,
+      nodeMajor: identity.nodeMajor,
       static: { total: staticTotal, detail: staticStats },
       runtime,
       collectOk,
@@ -676,6 +698,7 @@ if (UPDATE) {
   const baseline = baselineFrom(m.report, {
     dshVersion: m.identity.dshVersion,
     contractSha256: m.identity.contractSha256,
+    nodeMajor: m.identity.nodeMajor,
     capturedAt: new Date().toISOString(),
   });
   writeFileSync(BASELINE_FILE, JSON.stringify(baseline, null, 2) + '\n');

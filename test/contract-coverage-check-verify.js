@@ -206,23 +206,46 @@ test('已覆盖函数数下降 → exit 1', () => {
 // 评审明确指出：容差是门禁唯一能静默腐烂的地方，只测「大幅下降」不够，
 // 必须测「刚好在容差内」与「刚好超出容差」两侧。
 
-test('比率下降刚好在 2.00pp 容差内 → exit 0', () => {
-  // 基线 28.00%，当前 26.00%：差 2.00pp，正好等于容差边界，**不应**判回退。
+test('比率下降刚好在 1.00pp 容差内 → exit 0', () => {
+  // 基线 28.00%，当前 27.00%：差 1.00pp，正好等于容差边界，**不应**判回退。
   const r = runScenario({
     baseline: baselineOf({ covered: 2800, total: 10000 }),
-    precomputed: { collectOk: true, static: 293, functions: { covered: 20, total: 114 }, ranges: { covered: 2600, total: 10000 } },
+    precomputed: { collectOk: true, static: 293, functions: { covered: 20, total: 114 }, ranges: { covered: 2700, total: 10000 } },
   });
   assert.equal(r.code, 0, `边界内应通过，实际 ${r.code}\n${r.out}`);
 });
 
-test('比率下降超出 2.00pp 容差 → exit 1', () => {
-  // 基线 28.00%，当前 25.99%：差 2.01pp，刚过边界，**必须**判回退。
+test('比率下降超出 1.00pp 容差 → exit 1', () => {
+  // 基线 28.00%，当前 26.99%：差 1.01pp，刚过边界，**必须**判回退。
   const r = runScenario({
     baseline: baselineOf({ covered: 2800, total: 10000 }),
-    precomputed: { collectOk: true, static: 293, functions: { covered: 20, total: 114 }, ranges: { covered: 2599, total: 10000 } },
+    precomputed: { collectOk: true, static: 293, functions: { covered: 20, total: 114 }, ranges: { covered: 2699, total: 10000 } },
   });
   assert.equal(r.code, 1, `超出边界应回退，实际 ${r.code}\n${r.out}`);
   assert.match(r.out, /分支区间覆盖率下降/);
+});
+
+test('Node 主版本与基线不一致 → exit 4（基线过期），不是 exit 1（回退）', () => {
+  // 实测依据：同一份契约文件（sha256 相同、DSH 0.2.0-rc.2 相同），
+  //   Node 22 → 20/95 函数、42/137 或 43/140 区间（~30.7%）
+  //   Node 26 → 20/114 函数、43/159 区间（~26.9%）
+  // 函数**总数**都不同，说明不是「少跑了用例」而是 V8 切块方式变了。
+  // 若不绑 Node 版本，就会出现「在一个版本上标定、在另一个版本上判回退」——
+  // 实测 v0.2.8 的发布 job 就是这么被误判成「区间总数塌缩 156 → 140」的。
+  const baseline = baselineOf({ covered: 43, total: 140 });
+  baseline.nodeMajor = 22; // 与当前 Node 主版本不同（本机是 26）
+  const r = runScenario({
+    baseline,
+    precomputed: {
+      collectOk: true,
+      static: 293,
+      functions: { covered: 20, total: 114 },
+      ranges: { covered: 43, total: 159 },
+    },
+  });
+  assert.equal(r.code, 4, `跨版本应判基线过期，实际 ${r.code}\n${r.out}`);
+  assert.match(r.out, /Node 主版本变了/, '必须点明是 Node 版本差异');
+  assert.doesNotMatch(r.out, /覆盖率下降|区间总数塌缩/, '跨版本不应被说成覆盖率回退');
 });
 
 test('分母塌缩（区间总数降超 3）→ exit 1，即使比率看起来更高', () => {

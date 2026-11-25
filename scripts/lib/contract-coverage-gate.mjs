@@ -56,8 +56,8 @@ export const EXIT_CODE = {
 // 这一步顺带逼着重新标定。没有这个绑定，这两个数字迟早变成
 // 「谁也不敢改、也说不清依据」的死数字。
 
-/** 比率容差，单位为「百分点 ×100」。200 = 2.00pp。 */
-export const RANGE_RATIO_TOLERANCE_PP100 = 200;
+/** 比率容差，单位为「百分点 ×100」。100 = 1.00pp。 */
+export const RANGE_RATIO_TOLERANCE_PP100 = 100;
 
 /** ranges.total 允许的最大缩水（防分母塌缩）。 */
 export const RANGE_TOTAL_TOLERANCE = 3;
@@ -76,8 +76,18 @@ export const RANGE_TOTAL_TOLERANCE = 3;
  * 而是「不允许悄悄沿用」。
  */
 export const CALIBRATION = {
-  /** 实测抖动极差（百分点 ×100），2026-11-25 在 DSH 0.2.0-rc.2 上测 5 次。 */
-  observedJitterSpanPp100: 129,
+  /**
+   * 实测抖动极差（百分点 ×100）。
+   *
+   * **这个数字必须连同 Node 主版本一起读。** V8 的区间划分随版本变，
+   * 同一份契约文件在 Node 22 与 Node 26 上采到的分母不是一个量级
+   * （实测 137/140 对 156/159），比率也会跟着从 ~30.7% 跳到 ~26.9%。
+   * 基线里的 `nodeMajor` 字段负责挡住跨版本比较。
+   *
+   * 2026-11-25 在 Node 22.22.2 + DSH 0.2.0-rc.2 上测 5 次：
+   * 42/137（30.657%）与 43/140（30.714%）交替出现，极差 = 5 pp100。
+   */
+  observedJitterSpanPp100: 5,
   /**
    * 实测 ranges.total 极差。
    *
@@ -94,9 +104,18 @@ export const CALIBRATION = {
    */
   observedTotalSpan: 3,
   /** 容差 = 极差 + 余量，余量不得小于极差的 50%，避免「刚好等于抖动」的脆弱取值。 */
-  marginPp100: RANGE_RATIO_TOLERANCE_PP100 - 129,
+  /**
+   * 余量 = 容差 − 极差。
+   *
+   * 取 95 pp100（≈0.95pp），是极差（5）的 19 倍。刻意留得比「≥ 极差的 50%」
+   * 这条底线宽得多：CI 上只有几次采样，而偶发的一次慢跑可能让某条用例
+   * 走不到末尾分支，把比率压低零点几个点。用实测极差当容差会让门禁在
+   * 一次抖动上就报假回退 —— 那种门禁最后一定会被关掉。
+   */
+  marginPp100: RANGE_RATIO_TOLERANCE_PP100 - 5,
   /** 测量依据：契约文件名 + 采集次数，便于将来复核。 */
   measuredOn: '2026-11-25',
+  measuredOnNodeMajor: 22,
   samples: 5,
 };
 
@@ -158,10 +177,11 @@ export function rangeRatioPp(ranges) {
  * 不记 contractFiles 的时间戳之类每次都会变的东西 —— 基线进版本库，
  * 每次 `--update` 都产生无意义 diff 会让人开始不看它的 diff。
  */
-export function baselineFrom(report, { dshVersion, contractSha256, capturedAt }) {
+export function baselineFrom(report, { dshVersion, contractSha256, capturedAt, nodeMajor }) {
   const r = report.runtime.ranges;
   return {
     dshVersion,
+    nodeMajor: nodeMajor ?? null,
     contractFile: report.contractFiles[0],
     contractSha256,
     capturedAt,
@@ -251,6 +271,17 @@ function identityProblems(report, baseline, currentSha256) {
       !baseline.dshVersion || baseline.dshVersion === report.dshVersion
         ? null
         : `DSH 版本变了：基线 ${baseline.dshVersion} → 当前 ${report.dshVersion}`,
+    // Node 主版本必须一致 —— 这条判据是实测出来的，不是防御性编程。
+    // V8 的函数与区间划分随版本变：同一份契约文件（sha256 相同、DSH 版本相同），
+    // 用 Node 22 采到 20/95 函数、42/137 区间，用 Node 26 采到 20/114 函数、
+    // 43/159 区间。函数**总数**都会变，说明不是「少跑了用例」而是「口径不同」。
+    // 不绑这条，就会出现「在一个版本上标定、在另一个版本上判回退」——
+    // 实测 v0.2.8 的发布 job 就这么被误判成「区间总数塌缩 156 → 140」。
+    () =>
+      !baseline.nodeMajor || !report.nodeMajor || baseline.nodeMajor === report.nodeMajor
+        ? null
+        : `Node 主版本变了：基线 v${baseline.nodeMajor} → 当前 v${report.nodeMajor}` +
+          '（V8 的分支划分随版本变，覆盖率不可跨版本比较）',
   ]);
 }
 
@@ -261,6 +292,7 @@ function identityProblems(report, baseline, currentSha256) {
  * @param {object|null} baseline 基线内容；null 表示基线文件不存在
  * @param {object} [identity] 当前契约的身份
  * @param {string} [identity.dshVersion]
+ * @param {number} [identity.nodeMajor]
  * @param {string} [identity.contractSha256]
  * @returns {{verdict: string, exitCode: number, reasons: string[], baseline?: object}}
  */
