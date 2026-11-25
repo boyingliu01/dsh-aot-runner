@@ -34,6 +34,9 @@ bench-output/
 aot-runner-*.log
 acl-report-*.jsonl
 
+# Sprint Flow 状态（每个 worktree 各有一份，运行期产物不是源码）
+.sprint-state/
+
 # 编辑器
 .vs/
 .vscode/
@@ -104,3 +107,7 @@ bench/node-tuning/sz2-*/
 # 整目录忽略会让那份报告进不了版本库，CI 上等于 Gate 5 永远找不到它。
 # 所以这里只忽略中间产物 coverage/tmp/，把摘要文件留出来。
 coverage/tmp/
+
+# sprint-flow 的隔离工作区（Phase 1 PREP 创建，完成任务后由 Phase 6 CLOSE 删除）。
+# 不忽略的话 `git status` 会把每个 worktree 的整棵树当成未跟踪文件列出来。
+.worktrees/

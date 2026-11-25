@@ -1,14 +1,27 @@
 # TODO — dsh-aot-runner 待办清单
 
-> **最后核实**：2026-11-23（xp-gate **v0.38.125**）
-> **基准提交**：`52c33f6`（0.2.5，已推送到 `origin/main`）
-> **工具版本**：xp-gate v0.38.125 / .NET SDK 10.0.404 / Node 22+
-> **最新发布**：2026-11-24 重新构建并本机升级，85 项验证全过（含 A/B 53/53），
-> 新二进制已生效（首个实例 PID 20212 启动于 11:46:40）。
+> **最后核实**：2026-11-25（xp-gate **v0.38.126**）
+> **基准提交**：`1ce30a4`（0.2.8，已推送到 `origin/main`）
+> **工具版本**：xp-gate v0.38.126 / .NET SDK 10.0.404 / Node 22+
+> **最新发布**：0.2.5/0.2.6/0.2.7 从未发版；0.2.8 是自 0.2.4 以来的首个发布
+> （见 `docs/RELEASE-NOTES-0.2.8.md`）。
 >
-> **当前状态**：`build.sh --check` 全绿，339 C# 测试通过，生产源码覆盖率 100%（878/878），
-> `npm run lint` exit 0，`principles src/` 0 error。Gate 3 零 CCN 警告，
-> Gate 6 archlint 10.0/10（0 smells）。
+> **当前状态**：`build.sh --check` 全绿，**340** C# 测试通过（连续 5 次全量、0 崩溃），
+> 生产源码覆盖率 100%（878/878），`npm run lint` exit 0，`principles src/` 0 error。
+> Gate 3 零 CCN 警告，Gate 6 archlint 10.0/10（0 smells）。
+>
+> **0.2.8 变更（2026-11-25）**：
+> - 契约分支覆盖率**已从「报告」升级为「门禁」**（issue #35 §三C）——
+>   `--check` 四态退出码 0/1/3/4，基线 `.contract-coverage.json` 绑定契约 sha256。
+>   所以下面 TODO-1.1/TODO-1.2 里「它只是入口脚本/只是复杂度问题」这类描述
+>   已不完整：它现在**有判据**，改动它会同时影响门禁行为。
+> - `IpcReaderTests` 的 CLR fail-fast（`0x80131506`）已修：根因是断言
+>   `thread.IsBackground` 时线程已结束，.NET 8 会为此启动 Thread 类的静态 GC
+>   辅助线程并抛 `ThreadStateException`。修后连续 10 次单跑 + 5 次全量 0 崩溃。
+> - `test:all` 里的 `./build.sh` 改为 `bash ./build.sh`：在 Windows 上经 `npm run`
+>   （走 cmd.exe）无法执行 `./build.sh`，整个 `test:all` 因此从来没在本机跑通过。
+> - `test/archlint-whitelist-selftest.mjs` 的候选集正则补上 `.cjs`：
+>   否则 `scripts/sync-version.cjs` 稳定误报「白名单指向不存在的脚本」。
 >
 > ## 环境决策（2026-11-23 已定）
 >
