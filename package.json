@@ -38,7 +38,7 @@
     "isolation": "node bench/isolation-value.js",
     "contract": "node scripts/contract-fingerprint.mjs",
     "contract:update": "node scripts/contract-fingerprint.mjs --update",
-    "contract:coverage": "node scripts/contract-branch-coverage.mjs --check",
+    "contract:coverage": "node scripts/contract-coverage-local.mjs",
     "contract:coverage:update": "node scripts/contract-branch-coverage.mjs --update",
     "release:precheck": "node scripts/check-release-slot.mjs",
     "test:contract": "node --test test/contract-fingerprint-verify.js",
@@ -47,7 +47,8 @@
     "test:prepush": "node --test test/pre-push-shim-verify.js",
     "test:version": "node --test test/check-version-verify.js",
     "test:locate-contract": "node --test test/locate-contract-package.test.mjs",
-    "test:coverage-slot": "node --test test/coverage-summary-slot.test.mjs"
+    "test:coverage-slot": "node --test test/coverage-summary-slot.test.mjs",
+    "contract:coverage:raw": "node scripts/contract-branch-coverage.mjs --check"
   },
   "engines": {
     "node": ">=22"

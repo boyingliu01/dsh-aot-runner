@@ -76,6 +76,15 @@ ignore:
   # 判据始终是「有没有被 import」，只有入口脚本才该进来。
   - 'scripts/check-release-slot.mjs'
 
+  # 2026-11-26：`npm run contract:coverage` 的本地包装器 —— 把契约覆盖率
+  # `--check` 的四态退出码翻译成「该不该让整条链变红」。由 package.json 直接
+  # 调用，不是被 import 的模块。
+  #
+  # 为什么需要包装：exit 4（基线过期）有两个原因，契约变了该失败、Node 主版本
+  # 变了该跳过 —— 判据在 --check 自己，翻译在调用方。build.sh / ci.yml / release.yml
+  # 都各自做了这件事，本地链此前没做，于是在 Node 26 的开发机上 `test:all` 必红。
+  - 'scripts/contract-coverage-local.mjs'
+
   # ---- 非源码 / 生成物 ----
   - '.git/**'
   - 'node_modules/**'

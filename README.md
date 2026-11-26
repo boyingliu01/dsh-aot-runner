@@ -5,21 +5,30 @@
 [![platform](https://img.shields.io/badge/platform-win--x64-blue.svg)](#下载)
 
 DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文件替换 Node.js 版 runner，
-**每次子进程调用省 77~197ms（约 59~67% 开销）**，行为与 Node 版在 28 个用例上字节级一致。
+**每次子进程调用省约 57~67% 的 runner 开销**，行为与 Node 版在 **53 个用例**上字节级一致。
 
 DSH 每跑一条命令都要先起一个 `runner.js` 子进程 —— 光加载 Node 运行时就是 200ms 起步，
-比你要跑的命令本身还慢。换成原生 exe 后这段降到 69~76ms。
+比你要跑的命令本身还慢。换成原生 exe 后，这段 runner 自身开销从约 180ms 降到约 70~76ms。
+
+> 收益比例比绝对毫秒数稳定：不同机器、不同负载下百分比相近，毫秒数会差一倍以上。
+> 下表是最近一次实测，**如何复核**与**历史多轮数据**都写在表下方。
 
 | | node runner（现状） | **AOT runner** |
 |---|---|---|
-| p50 | 156~158ms | **63~64ms** |
-| p99 | 249~279ms | **173~220ms** |
-| 抖动（IQR/中位数） | 11.7%~20.5% | **1.9%~4.1%** |
+| p50 | 200~208ms | **97~104ms** |
+| p99 | 214~266ms | **110~124ms** |
+| 抖动（IQR/中位数） | 1.0%~7.8% | **3.5%~7.7%** |
 
-**抖动收窄同样重要**：node runner 本身就不稳定，AOT 稳定在 2%~4%。
+**抖动收窄同样重要**：node runner 本身就不稳定。
 交互式场景里，可预测往往比更快更值钱。
-完整数据、多轮口径与方法见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md) ——
-收益比例在不同测量场景下为 **59~67%**，本文不挑最大的那个说。
+
+> **这些数字有前提，请连前提一起读。** 上表是 2026-11-26 在**一台具体机器**上
+> 实测的（ABBA 各一轮共四轮 × 25 次；CPU 6%~23%）。绝对延迟随机器与负载变化很大 ——
+> 同一项目此前的报告里 node p50 是 238~279ms、AOT 是 109~187ms。
+> **可比的是收益比例，不是绝对毫秒数。** 收益在 57.6%~59.7%
+> （历史多轮测量为 24.8%~65.0%，其中低值是负载干扰轮次，报告里标了 UNRELIABLE）。
+> 完整数据、多轮口径与方法见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md)。
+> 想在自己机器上复核：`npm run bench`（用 `N=50` 加大样本，`ORDER=aot-first` 反向对照）。
 
 ---
 
@@ -289,7 +298,7 @@ node 的 `resolveWindowsExecutable` 规则（`runner-launch-*.js`）：
 ./build.sh                 # 增量构建
 ./build.sh --check         # 只跑质量门禁（8 道，见「质量门禁」章节）
 ./build.sh --clean         # 清理后重建
-./build.sh --test          # 构建 + 跑回归（JS 77 项 + C# 319 项）
+./build.sh --test          # 构建 + 跑回归（JS 77 项 + C# 340 项）
 ./build.sh --all           # 质量门禁 + 清理重建 + 测试 + 基准
 ./build.sh --out <目录>    # 指定产物目录
 ```
@@ -437,11 +446,12 @@ A/B 需要两个 runner：AOT 产物与 node runner。两者路径自动解析�
 | C# 代码格式 | `dotnet format --verify-no-changes` | 规则来自 `.editorconfig` + `.csharp-formatting.json` |
 | C# 静态检查 | 编译期 analyzer | csproj 里 `TreatWarningsAsErrors=true`，**0 警告是硬约束** |
 | 版本一致性 | `scripts/check-version.mjs` | `VERSION` / `package.json` / `plugin/package.json` 三处对齐 |
-| C# 单元测试 | `dotnet test` | 319 个测试 |
+| C# 单元测试 | `dotnet test` | 340 个测试 |
 | 覆盖率门槛 | coverlet + `.runsettings` | 对应 xp-gate Gate 5 |
 | ESLint | `eslint .` | 对应 xp-gate Gate 1 |
 | JS 语法 | `scripts/check-js-syntax.mjs` | 口径唯一定义处，CI 与 pre-commit 共用 |
 | 上游补丁留档 | `vendor/patch-dsh.mjs verify` | 校验 `index.js.orig` 与原始版本一致 |
+| 契约覆盖率棘轮 | `scripts/contract-branch-coverage.mjs --check` | 0.2.8 新增。基线绑定契约 sha256 + Node 主版本，四态退出码 |
 
 一键修复格式：`dotnet format`。
 

@@ -173,9 +173,9 @@ if [ "$CHECK" = "1" ]; then
   #   0 未回退            → 通过
   #   1 回退              → **阻塞**，该补用例了
   #   3 未测得            → 警告（本机拿不到 DSH 包是已知情况）
-  #   4 基线缺失/过期     → **阻塞**，跑 --update
+  #   4 基线缺失/过期     → **分情况**，见下
   set +e
-  node scripts/contract-branch-coverage.mjs --check
+  COV_OUT=$(node scripts/contract-branch-coverage.mjs --check 2>&1)
   COV_RC=$?
   set -e
   case "$COV_RC" in
@@ -185,9 +185,31 @@ if [ "$CHECK" = "1" ]; then
        exit 1 ;;
     3) echo "⚠️  契约分支覆盖率未测得（采集失败）。"
        echo "   注意：这不是「覆盖率为 0」，是「没测成」—— 两者补救方向相反。" ;;
-    4) echo "契约覆盖率基线缺失或过期。" >&2
-       echo "修正方式：node scripts/contract-branch-coverage.mjs --update" >&2
-       exit 1 ;;
+    4) # exit 4 有俩原因，补救方向相反，必须分开：
+      #   a) 契约变了（contractSha256 不匹配）→ 基线真过期，**阻塞**。
+      #      这种情况门禁必须拦住，否则「DSH 升级后覆盖率下降」会被静默放过。
+      #   b) Node 主版本变了 → 只是**本机环境**与基线口径不同（本项目 CI 用
+      #      Node 22，开发机可能是 26）。契约没变、代码没变，判失败等于
+      #      「在错误的 Node 上跑门禁就永远红」—— 那样人会开始忽略这条门禁。
+      #      实测：本机 Node 26 上 build.sh --check 曾因此整体 exit 1。
+      #
+      # 区分依据用 --check 自己的输出（它已经按原因分流了措辞），
+      # 不在这里重新推导一遍 —— 判据只应有一处。
+      if printf '%s' "$COV_OUT" | grep -q 'Node 主版本变了'; then
+        echo "⚠️  契约覆盖率基线是用另一个 Node 主版本标定的 —— 本机跳过判定（不是失败）。"
+        printf '%s\n' "$COV_OUT" | grep -E 'Node 主版本|CI 用 Node' | sed 's/^/   /'
+        echo "   契约本身没变、代码没变，用与基线相同的 Node 重跑即可复核（把路径换成你机器上的 node22）："
+        # 用 heredoc 输出字面量：这里要显示的是一条给用户复制的命令，
+        # 变量名不能被本脚本展开（单引号 echo 会触发 SC2016「单引号里不展开」）。
+        cat <<'REPRO'
+   PATH="$N22DIR:$PATH" "$N22DIR/node.exe" scripts/contract-branch-coverage.mjs --check
+REPRO
+      else
+        echo "契约覆盖率基线缺失或过期（契约变了或基线文件丢失）。" >&2
+        printf '%s\n' "$COV_OUT" | grep -E 'Node 主版本|CI 用 Node' | sed 's/^/   /'
+        echo "修正方式：node scripts/contract-branch-coverage.mjs --update" >&2
+        exit 1
+      fi ;;
     *) echo "契约覆盖率检查异常退出（rc=$COV_RC）—— 当作失败处理，不要当成通过。" >&2
        exit 1 ;;
   esac

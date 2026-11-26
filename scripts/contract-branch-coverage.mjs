@@ -530,6 +530,48 @@ function printVerdict(verdict, resampled, measurement) {
  * 采一次并组装报告。失败时返回 { ok:false, reason }，**不直接 process.exit** ——
  * 因为 --check 需要把「没采到」翻译成 exit 3，而报告模式要 exit 1，两者语义不同。
  */
+/**
+ * 统计契约文件的静态分支数。
+ *
+ * 静态数不随运行变化，是「契约面有多大」的固定基准；各文件分别计数是为了
+ * 契约文件改名/拆分时能在报告里看出来，而不是只有一个总数变了。
+ */
+function collectStaticStats(contractFiles) {
+  const staticStats = contractFiles.files.map((f) => ({
+    file: f,
+    ...countStaticBranches(readFileSync(path.join(contractFiles.lib, f), 'utf8')),
+  }));
+  return { staticStats, staticTotal: staticStats.reduce((acc, x) => acc + x.total, 0) };
+}
+
+/**
+ * 一份测量属于「哪份契约、哪个 Node」的身份三元组。
+ *
+ * 三样缺一不可：换 DSH 版本、换契约文件、换 Node 主版本都会让覆盖率数字
+ * 不可比（前两者是契约面变了，后者是 V8 切块方式变了）。这些值同时写进
+ * 报告和基线，judge 才能分辨「回退」和「口径变了」。
+ */
+function identityOf(contractFiles) {
+  return {
+    dshVersion: installedDshVersion(contractFiles.lib),
+    nodeMajor: nodeMajorOf(),
+    contractSha256: contractSha256(contractFiles.lib, contractFiles.files),
+  };
+}
+
+/** 组装测量报告；把「字段怎么摆」集中一处，避免两个分支各写一份而慢慢漂移。 */
+function buildReport(identity, contractFiles, parts) {
+  return {
+    __contractSha: identity.contractSha256,
+    contractFiles: contractFiles.files,
+    dshVersion: identity.dshVersion,
+    nodeMajor: identity.nodeMajor,
+    static: { total: parts.staticTotal, detail: parts.staticStats },
+    runtime: parts.runtime,
+    collectOk: parts.collectOk,
+  };
+}
+
 function measureOnce() {
   const contractFiles = findContractFiles();
   if (!contractFiles) {
@@ -540,11 +582,7 @@ function measureOnce() {
     };
   }
 
-  const staticStats = contractFiles.files.map((f) => ({
-    file: f,
-    ...countStaticBranches(readFileSync(path.join(contractFiles.lib, f), 'utf8')),
-  }));
-  const staticTotal = staticStats.reduce((s, x) => s + x.total, 0);
+  const { staticStats, staticTotal } = collectStaticStats(contractFiles);
 
   // 预置数据缝：**只为测试**。
   //
@@ -553,34 +591,7 @@ function measureOnce() {
   // 指到一份 JSON 就跳过采集，直接用它当合并结果。
   // 生产路径绝不设这个变量，它在 CI 与本地门禁里都是空的。
   const precomputed = process.env.CONTRACT_COVERAGE_PRECOMPUTED;
-  if (precomputed) {
-    const data = JSON.parse(readFileSync(precomputed, 'utf8'));
-    const merged = new Map([...contractFiles.files.map((f) => [f, {}])]);
-    const runtime = {
-      functions: data.functions,
-      ranges: data.ranges,
-      uncoveredFunctions: [],
-    };
-    void merged;
-    const identity0 = {
-      dshVersion: installedDshVersion(contractFiles.lib),
-      nodeMajor: nodeMajorOf(),
-      contractSha256: contractSha256(contractFiles.lib, contractFiles.files),
-    };
-    return {
-      ok: true,
-      report: {
-        __contractSha: identity0.contractSha256,
-        contractFiles: contractFiles.files,
-        dshVersion: identity0.dshVersion,
-        nodeMajor: identity0.nodeMajor,
-        static: { total: data.static, detail: [] },
-        runtime,
-        collectOk: data.collectOk,
-      },
-      identity: identity0,
-    };
-  }
+  if (precomputed) return measureFromPrecomputed(precomputed, contractFiles);
 
   const { covDir, ok: collectOk } = collectCoverage();
 
@@ -599,12 +610,26 @@ function measureOnce() {
     rmSync(covDir, { recursive: true, force: true });
   }
 
+  const identity = identityOf(contractFiles);
+  return { ok: true, report: buildReport(identity, contractFiles, { staticTotal, staticStats, runtime, collectOk }), identity };
+}
+
+/** 把所有「采不到」翻译成一份可交给 judge 的报告（collectOk=false）。 */
+/**
+ * 用预置的 JSON 当测量结果（测试专用，生产路径不设该环境变量）。
+ *
+ * 抽成独立函数有两个原因：measureOnce 原本 89 行（Gate 4 long-function 上限 50），
+ * 而这段是一个完整的、与其余流程无关的分支 —— 它不碰采集、不碰合并，
+ * 只是把现成数字组装成报告。混在主流程里既撑长函数，也让「生产路径」
+ * 看起来有一条不该有的近路。
+ */
+function measureFromPrecomputed(precomputed, contractFiles) {
+  const data = JSON.parse(readFileSync(precomputed, 'utf8'));
   const identity = {
     dshVersion: installedDshVersion(contractFiles.lib),
     nodeMajor: nodeMajorOf(),
     contractSha256: contractSha256(contractFiles.lib, contractFiles.files),
   };
-
   return {
     ok: true,
     report: {
@@ -612,15 +637,28 @@ function measureOnce() {
       contractFiles: contractFiles.files,
       dshVersion: identity.dshVersion,
       nodeMajor: identity.nodeMajor,
-      static: { total: staticTotal, detail: staticStats },
-      runtime,
-      collectOk,
+      static: { total: data.static, detail: [] },
+      runtime: {
+        functions: data.functions,
+        ranges: data.ranges,
+        uncoveredFunctions: [],
+      },
+      collectOk: data.collectOk,
     },
     identity,
   };
 }
 
-/** 把所有「采不到」翻译成一份可交给 judge 的报告（collectOk=false）。 */
+// Gate 4 会把下面这个多行对象字面量误报成 「Function "s" is too long」——
+// `unmeasuredReport` 实际只有 13 行。
+//
+// 这是上游解析器缺陷，已复现两次：把 `return {` 之后的对象、以及
+// `const X = {` 之后的对象，都当成「名为字面量首字母的函数体」，
+// 报的行号正好是该对象的第一行，而括号配平完全正常。
+//
+// 试过抽成常量规避，**无效** —— 换行位置变了、误报跟着走，这说明它判的是
+// 「这里有段多行对象字面量」而不是「这里函数太长」。所以保持自然写法：
+// 不为了哄工具而扭曲代码结构。
 function unmeasuredReport(why) {
   return {
     contractFiles: [],
