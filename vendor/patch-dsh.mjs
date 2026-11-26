@@ -39,10 +39,56 @@ const ORIG_PATH = path.join(VENDOR, 'dsh-subprocess-local-0.2.0-rc.2', 'index.js
 
 const ORIG_MD5 = '0b4485aae7cb41ea37c40e086926408c';
 
-const BEFORE =
-  'handle = bindManagedProcess(spec, containmentMode === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env), binding);';
-const AFTER =
-  'handle = bindManagedProcess(spec, containmentMode === "linux-scope" ? launchLinuxScope(spec, env, internals) : launchWindowsJob(spec, env, internals), binding);';
+/**
+ * 上游这段代码的已知形态。
+ *
+ * ## 为什么要做成表
+ *
+ * 上游改写过一次。0.2.0-rc.2 用 `containmentMode`，从 0.2.2-rc.5 起重写成
+ * `linuxScope === void 0` + `literalArgv`（三个版本的这一行**连行号都是 1574**，
+ * 从 0.2.2-rc.5 起没再动过）。
+ *
+ * 原来这里只硬编码一种形态，上游一改，`apply` 就匹配不上、报「上游换了写法」。
+ * 那个报错本身是对的，但**光报错不解决问题** —— 而这两代写法的修补方式其实是
+ * 同一个（把 `internals` 作为 `launch*` 的最后一个实参传进去），区别只在文本。
+ *
+ * 所以把「已知写法」列成数据：每项自带 before / after，状态判定、施加、还原
+ * 都按形态走。新增形态只需往表里加一条，不用动逻辑。
+ *
+ * ## 每个形态都必须满足
+ *
+ * `before` 在文件里**恰好出现一次**（`apply` 会校验）。上游若有第二处同样的调用，
+ * 说明我们的理解有遗漏，应该报错让人看，而不是猜着替换。
+ *
+ * ## 怎么加新形态
+ *
+ * 1. 上游升级后跑 `node vendor/patch-dsh.mjs status`，看到 `unknown-shape`
+ * 2. 从它打印的上下文里抄出那一行
+ * 3. 照葫芦画瓢加一条，`internals` 加在 `launchLinuxScope` / `launchWindowsJob`
+ *    的**参数表末尾**（两个函数的签名都把 `internals` 放在最后）
+ * 4. **重新验证 53 项 A/B 一致性** —— 光让 apply 成功不算修好
+ */
+const SHAPES = [
+  {
+    id: '0.2.0-rc.2',
+    note: 'containmentMode 二元分支，launchLinuxScope 只有 2 个实参',
+    before:
+      'handle = bindManagedProcess(spec, containmentMode === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env), binding);',
+    after:
+      'handle = bindManagedProcess(spec, containmentMode === "linux-scope" ? launchLinuxScope(spec, env, internals) : launchWindowsJob(spec, env, internals), binding);',
+  },
+  {
+    id: '0.2.2-rc.5 ~ 0.2.3-alpha.2',
+    note: 'linuxScope === void 0 分支，launchLinuxScope 多一个 literalArgv 实参',
+    before:
+      'handle = bindManagedProcess(spec, linuxScope === void 0 ? launchWindowsJob(spec, env) : launchLinuxScope(spec, env, linuxScope.literalArgv), binding);',
+    after:
+      'handle = bindManagedProcess(spec, linuxScope === void 0 ? launchWindowsJob(spec, env, internals) : launchLinuxScope(spec, env, linuxScope.literalArgv, internals), binding);',
+  },
+];
+
+/** 文本里能认出几条「已打补丁」的形态（用于 ambiguous 判定）。 */
+const countAfter = (text) => SHAPES.filter((s) => text.includes(s.after)).length;
 
 const md5 = (buf) => createHash('md5').update(buf).digest('hex');
 
@@ -98,27 +144,33 @@ function findTarget() {
   return fromModuleResolution() ?? fromRunningProcess() ?? fromHomeLayout();
 }
 
-/** 按「该出现 / 不该出现」两个标记给出补丁状态。
+/**
+ * 判定文件处于哪种状态。
  *
- * 两个标记只有四种组合，用「是否一致」分两类读最省：
- *   不一致 → 恰有一个标记在文件里，在的那个就说明状态（after=已打，before=未打）
- *   一致   → 要么两个都在（无法判断，ambiguous），要么都不在（上游换了写法，unknown-shape）
+ * 判据从「两个标记的四种组合」改成了「形态表里哪一条命中」——
+ * 上游改过写法之后，二元标记法只能报「unknown-shape」，说不出「这是哪一代」。
+ *
+ * 返回值多带一个 `shape`：命中的形态（pristine / patched 时）。
+ * 把形态透出来有两个用处 —— 报错时能说清「认出了 0.2.2-rc.5 那一代」，
+ * 以及 `apply` 直接拿它做替换，不必再扫一遍。
  */
-function classify(hasBefore, hasAfter) {
-  if (hasBefore !== hasAfter) return hasAfter ? 'patched' : 'pristine';
-  return hasAfter ? 'ambiguous' : 'unknown-shape';
+function classify(text) {
+  const pristineShapes = SHAPES.filter((s) => text.includes(s.before));
+  const patchedCount = countAfter(text);
+  if (patchedCount > 1) return { kind: 'ambiguous', patchedCount };
+  if (pristineShapes.length > 1) return { kind: 'ambiguous', pristineCount: pristineShapes.length };
+  if (patchedCount === 1) {
+    return { kind: 'patched', shape: SHAPES.find((s) => text.includes(s.after)) };
+  }
+  if (pristineShapes.length === 1) return { kind: 'pristine', shape: pristineShapes[0] };
+  return { kind: 'unknown-shape' };
 }
 
 function readState(file) {
   if (!file || !existsSync(file)) return { kind: 'missing', file };
   const text = readFileSync(file, 'utf8');
-  const hasBefore = text.includes(BEFORE);
-  const hasAfter = text.includes(AFTER);
   const digest = md5(Buffer.from(text));
-
-  const kind = classify(hasBefore, hasAfter);
-  if (kind === 'ambiguous') return { kind, file, digest, hasBefore, hasAfter };
-  return { kind, file, digest };
+  return { ...classify(text), file, digest };
 }
 
 function doStatus() {
@@ -141,10 +193,12 @@ function doStatus() {
   switch (state.kind) {
     case 'patched':
       console.log('状态: ✅ 已打补丁');
+      console.log(`  匹配形态: ${state.shape.id}（${state.shape.note}）`);
       console.log('  AOT runner 插件可以生效。');
       return 0;
     case 'pristine':
       console.log('状态: ⚠️  原始版本（未打补丁）');
+      console.log(`  匹配形态: ${state.shape.id}（${state.shape.note}）`);
       console.log('  AOT runner 插件此刻不会生效 —— 请运行 apply。');
       return 1;
     case 'unknown-shape':
@@ -191,7 +245,14 @@ function doApply() {
   writeFileSync(backup, readFileSync(file, 'utf8'));
 
   const text = readFileSync(file, 'utf8');
-  writeFileSync(file, text.replace(BEFORE, AFTER));
+  // 用状态里认出的形态做替换；README 承诺「恰好一处」，这里守住它 ——
+  // 出现第二处说明我们对上游的理解有遗漏，该报错让人看，不该猜着全替换。
+  if (text.split(state.shape.before).length - 1 !== 1) {
+    console.error(`形态 ${state.shape.id} 的锚点在文件里出现了多次，拒绝替换。`);
+    console.error('请人工确认后再打补丁，并把新情况补进 SHAPES。');
+    return 1;
+  }
+  writeFileSync(file, text.replace(state.shape.before, state.shape.after));
 
   console.log('✅ 补丁已应用');
   console.log(`   文件: ${file}`);
@@ -220,7 +281,7 @@ function doRevert() {
   }
 
   const text = readFileSync(file, 'utf8');
-  writeFileSync(file, text.replace(AFTER, BEFORE));
+  writeFileSync(file, text.replace(state.shape.after, state.shape.before));
   console.log('✅ 已还原为原始版本');
   console.log(`   文件: ${file}`);
   return 0;

@@ -5,6 +5,28 @@
 
 ## [0.2.8] - 2026-11-25
 
+> **补丁工具支持多代上游写法（2026-11-26）**
+>
+> `vendor/patch-dsh.mjs` 原先只认 0.2.0-rc.2 那一代上游代码。实测上游四个版本后发现，
+> 从 `0.2.2-rc.5` 起这行代码被重写过（三版完全相同，连行号都是 1574）：
+>
+> ```
+> 0.2.0-rc.2                  containmentMode === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env)
+> 0.2.2-rc.5 ~ 0.2.3-alpha.2  linuxScope === void 0 ? launchWindowsJob(spec, env) : launchLinuxScope(spec, env, literalArgv)
+> ```
+>
+> **升级 DSH 之后插件必然装不上，且只能靠人撞到。** 现在改成形态表，新增形态只需加一条数据。
+> `status` 会报出认出了哪一代；`apply` 增加「锚点必须恰好出现一次」的守卫。
+>
+> 新增 `test/patch-shapes-verify.js`（7 项，已接入 `test:all`）。它守的不只是字符串替换，
+> 而是「每个形态都给**两个** `launch*` 补了 `internals`」—— 只补一个会得到
+> 「Windows 生效、Linux 不生效」的假修复。已用注入缺陷验证：这种假修复会让 2 个测试立即失败。
+>
+> 端到端在真实 `0.2.3-alpha.2` 上验证：status → apply → status → revert 全部正确。
+>
+> **缺陷本身仍未修**（上游三个版本都漏传 `internals`），阻塞 A 结论不变，见 `docs/TODO.md` §1.9。
+>
+
 > **质量自查（2026-11-26）：修掉三处本轮引入的回归**
 >
 > 发布后做「内部/外部质量是否达标」自查，实测发现的问题**全部是本轮引入的**。
