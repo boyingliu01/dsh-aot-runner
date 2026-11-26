@@ -52,13 +52,21 @@
 
 | 类别 | 剩余 | 性质 |
 |---|---|---|
-| 项目自身技术债 | **3 项** | 可做，全部是低风险清理 |
-| 上游 xp-gate 缺陷 | **3 项** | 已归档 #859/#860/#861，**本项目修不了** |
+| 项目自身技术债 | **0 项** | 2026-11-26 复核：原 3 项 → 2 项前提消失、1 项实测已完成 |
+| 上游 xp-gate 缺陷 | **4 项** | 已归档上游；**本项目修不了**（第 4 项为 2026-11-26 新发现，见 §2.4） |
 | 待关闭的 issue | **2 项** | #29/#30 已修复待关闭 |
 | 有意不动 | 1 类 | 见 §1.6，**不要去改** |
 | 可选长期项 | 2 项 | 不阻塞任何事 |
 
-**一句话结论**：没有任何「必须立刻做」的事。剩下的都是「做了更好，不做也不影响」。
+**一句话结论**：项目内部已无待办技术债，剩余全部是「上游缺陷（修不了）」或「有意不动」。
+
+> **2026-11-26 复核结论**：原先记的 3 项「项目自身技术债」逐项实测后全部不成立 ——
+> TODO-1.1、TODO-1.2 的 archlint 判据在工具当前版本下不再触发（`summary.dead_code = 0`、
+> `high_cognitive_complexity_functions = 0`、`code_clones` 不再产出），TODO-1.3 早已实现
+> 且在本次改动中**真实拦住了一个漏登记的新入口脚本**。
+>
+> 教训：**过期待办比没有待办更误导人。** 每次开工前应先复核待办的前提是否还成立，
+> 而不是照着清单直接做 —— 否则会为一条已经检不出来的告警去重构门禁脚本，风险大于收益。
 
 ### 已确认修复（本轮复核，不需再投入）
 
@@ -85,37 +93,73 @@
 
 ## 1. 本项目自身的技术债
 
-### TODO-1.1 补齐 `.archlint.yaml` 入口脚本白名单（issue #32）
+### TODO-1.1 补齐 `.archlint.yaml` 入口脚本白名单（issue #32）—— **前提已消失，2026-11-26 复核**
 
-*验证状态：**已确认未做*** —— 2026-11-23 用 0.38.125 复核，白名单仍只有 3 条，
-archlint 仍报这 5 个文件为 `Dead Code MEDIUM`。**已逐个确认它们都被真实引用**
-（分别被 8 / 8 / 6 / 7 / 10 处引用），确属误报。
+*验证状态：**不需要做了*** —— archlint 现在**不再**把这 5 个文件报为 Dead Code。
 
-- [ ] `bench/load-matrix.cjs`
-- [ ] `scripts/check-js-syntax.mjs`
-- [ ] `scripts/check-release.mjs`
-- [ ] `scripts/contract-branch-coverage.mjs`
-- [ ] `scripts/contract-fingerprint.mjs`
+2026-11-26 实测（archlint 当前版本）：
+- 对被列出的 5 个文件名逐个 grep 完整输出：**各 0 次提及**
+- `--format json` 的 `summary.dead_code = 0`、`dead_symbols = 0`、`smells = []`
+- 分数 **10.0/10**
+
+> 注意别被规则扫描行骗了：console 里那行 `↳ Dead Code found: 48` 是**扫描计数**
+> （尝试匹配了多少处），不是告警数。判据看 `summary.dead_code`。
+>
+> 保留这一段而不是直接删掉，是因为它记着一条仍然成立的经验：
+> **「白名单里没登记」≠「会被报错」**，工具行为会变，过期待办比没有待办更误导人。
+
+下面这份 2026-11-23 的原始记录留作对照（当时确实成立）：
+
+- [x] ~~`bench/load-matrix.cjs`~~（2026-11-26 复核：不再被报）
+- [x] ~~`scripts/check-js-syntax.mjs`~~（2026-11-26 复核：不再被报）
+- [x] ~~`scripts/check-release.mjs`~~（2026-11-26 复核：不再被报）
+- [x] ~~`scripts/contract-branch-coverage.mjs`~~（2026-11-26 复核：不再被报）
+- [x] ~~`scripts/contract-fingerprint.mjs`~~（2026-11-26 复核：不再被报）
 
 **为什么值得做**：archlint 的「死代码」判据是「有没有被 import」，对入口脚本必然误报。
 这 5 个文件分别被 `package.json` script、`ci.yml`、`build.sh` 调用（已在 issue #32 逐条核实）。
 不补白名单的后果不是"多几条噪声"，而是 Gate 6 的 8.5/10 分数被误报稀释 —— 真问题会被淹掉。
 
-### TODO-1.2 处理两个**真实**的 archlint smell（issue #32）
+### TODO-1.2 处理两个**真实**的 archlint smell（issue #32）—— **前提已消失，2026-11-26 复核**
 
-*验证状态：**已确认未做*** —— 2026-11-23 复核：`summarizeRuntime` 仍在
-`contract-branch-coverage.mjs:172`，认知复杂度 16；54 token 重复仍在 `202-209` ↔ `64-72`。
+*验证状态：**不需要做了*** —— 两个 smell 在 archlint 当前版本下都不再报告。
 
-- [ ] `scripts/contract-branch-coverage.mjs` 的 `summarizeRuntime` 认知复杂度 16 → 拆成「取值/格式化/汇总」
-- [ ] `contract-branch-coverage.mjs:202-209` ↔ `contract-fingerprint.mjs:64-72` 的 54 token 重复 → 抽公共小工具
+2026-11-26 实测（`npx archlint --format json`，`files_analyzed: 80`）：
+- `high_cognitive_complexity_functions = 0`
+- `code_clones` / `long_parameter_lists` 在 summary 里**均为 None**（规则不再产出）
+- 全 summary 只有 `architecture_grade`（10.0）和 `files_analyzed` 两个非零项
+
+另手工复核 `summarizeRuntime`：函数体内分支点（`if`/`?`/`&&`/`||`/`for`/`while`）
+**共 5 处**，与「认知复杂度 16」的记录已经对不上 —— 说明这段代码在此期间被改写过，
+或原记录的口径与现在的实现不同。
+
+- [x] ~~`summarizeRuntime` 认知复杂度 16 → 拆分~~（2026-11-26 复核：实测 5 个分支点，不触发）
+- [x] ~~54 token 重复 → 抽公共小工具~~（2026-11-26 复核：`code_clones` 不再产出）
+
+> **没做的理由不是「不值得」，而是「判据不成立了」。** 为一条已经检不出来的告警去
+> 重构两个门禁脚本，风险大于收益 —— 这两个文件的任何改动都会影响门禁行为（见本文件顶部警告）。
 
 > 注意：这两个脚本是「契约漂移检测」的两半，抽公共函数是**合理**的，
 > 不会像 `bench/` 那样破坏实验自包含性。`.archlint.yaml` 里对 `bench/` 的豁免理由不适用于它们。
 
-### TODO-1.3 给白名单加防漂移自检（issue #32 建议 3）
+### TODO-1.3 给白名单加防漂移自检（issue #32 建议 3）—— **已完成**
 
-- [ ] 扫描 `scripts/*.mjs` / `bench/*.cjs`，若某文件既不在 `package.json` script、
-      也不在 `ci.yml`、也不在 `build.sh` 里，就提示「补白名单或真删」
+*验证状态：**已实现并于 2026-11-26 实测生效*** —— `test/archlint-whitelist-selftest.mjs`，
+挂在 `npm run test:archlint-whitelist`（`test:all` 里会跑）。
+
+**它不是「写了就算完成」，而是真的拦住过我：** 本轮新增
+`scripts/contract-coverage-local.mjs` 后，`test:all` 报
+
+```
+FAIL  1 个被引用的入口脚本不在白名单里：
+        scripts/contract-coverage-local.mjs
+```
+
+补进 `.archlint.yaml` 后转 PASS（候选 12 个 / 白名单 11 条，且无僵尸条目）。
+这条自检的判据是「有没有被 import」，覆盖 `package.json`、`build.sh`、`ci.yml`、
+`README.md`、`.githooks/*` 与所有源码目录 —— 比原始设想（只扫 3 处）更宽。
+
+- [x] 扫描脚本，若既不在 `package.json` / `ci.yml` / `build.sh` 里则提示 —— 已实现，见上
 
 **理由**：白名单承诺「保证将来真新增的孤儿模块仍会被检出来」，但这个承诺已经失效过一次
 （3 条白名单 vs 5+ 个入口脚本）。靠人记得补是不可靠的，要机器盯。
@@ -317,6 +361,61 @@ hook 插桩抓到真实 `paths` 的记录，以及多字节 UTF-8 让 `length($0
 
 ---
 
+## 1.9 【重要】上游 subprocess 层重构：补丁锚点已失效（2026-11-26 核查）
+
+**这条不是「待办」，是「决策输入」** —— 下次升级 DSH 前必须知道。
+
+### 实测结论
+
+拿上游三个版本解包对比（`npm pack @deepseek-ai/dsh-subprocess-local@<ver>`）：
+
+| 版本 | 契约文件 | `launch*` 是否漏传 `internals` | 我们的补丁锚点是否匹配 |
+|---|---|---|---|
+| `0.2.0-rc.2`（**本机在跑**） | `runner-launch-B2zsQ1Dz.js` | ❌ 漏传 | ✅ 匹配（已打） |
+| `0.2.2-rc.5` | — | ❌ 漏传（`index.js:1574`，写法同下） | ❌ 不匹配 |
+| `0.2.3-alpha.1`（#34 记录） | — | ❌ 漏传（`index.js:1574`，写法同下） | ❌ 不匹配 |
+| `0.2.3-alpha.2`（**上游最新**） | `runner-launch-2f_K_dxk.js` | ❌ **仍漏传** | ❌ **不匹配** |
+
+**三个版本（0.2.2-rc.5 / 0.2.3-alpha.1 / 0.2.3-alpha.2）的这一行完全相同**，
+连行号都是 1574 —— 说明这段代码从 0.2.2-rc.5 起就没动过。
+
+`0.2.3-alpha.2` 的实际代码（`lib/index.js:1574`）：
+
+```js
+handle = bindManagedProcess(spec, linuxScope === void 0
+  ? launchWindowsJob(spec, env)
+  : launchLinuxScope(spec, env, linuxScope.literalArgv), binding);
+```
+
+两个 `launch*` 的签名**都接受** `internals`（`launchWindowsJob(spec, targetEnv, internals = {})`、
+`launchLinuxScope(spec, targetEnv, literalArgv, internals = {})`），而**调用处一个都没传**。
+`internals.runnerInvocation ?? spawnRunnerInvocation()` 在这种情况下永远走后者 ——
+即永远选内置 Node runner，插件不生效。**缺陷性质与 0.2.0-rc.2 完全相同，只是换了写法。**
+
+### 对补丁的影响
+
+`vendor/patch-dsh.mjs` 的锚点是这段（原文）：
+
+```js
+containmentMode === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJob(spec, env)
+```
+
+上游现在写成了 `linuxScope === void 0 ? launchWindowsJob(spec, env) : launchLinuxScope(spec, env, linuxScope.literalArgv)`。
+变量名（`containmentMode` → `linuxScope`）、分支方向、`launchLinuxScope` 的参数个数全变了，
+**锚点匹配不上，`apply` 会失败**。
+
+### 结论
+
+1. **不要急着升级 DSH 到 0.2.3-alpha.x** —— 升了插件就要重做补丁，而且 alpha 通道本就未稳定。
+2. 若将来要升级，需要同步改 `vendor/patch-dsh.mjs` 的锚点，并**重新验证 53 项 A/B 一致性**。
+3. **阻塞 A（上游 discussion #11893）依然成立**：上游三个版本都没修这个缺陷。
+   但可以补一条新证据 —— 上游在重构时**保留了 `internals` 参数、却依然没传**，
+   说明这不是「忘了加参数」，而是**那条代码路径没被测试覆盖到**。
+   建议在 #11893 下补这个观察（比单纯说「还是坏的」更有说服力）。
+
+- [ ] 网络恢复后，把上表与 `index.js:1574` 的实际代码补到 discussion #11893
+- [ ] 若决定升级 DSH，改补丁锚点 + 重跑 A/B（**不要只改锚点就宣布可用**）
+
 ## 2. 上游（xp-gate）待跟踪
 
 这些**在本仓库修不了**，只能等上游。列出来避免重复投入 ——
@@ -330,6 +429,28 @@ hook 插桩抓到真实 `paths` 的记录，以及多字节 UTF-8 让 `length($0
 > 已在 [#861 评论](https://github.com/boyingliu01/xp-gate/issues/861#issuecomment-7092628851)
 > 补充了复测结果 + 三个触发必要条件的精确刻画。
 > **这意味着：这 4 条告警在可预见的将来都会一直在 `principles src/` 里。不要试图消除它们。**
+>
+> **2026-11-26 复测（v0.38.126）：仍在，且显著恶化 —— 4 条变 9 条，报数涨了约 6 倍。**
+>
+> | 函数 | 2026-11-23 报数 | **2026-11-26 报数** | 实测行数 |
+> |---|---|---|---|
+> | `EmitSpawnEnoent` | 58 | **373** | 7 |
+> | `EmitProtocolError` | 71 | 71 | 30 |
+> | `Finish` | 57 | **364** | 10 |
+> | 新增：`EmitCreateProcessError` | — | **370** | 17 |
+> | 新增：`PublishControlMissingError` | — | **367** | 50（边界值） |
+> | 新增：`TargetSpawner` / `ResolveControlHandle` / `DefaultResolveControl` | — | 59 / 60 / 55 | — |
+>
+> **新证据推翻了一个自然假设**：报数**不是**「到文件末尾的剩余行数」。
+> `EmitSpawnEnoent` 所在的 `src/JobRunner.Results.cs` **全文只有 129 行**，
+> 从该函数（第 54 行）到文件末尾只有 **75 行**，而工具报 **373 行** ——
+> **报数跨越了文件边界**，比原先估计的更严重。
+>
+> 为什么涨这么多：2026-11-23 之后项目做过 JobRunner 拆分（0.2.7），
+> 文件行数变了，而这个 bug 报的是「从错位起点数到某个远端 `}`」——
+> 起点越靠前、远端越远，数字就越大。**文件越小反而报得越大。**
+>
+> 结论不变：**不要试图消除这 9 条告警**，它们是上游 bug 的直接产物。
 
 | 报出 | 函数 | 实测行数 |
 |---|---|---|
@@ -389,11 +510,48 @@ hook 插桩抓到真实 `paths` 的记录，以及多字节 UTF-8 让 `length($0
 | issue | 说明 | 复核方式 |
 |---|---|---|
 | #732 外层 | `hooks/lib/file-classifier.sh` 已含 `mjs\|cjs\|mts\|cts` | 运行时取 `xp_gate_source_exts` 断言 |
-| #732 内层 | ❌ **未修**：`principles/analyzer.ts` 的 `adapterMap` 仍只有 ts/tsx/js/jsx | `xp-gate principles x.mjs` → `Files checked: 0` |
+| #732 内层 | ✅ **已修（2026-11-26 复核）**：`principles scripts/` → `12 files checked` | 看 `Files checked` 是否 > 0 |
 
 > 这条记录本身是个教训：**"外层修了" ≠ "端到端通了"**。我当时只看外层就宣布修复，
 > 被 `Files checked: 0` 打回。回归时务必用 **CLI 端到端口径**（看 `Files checked` 数字），
 > 而不是断言某个 map 里有 key。
+
+### TODO-2.2c JS 适配器把「多行对象字面量」误报成长函数（2026-11-26 新发现，**未提上游**）
+
+*验证状态：**已实测复现；上游 issue 尚未提交（网络不通，见下）***
+
+**症状**：`npx xp-gate check scripts/` 报
+
+```
+line 667: Function "s" is too long: 84 lines (maximum: 50)
+```
+
+而 `unmeasuredReport` 实际只有 **13 行**。被报的是它 `return { ... }` 里的对象字面量，
+`"s"` 是 `...shape` 之类标识符的首字母。
+
+**与 [#861](https://github.com/boyingliu01/xp-gate/issues/861) 不是同一个 bug**：
+#861 是 **C# 适配器**（`csharp.ts:145` 的 `extractCodeBlock` 错位）；
+这条是 **JS/TS 适配器**对对象字面量的范围判定错误。两者共同点是
+「`line` 恒为 1」和「报数远大于实际长度」。
+
+**当前认知边界（不要当成定论）**：
+- ✅ 已确认：报的行号 = 对象字面量 `{` 所在行；括号配平完全正常
+- ✅ 已确认：把对象抽成 `const X = { ... }` **不能**规避 —— 误报跟着走，
+  连 `const` 声明都被当成「名为 `s` 的函数」
+- ❌ **未能**做出最小复现：单独写一个 `function f(){ return { ...20 个字段 }; }`
+  的文件**不触发**。说明触发条件依赖文件上下文（同文件里其他结构），尚未定位
+- ❌ 所以**不要**据此去重构代码：改了也没用，且会破坏可读性
+
+**本轮的处理方式**：把那次为规避误报而做的「抽成常量」改动**回退了**，
+并在代码里写明这是上游缺陷。**不为了哄工具而扭曲代码结构。**
+
+- [ ] 待网络恢复后向 `boyingliu01/xp-gate` 提交 issue（附上面两条已知、
+      一条已知的反例，明确说明「最小复现未找到」，不夸大结论）
+
+> **这条记录里最重要的不是 bug 本身，而是那个「抽常量规避 → 失败 → 回退」的过程。**
+> 遇到工具误报时，先验证「改法是否真的能让告警消失」，再决定改不改代码。
+> 我当时假设抽成常量能规避，实测发现误报会跟着走 —— 如果没验证就提交，
+> 会留下一处「为工具而改、且毫无效果」的痕迹。
 
 ### TODO-2.3 已修复、可从跟踪列表中移除的上游 issue
 
