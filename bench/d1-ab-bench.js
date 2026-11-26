@@ -241,8 +241,16 @@ async function collectSamples() {
 
   for (let i = 0; i < N; i++) {
     acc.floors.push(await runFloor());
-    await sampleOnce(acc, 'node');
-    await sampleOnce(acc, 'aot');
+    // 顺序可反：全局规则第 5 条要求 A-B-A 之外还要 ABBA 交替 ——
+    // 单调趋势会让「总在后面跑的那一侧」系统性占便宜。反向跑一遍做对照，
+    // 两次结论一致才说明顺序没有污染结果。
+    if (process.env.ORDER === 'aot-first') {
+      await sampleOnce(acc, 'aot');
+      await sampleOnce(acc, 'node');
+    } else {
+      await sampleOnce(acc, 'node');
+      await sampleOnce(acc, 'aot');
+    }
     await new Promise((r) => setTimeout(r, 25));
     if ((i + 1) % 10 === 0) process.stdout.write(`  已完成 ${i + 1}/${N}\n`);
   }
