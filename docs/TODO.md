@@ -1,7 +1,7 @@
 # TODO — dsh-aot-runner 待办清单
 
 > **最后核实**：2026-11-26（xp-gate **v0.38.126**）
-> **基准提交**：`09368b1`（0.2.8，已发布到 npm + GitHub Release）
+> **基准提交**：`1ab1024`（0.2.8，已发布到 npm + GitHub Release）
 > **工具版本**：xp-gate v0.38.126 / .NET SDK 10.0.404 / **Node 22（CI 与基线口径）**
 > **最新发布**：**`v0.2.8` 已发布**（npm `latest` = 0.2.8，GitHub Release 含 4 个资产）。
 > 0.2.5/0.2.6/0.2.7 从未发版，内容合并进 `docs/RELEASE-NOTES-0.2.8.md`（DR-003：
@@ -10,7 +10,11 @@
 > **当前状态**：`build.sh --check` 全绿，**340** C# 测试通过（连续 5 次全量、0 崩溃），
 > 生产源码覆盖率 100%（878/878），`npm run lint` exit 0，`principles src/` 0 error。
 > Gate 3 零 CCN 警告，Gate 6 archlint 10.0/10（0 smells）。
-> main CI 与 Release workflow 均绿（run 45725448707 / 45725856584）。
+> main CI 与 Release workflow 均绿（CI 最新 run 在 `1ab1024` 上通过）。
+>
+> **2026-11-26 质量自查结论**：内部与外部质量均已达标，遗留项见 §1。
+> 自查中发现并修掉三处**本轮引入**的回归（`build.sh`/`test:all` 在 Node 26 开发机上
+> 恒红、`measureOnce` 89 行），另修正 README 三处失真（测试数、A/B 用例数、性能表口径）。
 >
 > **0.2.8 变更（2026-11-25）**：
 > - 契约分支覆盖率**已从「报告」升级为「门禁」**（issue #35 §三C）——
