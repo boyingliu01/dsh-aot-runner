@@ -1,14 +1,16 @@
 # TODO — dsh-aot-runner 待办清单
 
-> **最后核实**：2026-11-25（xp-gate **v0.38.126**）
-> **基准提交**：`1ce30a4`（0.2.8，已推送到 `origin/main`）
-> **工具版本**：xp-gate v0.38.126 / .NET SDK 10.0.404 / Node 22+
-> **最新发布**：0.2.5/0.2.6/0.2.7 从未发版；0.2.8 是自 0.2.4 以来的首个发布
-> （见 `docs/RELEASE-NOTES-0.2.8.md`）。
+> **最后核实**：2026-11-26（xp-gate **v0.38.126**）
+> **基准提交**：`09368b1`（0.2.8，已发布到 npm + GitHub Release）
+> **工具版本**：xp-gate v0.38.126 / .NET SDK 10.0.404 / **Node 22（CI 与基线口径）**
+> **最新发布**：**`v0.2.8` 已发布**（npm `latest` = 0.2.8，GitHub Release 含 4 个资产）。
+> 0.2.5/0.2.6/0.2.7 从未发版，内容合并进 `docs/RELEASE-NOTES-0.2.8.md`（DR-003：
+> 不补造假的历史 tag）。
 >
 > **当前状态**：`build.sh --check` 全绿，**340** C# 测试通过（连续 5 次全量、0 崩溃），
 > 生产源码覆盖率 100%（878/878），`npm run lint` exit 0，`principles src/` 0 error。
 > Gate 3 零 CCN 警告，Gate 6 archlint 10.0/10（0 smells）。
+> main CI 与 Release workflow 均绿（run 45725448707 / 45725856584）。
 >
 > **0.2.8 变更（2026-11-25）**：
 > - 契约分支覆盖率**已从「报告」升级为「门禁」**（issue #35 §三C）——
@@ -59,7 +61,12 @@
 - [x] **#29** lint 红 → `npm run lint` exit 0（含 5 条自测）
 - [x] **#30** 文档失真 → 已重写，实测数字全部对齐
 - [x] **#31** 上帝类 → 1468 → 983 行、65 → 45 方法、`large-file` 已消除（**部分完成**，见 §1.4）
-- [x] `.gitignore` 的 `coverage/` 误伤 → 已收窄为 `coverage/tmp/`
+- [x] `.gitignore` 的 `coverage/` 误伤 → 收窄为 `coverage/tmp/`
+  （**2026-11-26 修正**：这条两年来反复被改错两个方向，现在的结论是
+  「`coverage/coverage-summary.json` 必须**在版本库**、其余 `coverage/` 内容忽略」。
+  依据：xp-gate Gate 5 读它判 80% 地板，文件不存在直接 BLOCKED；
+  而 CI 的「误提交构建产物」曾把它整目录判红。两侧诉求互斥，最终让 CI 让步。
+  详见 `.gitignore` 的注释与 `test/coverage-summary-slot.test.mjs`。）
 - [x] `package-lock.json` 版本漂移 → 已同步到 0.2.5
 
 ### 上游已归档、等对方修（**不要在本项目里绕**）
