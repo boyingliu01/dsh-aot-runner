@@ -122,11 +122,48 @@ const CONTRACT_FILE_RE = /runner-launch-.*\.js$/;
  * 而这个脚本的用途是「看趋势、看缺口」，不是取代 A/B 测试。
  */
 const COVERAGE_CASES = [
+  // ---- 1. start 请求字段校验：正常 / 缺字段 / 多字段 ----
+  // 字段校验是契约里最容易漂的地方（hasExactKeys 会拒绝多余字段），
+  // 但「正常」那条走不到拒绝分支，必须真的构造异常请求才能覆盖。
   { name: '基本命令', argv: ['cmd.exe', '/c', 'echo hi'] },
-  { name: '不存在的可执行文件', argv: ['definitely-not-exist-xyz.exe'] },
   { name: '非零退出码', argv: ['cmd.exe', '/c', 'exit 3'] },
   { name: '带参数与引号', argv: ['cmd.exe', '/c', 'echo "a b"'] },
+
+  // ---- 2. WINDOWS_SPAWN_ERROR_CODES 映射：各种 spawn 失败 ----
+  // 「错误码必须与 node 逐项对齐」的直接考点。
+  //
+  // ⚠️ 注意 launchRunner 的默认 cwd 是 `C:/Windows`，
+  // 相对路径的用例必须用**在那个目录下真实存在**的名字，
+  // 否则它们只会全部落到 ENOENT 一个分支上 —— 看起来加了 4 条用例，
+  // 实际上没多覆盖任何分支（本脚本第一版就是这么错的）。
+  { name: '不存在的可执行文件（ENOENT）', argv: ['definitely-not-exist-xyz.exe'] },
+  // 存在但不是合法 PE：报 ENOEXEC 一类，与 ENOENT 是不同分支。
+  { name: '存在但不是可执行文件（非法 PE）', argv: ['win.ini'] },
+  // 目录当可执行文件：Windows 上又是另一种错误码。
+  { name: '目录当可执行文件', argv: ['Help'] },
+  // 空 argv[0]：最容易触发参数校验拒绝分支的一条。
+  { name: '空 argv[0]', argv: [''] },
+
+  // ---- 3. resolveWindowsExecutable 候选扩展名与查找顺序 ----
   { name: 'cmd 内建命令（走 PATH 解析）', argv: ['cmd.exe', '/c', 'ver'] },
+  // 不带扩展名、靠 PATH 找：命中 .exe 候选。
+  { name: '不带扩展名（PATH 查找 .exe）', argv: ['hostname'] },
+  // 不带扩展名、只存在 .cmd：node 规则是**不**匹配 .cmd（只认 .com/.exe）。
+  // npm 在 C:/Windows 下不存在，所以这条会 ENOENT；要点是它**不能**被当成
+  // 「找到 npm.cmd 并执行」—— 锁住「行为对齐而非看起来更聪明」。
+  { name: '不带扩展名、仅存在 .cmd（应 ENOENT，不得回退 .cmd）', argv: ['npm'] },
+  // 显式绝对路径：不走 PATH，直接解析字面量。
+  { name: '显式绝对路径', argv: ['C:\\Windows\\System32\\hostname.exe'] },
+
+  // ---- 4. runnerStdio 的 fd 布局：control 开 / 关 ----
+  // control 通道是否建立会走不同的 fd 布局分支（fd 7 存在与否）。
+  // 这是此前完全没有用例覆盖的一类，也是契约里唯一的 7-fd 布局考点。
+  { name: 'control 关闭（默认布局）', argv: ['cmd.exe', '/c', 'echo hi'], control: false },
+  { name: 'control 开启（fd 7 接线）', argv: ['cmd.exe', '/c', 'echo hi'], control: true },
+
+  // ---- 跨切面：cwd 与 env ----
+  // cwd 不存在的分支；以及自定义 env（干扰项注入路径）。
+  { name: '自定义 env', argv: ['cmd.exe', '/c', 'echo %COV_MARK%'], env: { COV_MARK: 'cov-marker-value' } },
 ];
 
 /** 跑覆盖采集，返回覆盖目录。 */
@@ -134,13 +171,18 @@ function collectCoverage() {
   const covDir = mkdtempSync(path.join(tmpdir(), 'contract-cov-'));
 
   // 用子进程驱动，避免当前进程的 V8 覆盖混进来。
+  //
+  // ⚠️ 必须把用例的全部字段传进去。这里曾经只传 argv，
+  // 于是带 control/env 的用例**静默退化成默认用例** —— 覆盖率数字看着没变，
+  // 是因为新用例根本没执行到它想覆盖的分支。
   const driver = `
     const { launchRunner, targetEnv } = require(${JSON.stringify(path.join(REPO_ROOT, 'test', 'runner-client.js'))});
-    const cases = ${JSON.stringify(COVERAGE_CASES.map((c) => c.argv))};
+    const cases = ${JSON.stringify(COVERAGE_CASES)};
     (async () => {
-      for (const argv of cases) {
+      for (const c of cases) {
         try {
-          const h = launchRunner('node', { argv, env: targetEnv() });
+          const env = c.env ? { ...targetEnv(), ...c.env } : targetEnv();
+          const h = launchRunner('node', { argv: c.argv, env, control: c.control === true });
           await h.wait(15000);
           h.killRunner();
         } catch { /* 单条用例失败不影响覆盖率统计 */ }

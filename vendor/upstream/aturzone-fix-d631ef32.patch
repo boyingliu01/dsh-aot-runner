@@ -1,0 +1,128 @@
+From d631ef321f00305c668b2fb01ae732d04fe170b8 Mon Sep 17 00:00:00 2001
+From: Atur Dana <aturzone@gmail.com>
+Date: Sat, 7 Nov 2026 14:51:49 +0330
+Subject: [PATCH] fix(subprocess): forward managed-launch runner seams from
+ spawn()
+
+LocalSubprocessRuntime.internals is the documented test seam, but spawn() forwarded it only to the fallback spawnSubprocess path. The Windows-Job and Linux-scope launches were called without internals, so runnerInvocation / resolveRunnerInvocation / runnerAvailable were silently ignored on every managed production path; only direct launch-function tests could reach them (Discussions #12532, #11893). Widen the runtime internals type to carry the runner seams and lift them into both launches, omitting absent entries so exact-object expectations stay tight. The isolated-runtime test now asserts the selected launch receives all three seams and fails without the change.
+---
+ .../subprocess/subprocess-local/src/index.ts  | 27 ++++++++++++++++---
+ .../subprocess-local/tests/local.spec.ts      | 17 +++++++++---
+ 2 files changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/packages/subprocess/subprocess-local/src/index.ts b/packages/subprocess/subprocess-local/src/index.ts
+index 3ad5beab591e..6af1a45961fa 100644
+--- a/packages/subprocess/subprocess-local/src/index.ts
++++ b/packages/subprocess/subprocess-local/src/index.ts
+@@ -43,9 +43,11 @@ import {
+   signalLinuxDirectProcess,
+   systemdRunIdentity,
+ } from './linux-scope.ts'
++import type { LinuxScopeInternals } from './linux-scope.ts'
+ import { LinuxScopeSelector } from './linux-scope-selector.ts'
+ import type { LinuxScopeDecision } from './linux-scope-selector.ts'
+ import { launchWindowsJob, probeWindowsJob } from './windows-job.ts'
++import type { WindowsJobInternals } from './windows-job.ts'
+ import { targetEnvironment } from './runner-launch.ts'
+ import { createProcessInspector } from './process-inspector.ts'
+ import type { ProcessInspector } from './process-inspector.ts'
+@@ -67,6 +69,22 @@ function loadNodePty(): typeof NodePty {
+   }
+ }
+ 
++/** Ordinary-spawn hooks plus the managed-launch runner seams; the latter reach the selected launch. */
++export type LocalSubprocessInternals = SpawnInternals
++  & Pick<WindowsJobInternals, 'runnerInvocation' | 'resolveRunnerInvocation' | 'runnerAvailable'>
++  & Pick<LinuxScopeInternals, 'runnerInvocation' | 'resolveRunnerInvocation' | 'runnerAvailable'>
++
++/** Lift the managed-launch runner seams from the runtime internals, omitting absent entries. */
++function managedRunnerSeams(
++  internals: LocalSubprocessInternals,
++): Pick<WindowsJobInternals, 'runnerInvocation' | 'resolveRunnerInvocation' | 'runnerAvailable'> {
++  return {
++    ...internals.runnerInvocation === undefined ? {} : { runnerInvocation: internals.runnerInvocation },
++    ...internals.resolveRunnerInvocation === undefined ? {} : { resolveRunnerInvocation: internals.resolveRunnerInvocation },
++    ...internals.runnerAvailable === undefined ? {} : { runnerAvailable: internals.runnerAvailable },
++  }
++}
++
+ /**
+  * Local subprocess service: platform-selected managed ranges, Node-shaped stdio
+  * dispositions (raw pipes, inherit, bounded tail-keep collection with spill
+@@ -82,7 +100,7 @@ export class LocalSubprocessRuntime extends SubprocessRuntime {
+   /** Caller endpoints retained until close, independently of managed process lifetime. */
+   private controlChannels = new Set<Duplex>()
+   /** Test hook: process, spill, and platform operations forwarded to spawnSubprocess. */
+-  internals: SpawnInternals = {}
++  internals: LocalSubprocessInternals = {}
+   /** Provider-lifetime latch suppressing repeated weaker-containment warnings. */
+   private fallbackWarningIssued = false
+   /**
+@@ -212,15 +230,16 @@ export class LocalSubprocessRuntime extends SubprocessRuntime {
+     const env = targetEnvironment(spec)
+     const containmentMode = this.selectContainmentMode('ordinary')
+     let handle: LocalSubprocessHandle
+-    const internals: SpawnInternals = { ...this.internals, onSpillFailure: this.reportSpillFailure }
++    const internals: LocalSubprocessInternals = { ...this.internals, onSpillFailure: this.reportSpillFailure }
+     if (containmentMode === 'fallback') {
+       handle = spawnSubprocess(spec, internals)
+     } else {
+       const binding = prepareManagedProcessBinding(internals)
+       const linuxScope = containmentMode === 'linux-scope' ? this.linuxScopeDecision : undefined
++      const seams = managedRunnerSeams(internals)
+       const launch = linuxScope === undefined
+-        ? launchWindowsJob(spec, env)
+-        : launchLinuxScope(spec, env, linuxScope.literalArgv)
++        ? launchWindowsJob(spec, env, seams)
++        : launchLinuxScope(spec, env, linuxScope.literalArgv, seams)
+       handle = bindManagedProcess(spec, launch, binding)
+       if (linuxScope !== undefined) this.watchLinuxScopeStart(handle.done, linuxScope.generation)
+     }
+diff --git a/packages/subprocess/subprocess-local/tests/local.spec.ts b/packages/subprocess/subprocess-local/tests/local.spec.ts
+index 3229c0837fcb..01326ba3f6f1 100644
+--- a/packages/subprocess/subprocess-local/tests/local.spec.ts
++++ b/packages/subprocess/subprocess-local/tests/local.spec.ts
+@@ -1062,7 +1062,13 @@ describe('LocalSubprocessRuntime', () => {
+       const linuxFiber = await linuxContext.plugin(IsolatedLocalSubprocessRuntime)
+       fibers.push(linuxFiber)
+       const linuxRuntime = linuxContext.subprocess as InstanceType<typeof IsolatedLocalSubprocessRuntime>
+-      linuxRuntime.internals = { platform: 'linux' }
++      const linuxRunner: [string, ...string[]] = ['/marker-linux-runner']
++      const resolveLinuxRunner = (): [string, ...string[]] => ['/resolved-linux-runner']
++      const linuxRunnerAvailable = (invocation: readonly string[]): boolean => invocation[0] === '/resolved-linux-runner'
++      linuxRuntime.internals = {
++        platform: 'linux', runnerInvocation: linuxRunner,
++        resolveRunnerInvocation: resolveLinuxRunner, runnerAvailable: linuxRunnerAvailable,
++      }
+       const preparationFailure = new Error('spill directory unavailable')
+       prepareManagedProcessBinding.mockImplementationOnce(() => { throw preparationFailure })
+       expect(() => linuxRuntime.spawn(spec('true'))).toThrow(preparationFailure)
+@@ -1074,7 +1080,10 @@ describe('LocalSubprocessRuntime', () => {
+       expect(probeLinuxNative).toHaveBeenCalledOnce()
+       expect(confirmLinuxManager).toHaveBeenCalledTimes(2)
+       expect(launchLinuxScope).toHaveBeenCalledTimes(2)
+-      expect(launchLinuxScope).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), [])
++      // The declared runner seam reaches the launch selected on the production path.
++      expect(launchLinuxScope).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), [], {
++        runnerInvocation: linuxRunner, resolveRunnerInvocation: resolveLinuxRunner, runnerAvailable: linuxRunnerAvailable,
++      })
+       await linuxRuntime.spawn(spec('true')).done
+       expect(confirmLinuxManager).toHaveBeenCalledTimes(3)
+       expect(spawnSubprocess).toHaveBeenCalledOnce()
+@@ -1084,13 +1093,15 @@ describe('LocalSubprocessRuntime', () => {
+       const windowsFiber = await windowsContext.plugin(IsolatedLocalSubprocessRuntime)
+       fibers.push(windowsFiber)
+       const windowsRuntime = windowsContext.subprocess as InstanceType<typeof IsolatedLocalSubprocessRuntime>
+-      windowsRuntime.internals = { platform: 'win32' }
++      const windowsRunner: [string, ...string[]] = ['/marker-windows-runner']
++      windowsRuntime.internals = { platform: 'win32', runnerInvocation: windowsRunner }
+       await windowsRuntime.spawn(spec('true')).done
+       await new Promise(resolve => setImmediate(resolve))
+       await windowsRuntime.spawn(spec('true')).done
+       await new Promise(resolve => setImmediate(resolve))
+       expect(probeWindowsJob).toHaveBeenCalledTimes(2)
+       expect(launchWindowsJob).toHaveBeenCalledTimes(2)
++      expect(launchWindowsJob).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), { runnerInvocation: windowsRunner })
+       expect(bindManagedProcess.mock.calls.map(([, launch]) => launch)).toEqual([
+         linuxLaunch,
+         linuxLaunch,

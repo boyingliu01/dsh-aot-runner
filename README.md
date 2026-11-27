@@ -3,6 +3,10 @@
 [![npm](https://img.shields.io/npm/v/@boyingliu01/dsh-aot-runner.svg)](https://www.npmjs.com/package/@boyingliu01/dsh-aot-runner)
 [![license](https://img.shields.io/npm/l/@boyingliu01/dsh-aot-runner.svg)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-win--x64-blue.svg)](#下载)
+[![README](https://img.shields.io/badge/README-English-blue.svg)](README.en.md)
+
+> 🌐 **English readers: see [README.en.md](README.en.md)** — a condensed English version
+> covering the same contract, measurements, and design decisions.
 
 DSH 子进程 runner 的 **NativeAOT 高性能实现**。用原生可执行文件替换 Node.js 版 runner，
 **每次子进程调用省约 57~67% 的 runner 开销**，行为与 Node 版在 **53 个用例**上字节级一致。
