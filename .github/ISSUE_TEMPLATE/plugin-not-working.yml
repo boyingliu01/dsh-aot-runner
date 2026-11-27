@@ -1,0 +1,107 @@
+name: 插件不生效 / 装了没用
+description: 装上了但性能没变化、或插件报错停用 —— 九成是上游补丁问题，先按这份表单自查
+title: 'plugin: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **先跑这一条，把输出贴到下面的第 1 题：**
+
+        ```bash
+        node vendor/patch-dsh.mjs status
+        ```
+
+  - type: textarea
+    id: patch-status
+    attributes:
+      label: '1. `node vendor/patch-dsh.mjs status` 的完整输出'
+      description: 这是最有信息量的一行诊断。粘贴原文即可。
+      render: shell
+      placeholder: |
+        DSH subprocess-local 补丁状态
+        ────────────────────────────────────────────────────────────
+        目标文件: ...
+        md5:      ...
+        状态: ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: patch-state
+    attributes:
+      label: 上面输出里的「状态」是哪一种？
+      options:
+        - 已打补丁
+        - 原始版本（未打补丁）
+        - 未识别的代码形状
+        - 找不到目标文件
+        - 我不确定 / 上面没贴到状态
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        > **不想打补丁？这是合理选择。**
+        > 上游缺陷 [#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)
+        > 未修之前，不打补丁插件就是不生效的 —— 这是**预期行为**，不是 bug。
+
+  - type: textarea
+    id: env
+    attributes:
+      label: '2. 环境'
+      description: 内容不必精确，但下面四项都要有。
+      value: |
+        - DSH 版本（`dsh --version`）：
+        - `node --version`：
+        - `@deepseek-ai/dsh-subprocess-local` 版本：
+        - Windows 版本：
+    validations:
+      required: true
+
+  - type: dropdown
+    id: managed
+    attributes:
+      label: 是否受管设备（企业 EDR / AppLocker / Intune / WDAC）？
+      description: 受管环境里未签名的原生 exe 大概率被拦，这属于预期行为，见 SECURITY.md。
+      options:
+        - '否'
+        - '是'
+        - 不知道
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: '3. 期望发生什么'
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: '4. 实际发生什么'
+      description: 有报错、有插件告警的话请贴原文。
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: '5. 日志'
+      description: 插件告警、DSH 启动日志、或你看到的报错。没有就写「无」。
+      render: shell
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: '6. 我确认过'
+      options:
+        - label: 我读了 vendor/README.md
+          required: true
+        - label: 我读了 SECURITY.md 的「风险 1：二进制没有代码签名」一节
+          required: true
+        - label: 我搜过现有 issue
+          required: true

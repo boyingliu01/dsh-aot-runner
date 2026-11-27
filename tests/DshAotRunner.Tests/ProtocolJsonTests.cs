@@ -131,6 +131,107 @@ public class ProtocolJsonTests
         Assert.Null(error);
     }
 
+    // ---------------- 缺字段 / 类型不匹配的边界（覆盖此前未达的分支） ----------------
+    //
+    // 这几条不是为了凑覆盖率数字，而是各自对应一种**真实会到的输入**：
+    // host 传来的字段可能是 null、可能是非字符串、env 里可能夹着数字或嵌套对象。
+    // 这些分支此前一条都没被走到 —— 意味着「host 传了个 null 会怎样」从来没被验证过。
+    //
+    // 契约（见 ProtocolJson.ParseStart）：字符串字段缺失或类型不对 → 回退到
+    // `""`（cwd/type）或 `null`（control），**不抛异常、不猜值**。
+
+    [Fact]
+    public void ParseStart_字段显式为null时回退而不是当成字符串null()
+    {
+        // JSON 里显式写 null 与「字段不存在」在 TryGetProperty 语义下不同：
+        // 前者能取到、但 ValueKind 是 Null —— 必须走回退，不能变成字面量 "null"。
+        const string line = """{"type":"start","cwd":null,"control":null,"env":{}}""";
+
+        var req = ProtocolJson.ParseStart(line, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(req);
+        Assert.Equal("", req!.Cwd);
+        Assert.Null(req.Control);
+    }
+
+    [Fact]
+    public void ParseStart_字段类型不对时回退而不是抛异常()
+    {
+        // cwd 给数字、control 给字符串 —— 都不能让解析器崩，也不能猜一个值出来。
+        const string line = """{"type":"start","cwd":42,"control":"yes","env":{}}""";
+
+        var req = ProtocolJson.ParseStart(line, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(req);
+        Assert.Equal("", req!.Cwd);
+        Assert.Equal("yes", req.Control);
+    }
+
+    [Fact]
+    public void ParseStart_env里的非字符串值保留原始JSON文本()
+    {
+        // 与 node 侧 JSON.stringify 的表现对齐：数字、对象都按原文透传，
+        // 而不是 ToString() 或丢弃。丢掉会让目标进程收到错误的 env。
+        const string line = """
+            {"type":"start","cwd":"C:\\work","env":{"NUM":42,"OBJ":{"a":1},"NUL":null}}
+            """;
+
+        var req = ProtocolJson.ParseStart(line, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(req);
+        Assert.Equal("42", req!.Env["NUM"]);
+        Assert.Equal("""{"a":1}""", req.Env["OBJ"]);
+        // null 的原文就是 "null" —— 不是空串，也不是缺键
+        Assert.Equal("null", req.Env["NUL"]);
+    }
+
+    [Fact]
+    public void ParseStart_env不是对象时被忽略而不是报错()
+    {
+        // env 给了数组 —— TryGetProperty 能取到，但 ValueKind 不是 Object，
+        // 不能被当成键值对读，也不能让整条 start 失败（host 可能传异常形状）。
+        const string line = """{"type":"start","cwd":"C:\\w","env":[1,2,3]}""";
+
+        var req = ProtocolJson.ParseStart(line, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(req);
+        Assert.Empty(req!.Env);
+    }
+
+    [Fact]
+    public void ParseStart_空字符串env值是空串而不是被当成缺失()
+    {
+        // `GetString() ?? fallback` 那个 `??` 分支此前从没走到 —— 它防的是
+        // 「JSON 里是字符串，但 .NET 侧取出来是 null」这种理论情形。
+        // 实测空字符串取出来是 ""（不是 null），所以它**真的不该被走到**；
+        // 这条测试的价值是把这个结论钉住：空串必须原样保留，
+        // 不能被当成「字段缺失」替换成 fallback（否则目标进程会收到凭空多出的变量）。
+        const string line = """{"type":"start","cwd":"","control":"","env":{"EMPTY":""}}""";
+
+        var req = ProtocolJson.ParseStart(line, out var error);
+
+        Assert.Null(error);
+        Assert.NotNull(req);
+        Assert.Equal("", req!.Cwd);
+        Assert.Equal("", req.Control);
+        Assert.Equal("", req.Env["EMPTY"]);
+    }
+
+    [Fact]
+    public void PeekType_type不是字符串时返回null()
+    {
+        // {"type":123} —— 既不是「缺失」也不是「非法 JSON」，是第三种形态。
+        // 返回 null 让调用方走「未知消息类型」分支，而不是抛 TypeError。
+        var type = ProtocolJson.PeekType("""{"type":123}""", out var error);
+
+        Assert.Null(type);
+        Assert.Null(error);
+    }
+
     // ---------------- AppendString（转义） ----------------
 
     [Fact]

@@ -1,0 +1,106 @@
+name: 我在我的机器上跑了一次性能测试（最欢迎的贡献）
+description: 本项目所有性能数据都来自同一台机器。第二个人在不同机器 / DSH 版本上的数据，比任何代码贡献都值钱。
+title: 'bench: '
+labels: ['area:perf']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **不需要写一行代码。** 在这个项目里，「在另一台机器上复现一次」是最有价值的贡献，
+        因为所有现有数字都来自同一台机器，而绝对延迟随机器与负载变化很大
+        （同一项目此前的报告里 node p50 从 156ms 到 279ms 都出现过）。
+
+        ### 三步
+
+        ```bash
+        git clone https://github.com/boyingliu01/dsh-aot-runner
+        cd dsh-aot-runner
+        ./build.sh && npm run bench
+        ```
+
+        > ⚠️ **请连负载一起报。** 负载差 >5% 的两组对比在本项目里被视为**无效**，
+        > 这是踩过坑之后定的规矩 —— 详见
+        > [测量方法论](https://github.com/boyingliu01/dsh-aot-runner/blob/main/docs/测量方法论-当工具比被测对象更容易出错.md)。
+
+  - type: textarea
+    id: bench-output
+    attributes:
+      label: '1. `npm run bench` 的完整输出'
+      description: 原文粘贴，不要摘录、不要手动整理。原始输出里的离散度/负载行是判读的关键。
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: load
+    attributes:
+      label: '2. 跑之前和之后的 CPU 负载'
+      description: |
+        ```powershell
+        Get-CimInstance Win32_Processor | Select-Object -ExpandProperty LoadPercentage
+        ```
+      value: |
+        - 跑之前：
+        - 跑之后：
+    validations:
+      required: true
+
+  - type: textarea
+    id: machine
+    attributes:
+      label: '3. 机器'
+      value: |
+        - CPU：
+        - 内存：
+        - 磁盘类型（SSD / NVMe / HDD）：
+        - 是否虚拟机 / WSL / 容器：
+        - 杀软（Windows Defender 或其他）：
+    validations:
+      required: true
+
+  - type: textarea
+    id: software
+    attributes:
+      label: '4. 软件'
+      value: |
+        - Windows 版本：
+        - `node --version`：
+        - `dotnet --version`：
+        - DSH 版本（`dsh --version`）：
+        - `@deepseek-ai/dsh-subprocess-local` 版本：
+    validations:
+      required: true
+
+  - type: dropdown
+    id: patch
+    attributes:
+      label: '5. 跑 bench 时打了上游补丁吗？'
+      description: |
+        `npm run bench` 有自己的基线对比，**不需要**补丁也能跑。
+        但如果你是用真实 DSH 路径测的，请说明补丁状态。
+      options:
+        - 没打补丁（直接 npm run bench）
+        - 打了补丁
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: anomalies
+    attributes:
+      label: '6. 有任何异常吗？'
+      description: 比如用例失败、离散度异常大、数字与 README 差很远。没有就写「无」。
+      placeholder: |
+        例：3 次里有 1 次离散度 30%，其余 4%。那 1 次我同时在建索引。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: '7. 我确认'
+      options:
+        - label: 我贴的是原始输出，没有挑选对自己结论有利的轮次
+          required: true
+        - label: 我报告了负载（或说明了为什么拿不到）
+          required: true

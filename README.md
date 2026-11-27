@@ -30,24 +30,54 @@ DSH 每跑一条命令都要先起一个 `runner.js` 子进程 —— 光加载 
 > 完整数据、多轮口径与方法见 [`docs/性能对比测试报告.md`](docs/性能对比测试报告.md)。
 > 想在自己机器上复核：`npm run bench`（用 `N=50` 加大样本，`ORDER=aot-first` 反向对照）。
 
+> 🧪 **最欢迎的贡献：在你自己机器上跑一次 `npm run bench` 并把结果贴出来。**
+> 本项目所有性能数字都来自**同一台机器**，第二个人在不同机器/DSH 版本上的数据
+> 比任何代码都值钱。不需要写一行代码 —— 见
+> [「性能复现报告」模板](https://github.com/boyingliu01/dsh-aot-runner/issues/new?template=bench-report.yml)。
+
+### 先读哪一篇？
+
+| 你想知道 | 读这个 |
+|---|---|
+| 这东西怎么装、能不能用 | 往下看「[下载](#下载)」+「[安装前必读](#-安装前必读两步缺一不可)」 |
+| **凭什么信它**（改了上游什么、怎么复核） | [`SECURITY.md`](SECURITY.md) · [`vendor/README.md`](vendor/README.md) |
+| **性能数字怎么来的、哪些不可信** | [`docs/测量方法论`](docs/测量方法论-当工具比被测对象更容易出错.md) · [发布稿](docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md) |
+| 测试覆盖到什么程度、缺口在哪 | [`docs/测试覆盖率口径.md`](docs/测试覆盖率口径.md) |
+| 我想帮忙 | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| 想帮我推广 | [`docs/articles/publish/发布指南.md`](docs/articles/publish/发布指南.md) |
+
 ---
 
 ### 📌 装之前先看这两步
 
 **这是 Windows x64 专用插件，且当前需要一个上游补丁。** 已在
-[DSH 0.2.0-rc.2 和 0.2.2-rc.1](https://github.com/deepseek-ai/deepseek-harness/discussions/11893) 上确认 ——
+**DSH 0.2.0-rc.2 / 0.2.2-rc.1 / 0.2.3-alpha.2** 上确认 ——
 上游两个 `launch*` 函数漏传 `internals` 参数，注入被静默忽略。
 插件会**自动检测**这个情况：命中时明确告警并停用自己，而不是假装在工作。
 上游修好后，删掉 `vendor/` 目录、按普通插件安装即可。
 
-> 📮 **想催上游修？只能去 discussion，没有 issue 通道。**
-> `deepseek-ai/deepseek-harness` 已关闭 issues/PR 功能（`has_issues=false`），
-> 提交 PR 会 404 —— 但 discussion 区仍在活跃维护。
-> 请到 [discussion #11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893) 留言。
+> **补丁到底改了什么？** 一个文件、一处实参插入、不改行数、可一键还原。
+> 完整的安全论证（威胁模型 / 只读核验步骤 / 卸载步骤）在
+> [`vendor/README.md`](vendor/README.md) 与 [`SECURITY.md`](SECURITY.md)。
+> 2026-11-26 已在 **0.2.3-alpha.2**（上游最新）上实测确认补丁有效：
+> 同一份上游代码，只切换补丁与否，host 的直接子进程从 `node.exe` 变成 `dsh-aot-runner.exe`。
+
+> 📮 **上游修复已经有人写了，卡在「没有合并入口」。**
+> `deepseek-ai/deepseek-harness` 关闭了 issues/PR（`has_issues=false`），PR 会 404。
+>
+> 但 2026-11-07 已有第三方贡献者（`aturzone`）独立复现同一根因并提交修复分支
+> （`fix/subprocess-managed-internals`，commit `ab42e3b983`，带测试），
+> 该 commit 直接引用了 discussion #12532 与 #11893。
+> **截至 2026-11-26 仍未合入 master。**
+>
+> 👉 想帮上忙：去 **[#12532](https://github.com/deepseek-ai/deepseek-harness/discussions/12532)**
+> （先创建、且有修复挂靠的那个议题）留言指出「修复分支存在但未合入」即可，
+> 不需要重新论证 —— 复现和 patch 都已经有了。
 
 ### ⚠️ 安装前必读（两步，缺一不可）
 
-> **1. 需要一行上游补丁。** 在 DSH **0.2.0-rc.2** 上，本插件**必须配合一个 1 行的上游补丁**才能工作。
+> **1. 需要一行上游补丁。** 在 DSH **0.2.0-rc.2 ~ 0.2.3-alpha.2** 上，本插件**必须配合一个 1 行的上游补丁**才能工作
+> （该行代码在上游被改写过一次，补丁工具用「形态表」同时支持两代写法）。
 >
 > 原因是 DSH 的一个传参缺陷：`LocalSubprocessRuntime.spawn()` 调用
 > `launchWindowsJob()` / `launchLinuxScope()` 时漏传 `internals` 参数，
@@ -601,6 +631,13 @@ cp: cannot create regular file 'plugin/bin/dsh-aot-runner.exe': Device or resour
 
 > **5 条里有 4 条，第一直觉都指向了错误的方向。**
 
+📄 **面向外部的发布稿（中文）**：
+[`docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md`](docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md)
+—— 同样的教训，写成给不熟悉本项目的人看的样子。**如果你只想读一篇，读这个。**
+
+📄 **测试覆盖率口径**：[`docs/测试覆盖率口径.md`](docs/测试覆盖率口径.md)
+—— 「三种覆盖率分别是什么、分母是什么、哪些缺口补不上为什么」。
+
 元规则：**当测量结果反复"不合理"时，把怀疑顺序倒过来 ——
 先怀疑测量工具，再怀疑环境，最后才怀疑被测代码。**
 
@@ -651,27 +688,45 @@ cp: cannot create regular file 'plugin/bin/dsh-aot-runner.exe': Device or resour
 | S2 功能对齐 | ✅ | 协议/stdio/exit code |
 | S2b 性能实测 | ✅ | 见上表 |
 | S3 语义完备 | ✅ | terminate 竞态（[#4](https://github.com/boyingliu01/dsh-aot-runner/issues/4)）、control pipe（[#2](https://github.com/boyingliu01/dsh-aot-runner/issues/2)）|
-| S4 A/B 验证 | ✅ | **28/28 通过** |
+| S4 A/B 验证 | ✅ | **53/53 通过** |
 | S5 泄漏/混沌 | ✅ | 100 次零泄漏 + 混沌（[#3](https://github.com/boyingliu01/dsh-aot-runner/issues/3)）|
 | S6 插件接入 | ✅ | 插件 + 熔断器（[#11](https://github.com/boyingliu01/dsh-aot-runner/issues/11) 阶段 B）|
 | S7 性能对比验证 | 🔄 | 第一层 + 第二层 ✅，第三层进行中 |
 
-**全套件 408 项通过**：`npm run test:all`（89 项 JS）+ `dotnet test`（319 项 C#）。
+**全套件 589 项通过**：`npm run test:all`（243 项 JS）+ `dotnet test`（346 项 C#）。
+数字随改动变化，以 `npm run test:all` 的实际输出为准。
+（`plugin/test/*.test.js` 的 29 项被 `test:plugin` 与 `test:coverage` 各跑一次，
+后者是为拿 c8 报告 —— 下表按**执行次数**计，所以总数包含这次重复执行。）
 
 | 层 | 套件 | 项数 |
 |---|---|---|
-| C# 单元 | `tests/DshAotRunner.Tests` | 319 |
-| A/B 一致性 | `test/ab-verify.js` | 28 |
-| 观测器逻辑 | `test/aot-observe-verify.js` | 15 |
-| 插件单元 | `plugin/test/index.test.js` | 11 |
+| C# 单元 | `tests/DshAotRunner.Tests` | 346 |
+| A/B 一致性 | `test/ab-verify.js` | 53 |
+| 插件单元 + 降级可观测性 | `plugin/test/*.test.js` | 29 |
+| 契约分支覆盖率门禁自测 | `test/contract-coverage-check-verify.js` | 23 |
+| 观测器逻辑 | `test/aot-observe-verify.js` | 17 |
+| 发布阻断门禁 | `test/release-npm-gate-verify.js` | 13 |
+| 三态判定库 | `test/bench-verdict-verify.js` | 12 |
+| pre-push 钩子 | `test/pre-push-shim-verify.js` | 12 |
+| 覆盖率汇总槽位 | `test/coverage-summary*.mjs` | 11 |
+| 契约指纹 | `test/contract-fingerprint-verify.js` | 10 |
+| 发布检查 | `test/check-release-verify.js` | 8 |
 | 泄漏/混沌 | `test/leak-verify.js` | 7 |
 | pre-commit 短路 | `test/pre-commit-shortcircuit-verify.js` | 7 |
 | JS 语法检查器 | `test/lint-syntax-verify.js` | 7 |
+| 补丁形态表 | `test/patch-shapes-verify.js` | 7 |
+| 降级可观测性 | `plugin/test/degrade-observability.test.js` | 7 |
 | IPC 协议 | `test/ipc-verify.js` | 6 |
 | terminate 竞态 | `test/race-verify.js` | 5 |
+| 覆盖率汇总槽位 | `test/coverage-summary-slot.test.mjs` | 3 |
+| **vendor 无补丁接缝** | `test/vendor-seam-verify.js` | 2 |
 | 插件端到端 | `test/e2e-plugin-verify.js` | 2 |
+| 契约包定位 | `test/locate-contract-package.test.mjs` | 1 |
 | 真实 host 路径 | `test/host-path-verify.js` | 1 |
-| **合计** | | **408** |
+| **合计** | | **589**（其中 29 项被重复执行一次，去重后 560） |
+
+> 表里各项**不重复计数**（`plugin/test/*.test.js` 同时被 `test:plugin` 与
+> `test:coverage` 跑，后者只是多一层 c8 报告）。
 
 ### 已知待办
 
@@ -686,9 +741,16 @@ cp: cannot create regular file 'plugin/bin/dsh-aot-runner.exe': Device or resour
 
 - **JSON 迁移** `JsonDocument` → `Utf8JsonReader`（可再省 ~15ms）
 - **runner 开销仍有压缩空间**：当前 69~76ms，地板 32~36ms，理论上还能再省 40ms+
-- **两个测试缺口**（详见 [性能对比测试报告](docs/性能对比测试报告.md)）：
-  熔断器的 e2e 验证（node:test 环境下行为不确定）、
-  切帧丢数据类缺陷（需要 runner 侧测试接缝）
+- **熔断器的 e2e 验证**（node:test 环境下行为不确定）——
+  [性能对比测试报告](docs/性能对比测试报告.md) 有记录
+
+> ✅ **「切帧丢数据」这个缺口已关闭。** 早前记为「需要 runner 侧测试接缝」，
+> 现在通过 `IChannelIo` 接缝（`tests/DshAotRunner.Tests/IpcChannelIoSeamTests.cs`，
+> 24 项）可以注入「一次读返回多帧」「半帧到达」「UTF-8 多字节被切开」
+> 「写配额不足需循环写」等真实边界 —— 不必依赖真实管道撞运气。
+>
+> 覆盖率口径与「哪些缺口补不上、为什么」见
+> [`docs/测试覆盖率口径.md`](docs/测试覆盖率口径.md)。
 
 ### 关于 `resolveWindowsExecutable`：已核对一致
 

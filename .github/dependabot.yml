@@ -1,0 +1,47 @@
+version: 2
+
+updates:
+  # npm 依赖（含 @deepseek-ai/* 这个最关键的契约依赖）
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    groups:
+      # 小版本/补丁合并成一个 PR，避免 PR 噪音
+      minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+    labels: [dependencies]
+    commit-message:
+      prefix: 'chore(deps)'
+
+  # C# / NuGet（测试依赖：xunit、coverlet、Test.Sdk）
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+    labels: [dependencies]
+    commit-message:
+      prefix: 'chore(deps)'
+
+  # GitHub Actions 版本（pin 的 action 也会过时）
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: 'ci(deps)'

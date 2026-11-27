@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ⚠️ 安全问题（不要开公开 issue）
+    url: https://github.com/boyingliu01/dsh-aot-runner/security/advisories/new
+    about: 请通过 GitHub 的私下漏洞报告渠道联系，不要在公开区写细节。
+  - name: 📖 已知问题与「哪些告警不要去修」
+    url: https://github.com/boyingliu01/dsh-aot-runner/blob/main/docs/TODO.md
+    about: 有些告警是上游工具缺陷的产物，去修它只会白忙。开 issue 前先看这里。
+  - name: 🔧 插件为什么需要打补丁
+    url: https://github.com/boyingliu01/dsh-aot-runner/blob/main/vendor/README.md
+    about: 一句话：上游漏传了一个参数。不想打补丁也没问题，那是预期行为。
+  - name: 💬 催促上游修那个参数
+    url: https://github.com/deepseek-ai/deepseek-harness/discussions/11893
+    about: 当前唯一的硬阻塞在这里。去留言说「我也需要这个修复」是成本最低的帮助。

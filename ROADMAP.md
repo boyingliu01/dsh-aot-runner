@@ -54,7 +54,7 @@
 | S5 泄漏/混沌 | ✅ 完成 | [#3](../../issues/3) |
 | S6 接入 `ctx.subprocess` | ✅ 完成 | [#11](../../issues/11) 阶段 B |
 | S7 性能对比验证 | ✅ 第一层+第二层完成，第三层进行中 | — |
-| S8 重构后重新发布 | ✅ 完成（2026-11-24，0.2.6 二进制，85 项验证全过） | — |
+| S8 重构后重新发布 | ✅ 完成（2026-11-26 发布 **0.2.8**，见 [Release](https://github.com/boyingliu01/dsh-aot-runner/releases/latest)） | — |
 
 ## 已完成（本轮先后顺序）
 
@@ -131,6 +131,29 @@
 
 已提交上游：
 [deepseek-ai/deepseek-harness#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)
+
+### ✅ 有第三方独立复现并写了修复（2026-11-07），但**至今未合入**
+
+这是本项最关键的状态，2026-11-26 复核：
+
+- 存在**重复议题**
+  [deepseek-ai/deepseek-harness#12532](https://github.com/deepseek-ai/deepseek-harness/discussions/12532)
+  （比 #11893 早 2 分钟创建，两者互相引用）。
+- 第三方贡献者 `aturzone` 在该议题下确认同一根因并给出修复：
+  分支 `aturzone/deepseek-harness:fix/subprocess-managed-internals`，
+  commit `ab42e3b983`。其 commit 说明明确指出
+  「`runnerInvocation` / `resolveRunnerInvocation` / `runnerAvailable`
+  在**每一条 managed 生产路径**上都被静默忽略」，并**补了对应测试**。
+- **但 master 仍未修**（2026-11-26 直接读
+  `packages/subprocess/subprocess-local/src/index.ts` 确认：第 215 行构造了
+  `internals`，第 222/223 行的两个 `launch*` 调用仍未传入）。
+- 仓库 `has_issues=false`，**不接受 PR** —— 修复只能靠维护者手动 cherry-pick。
+
+> **行动结论**：问题不再是「没人相信这是 bug」，而是「有 patch 但没有合并入口」。
+> 最有价值的贡献是去 **#12532**（先创建且有修复挂靠的那个）留言，
+> 指出修复分支存在、附上可 cherry-pick 的 patch 与两份独立验证结果 ——
+> 而不是重复论证。详见
+> [`docs/影响力诊断与建议-2026-11-26.md`](docs/影响力诊断与建议-2026-11-26.md) §2.3。
 
 **本地临时补丁**（1 行，语义等价于上游修好后的样子）：
 
@@ -240,14 +263,24 @@ npm run contract:update   # 确认影响后更新基线
 （191/369/250ms，且同一次内 0%→100% 单调递增）。
 绝对值随机器状态漂移较大，只有单调性稳定。
 
-**切帧丢数据类缺陷测不出来。** 见
-[`test/ipc-verify.js`](test/ipc-verify.js) 的注释与 Issue #11：
+**~~切帧丢数据类缺陷测不出来~~ —— 已解决（2026-11-26）。**
 
-- 现象：把「切出一帧后丢弃缓冲区剩余数据」注入 `IpcChannel.TryTakeFrame`，
+- 原现象：把「切出一帧后丢弃缓冲区剩余数据」注入 `IpcChannel.TryTakeFrame`，
   IPC 用例仍然全绿。
-- 原因：Node 发送端的排队行为使多条帧很少落在同一次 `ReadFile` 里。
+- 原原因：Node 发送端的排队行为使多条帧很少落在同一次 `ReadFile` 里。
   试过小帧连发 / 大帧+小帧 / 256KB 噪声帧+terminate+start，都构造不出来。
-- 解法（未实施）：runner 侧加一个测试接缝，可注入「一次读返回多帧」。
+- **解法（已实施）**：`IChannelIo` 测试接缝，
+  见 [`tests/DshAotRunner.Tests/IpcChannelIoSeamTests.cs`](tests/DshAotRunner.Tests/IpcChannelIoSeamTests.cs)（24 项）。
+  它把「管道怎么返回数据」与「解码逻辑」解耦，于是可以确定性地注入：
+  一次读返回多帧、半帧到达、分块边界落在帧头中间、UTF-8 多字节被切开、
+  写入配额不足需循环写、各类错误码（BROKEN_PIPE / PIPE_NOT_CONNECTED / NO_DATA）。
+- **这个接缝的价值大于「多测几个用例」**：原先这类缺陷只能靠撞真实的管道时序，
+  而真实时序在正常条件下几乎不出现 —— 也就是说缺陷存在但**测不出来**。
+  接缝让「测不出来」变成「必然测到」。
+- **已验证接缝真的能擒获该缺陷**（2026-11-26 变异测试）：把
+  `IpcFrameDecoder.Compact()` 改成「切出一帧后丢弃剩余数据」（`remaining = 0`），
+  `ReadMessage_一次读返回多帧_逐条取出不粘连` 立刻变红；还原后 24/24 全绿。
+  —— 不是「理论上能测」，是**实际注入缺陷后确认会红**。
 
 **测试主机偶发 CLR 运行时崩溃（`0x80131506`）。** 见 Issue #25：
 

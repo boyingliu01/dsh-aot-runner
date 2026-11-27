@@ -25,7 +25,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { spawnSync } = require('node:child_process');
-const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
@@ -260,11 +260,90 @@ test('分母塌缩（区间总数降超 3）→ exit 1，即使比率看起来�
 
 // ---- 接入路径 ----
 
+/**
+ * 把一条 npm script 展开成「它最终会传给采集程序的参数」。
+ *
+ * ## 这条断言的两个历史缺陷（都被变异测试抓出来了）
+ *
+ * **缺陷 1：匹配「提到」而不是「做到」。**
+ * 初版直接把包装脚本全文拼进来，然后 `assert.match(/--check/)`。
+ * 变异测试拆穿：删掉真正传参那一行的 `'--check'`，断言**仍然通过** ——
+ * 因为包装脚本的**注释**里到处写着 `--check`。
+ *
+ * **缺陷 2：展开模式写死了「node 脚本后面不能有参数」。**
+ * 正则 `^node\s+(\S+\.\w+)$` 带 `$` 锚，于是 `node x.mjs --update` 匹配不上，
+ * 走了「不展开」分支 —— 断言其实只是在检查 script 字符串本身，
+ * 而包装脚本（`node y.mjs` 无参数）才会被展开。
+ * 结果是两种接法用了**两套不同判据**，第二种脆弱到删掉 `--update` 也测不出来。
+ *
+ * ## 现在的做法
+ *
+ * 1. **剥注释**：只有真正会执行的代码参与判断；
+ * 2. **不锚定尾部**：`node <script> [args...]` 都识别，把「**命令本体的参数**」
+ *    （`--update`）与「**被调用脚本内部的参数**」（`'--check'`）分开收集。
+ *
+ * 返回 `{ directArgs, innerSource }`：
+ *   - `directArgs`  —— 命令行上直接写给采集脚本的参数（如 `--update`）
+ *   - `innerSource` —— 被调用脚本剥注释后的源码（内部传参如 `'--check'` 在其中）
+ */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')   // 块注释
+    .replace(/^\s*\/\/.*$/gm, '');       // 行注释
+}
+
+function expandScript(name, scripts) {
+  const body = stripComments(scripts[name] ?? '');
+  // `node <path> [args...]` —— 注意**不能**加 `$`，命令行的参数是合法且必要的
+  const m = body.match(/^node\s+(\S+\.(?:mjs|cjs|js))(?:\s+(.*))?$/);
+  const result = { directArgs: [], innerSource: body };
+  if (!m) return result;
+
+  result.directArgs = (m[2] ?? '').split(/\s+/).filter(Boolean);
+
+  const scriptPath = path.join(REPO, m[1]);
+  if (existsSync(scriptPath)) {
+    result.innerSource = stripComments(readFileSync(scriptPath, 'utf8'));
+  }
+  return result;
+}
+
+/**
+ * 该 script 是否会以自己的参数或包装脚本内部的引号实参调用 `flag`。
+ *
+ * ## 「被调用脚本自己读参数」不算「传参数」
+ *
+ * 采集脚本里有 `const CHECK = args.includes('--check')` —— 它是在**读** argv。
+ * 初版把这种出现也算成「传了 --check」，于是**删掉真正传参的那一行，
+ * 断言仍然通过**（第二次被变异测试拆穿）。
+ *
+ * 所以这里排除「紧接着 `.includes(` / `.indexOf(` / `.lastIndexOf(` 的引号字面量」——
+ * 那几种形态是消费者，不是生产者。判据要落在**调用点**，不是**读取点**。
+ */
+function invokesFlag(name, scripts, flag) {
+  const { directArgs, innerSource } = expandScript(name, scripts);
+  if (directArgs.includes(flag)) return true;
+
+  // 只认「作为调用实参出现」的引号字面量，排除 args.includes('--flag') 这类读取点
+  const pattern = new RegExp(`['"]${flag}['"]`);
+  const producers = innerSource
+    .split('\n')
+    .filter((line) => !/\.(?:includes|indexOf|lastIndexOf)\s*\(/.test(line));
+  return pattern.test(producers.join('\n'));
+}
+
 test('package.json 已把 --check 与 --update 接进 scripts，且 --check 在 test:all 里', () => {
   const pkg = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8'));
   const scripts = pkg.scripts ?? {};
-  assert.match(scripts['contract:coverage'] ?? '', /--check/, 'contract:coverage 必须跑 --check');
-  assert.match(scripts['contract:coverage:update'] ?? '', /--update/, 'contract:coverage:update 必须跑 --update');
+
+  assert.ok(
+    invokesFlag('contract:coverage', scripts, '--check'),
+    'contract:coverage 必须真的跑 --check（直接作为命令行参数，或包装脚本内部作为实参传）',
+  );
+  assert.ok(
+    invokesFlag('contract:coverage:update', scripts, '--update'),
+    'contract:coverage:update 必须真的跑 --update',
+  );
   assert.ok(
     (scripts['test:all'] ?? '').includes('contract:coverage'),
     '门禁没接进 test:all 就等于没有',
