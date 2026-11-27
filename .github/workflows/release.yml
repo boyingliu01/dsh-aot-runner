@@ -315,7 +315,7 @@ jobs:
       # ---- 6. 发布 GitHub Release ----
       # 无论是否跳过 npm，GitHub Release 都要发 —— 它是二进制的**主**交付渠道。
       - name: 发布 GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
