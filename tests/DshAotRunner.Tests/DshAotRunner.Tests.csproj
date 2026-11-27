@@ -24,9 +24,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.2" />
     <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
     <!-- coverlet.collector 提供 "XPlat Code Coverage" 数据收集器。
          xp-gate 的 Gate 5 会以 collect 参数跑 dotnet test 并解析
          coverage.cobertura.xml；没有这个包时收集器不存在，
