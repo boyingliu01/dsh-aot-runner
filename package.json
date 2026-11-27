@@ -14,7 +14,7 @@
     "test:host": "node --test test/host-path-verify.js",
     "test:e2e": "node --test test/e2e-plugin-verify.js",
     "test:plugin": "node --test plugin/test/*.test.js",
-    "test:all": "bash ./build.sh --check && npm run lint && npm run test:eslint-config && npm run test:archlint-whitelist && npm run test:coverage && npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:observe && npm run test:hook && npm run test:prepush && npm run test:lint && npm run test:leak && npm run test:race && npm run test:release && npm run test:degrade && npm run test:verdict && npm run test:contract && npm run test:contract-coverage && npm run contract:coverage && npm run test:release-slot && npm run test:locate-contract && npm run test:coverage-slot && npm run test:patch-shapes && npm run test:vendor-seam",
+    "test:all": "bash ./build.sh --check && npm run lint && npm run test:eslint-config && npm run test:archlint-whitelist && npm run test:coverage && npm test && npm run test:ipc && npm run test:host && npm run test:e2e && npm run test:plugin && npm run test:observe && npm run test:hook && npm run test:prepush && npm run test:lint && npm run test:leak && npm run test:race && npm run test:release && npm run test:degrade && npm run test:verdict && npm run test:contract && npm run test:contract-coverage && npm run contract:coverage && npm run test:release-slot && npm run test:locate-contract && npm run test:coverage-slot && npm run test:coverage-ratchet && npm run test:patch-shapes && npm run test:vendor-seam",
     "bench": "node bench/d1-ab-bench.js",
     "test:coverage": "c8 --reporter=text --reporter=json-summary node --test plugin/test/index.test.js",
     "lint": "npm run lint:syntax && npm run lint:eslint && npm run test:eslint-config && npm run test:archlint-whitelist && npm run test:version",
@@ -48,6 +48,7 @@
     "test:version": "node --test test/check-version-verify.js",
     "test:locate-contract": "node --test test/locate-contract-package.test.mjs",
     "test:coverage-slot": "node --test test/coverage-summary-slot.test.mjs",
+    "test:coverage-ratchet": "node --test test/coverage-summary-ratchet.test.mjs",
     "contract:coverage:raw": "node scripts/contract-branch-coverage.mjs --check",
     "test:patch-shapes": "node --test test/patch-shapes-verify.js",
     "test:vendor-seam": "node --test test/vendor-seam-verify.js"

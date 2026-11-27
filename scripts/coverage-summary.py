@@ -39,31 +39,75 @@ def pct(hit, valid):
     return 100.0 * hit / valid if valid else 0.0
 
 
+COND_RE = re.compile(r"\((\d+)/(\d+)\)")
+
+
 def class_stats(element):
-    """从 <class> 元素读出 (命中行数, 有效行数)。"""
+    """从 <class> 元素读出 (命中行数, 有效行数, 命中分支, 有效分支)。
+
+    cobertura 的分支信息挂在 <line branch="True" condition-coverage="50% (1/2)">：
+    括号里是「已覆盖条件数/条件总数」。没有该属性的行不计入分支分母。
+    """
     lines = element.findall("./lines/line")
     hit = sum(1 for line in lines if int(line.get("hits")) > 0)
-    return hit, len(lines)
+    branch_hit = branch_valid = 0
+    for line in lines:
+        if line.get("branch") != "True":
+            continue
+        match = COND_RE.search(line.get("condition-coverage") or "")
+        if match:
+            branch_hit += int(match.group(1))
+            branch_valid += int(match.group(2))
+    return hit, len(lines), branch_hit, branch_valid
 
 
 def collect(path):
-    """解析 cobertura XML，返回 {类名: (是否非源码, 命中行, 有效行)}。"""
+    """解析 cobertura XML，返回 {(文件名, 类名): (是否非源码, 命中行, 有效行, 命中分支, 有效分支)}。
+
+    键为什么是「文件名 + 类名」而不是只用类名（2026-11-27 修复）：
+    cobertura 里**同一个类名会出现多次** —— 编译器为 `async`/迭代器生成的
+    状态机、以及泛型实例化会产生重名条目（实测 `DshAotRunner.JobRunner`
+    出现 3 次）。原实现用类名当字典键，后一个条目直接**覆盖**前一个，
+    于是所有统计都只算了最后一个条目 —— 行数和分支数双双被低估，
+    而总覆盖率却仍然显示 100%，完全看不出少了东西。
+
+    @returns {(str, str): tuple} 类名部分仍用于展示，文件名部分保证唯一
+    """
     root = ET.parse(path).getroot()
     per_class = {}
     for cls in root.iter("class"):
         name = cls.get("name") or "?"
-        hit, valid = class_stats(cls)
-        per_class[name] = (is_non_source(norm(cls.get("filename"))), hit, valid)
+        filename = norm(cls.get("filename"))
+        hit, valid, b_hit, b_valid = class_stats(cls)
+        key = (filename, name)
+        marks = is_non_source(filename)
+        prev = per_class.get(key)
+        if prev is not None:
+            # 同一 (文件, 类名) 真重复时累加，而不是丢弃
+            hits, valids, b_hits, b_valids = prev[1], prev[2], prev[3], prev[4]
+            per_class[key] = (prev[0], hits + hit, valids + valid, b_hits + b_hit, b_valids + b_valid)
+        else:
+            per_class[key] = (marks, hit, valid, b_hit, b_valid)
     return per_class
 
 
 def totals(per_class, want_non_source):
     """按「是否非源码」筛选后求和。"""
     hit = valid = 0
-    for non_source, cls_hit, cls_valid in per_class.values():
+    for non_source, cls_hit, cls_valid, _b_hit, _b_valid in per_class.values():
         if non_source == want_non_source:
             hit += cls_hit
             valid += cls_valid
+    return hit, valid
+
+
+def branch_totals(per_class, want_non_source):
+    """按「是否非源码」筛选后求分支命中数与分支总数。"""
+    hit = valid = 0
+    for non_source, _cls_hit, _cls_valid, b_hit, b_valid in per_class.values():
+        if non_source == want_non_source:
+            hit += b_hit
+            valid += b_valid
     return hit, valid
 
 
@@ -82,8 +126,8 @@ def print_summary(per_class):
 
 def print_per_class(per_class):
     """按覆盖率从低到高打印生产类的明细（低的先看）。"""
-    rows = [(valid, name, hit)
-            for name, (non_source, hit, valid) in per_class.items()
+    rows = [(valid, key[1], hit)
+            for key, (non_source, hit, valid, _b_hit, _b_valid) in per_class.items()
             if not non_source]
     print()
     print("=== 生产源码逐类（低覆盖在前）===")
@@ -101,24 +145,34 @@ def print_per_class(per_class):
 #
 # 与被测代码同源维护：改了阈值必须在本文件里改，评审时一眼能看到。
 THRESHOLDS = {
-    "生产源码": 99.0,
+    "行覆盖": 99.0,
+    # 分支门槛为什么必须有：
+    # coverlet 升大版本后会**改变分母**（实测 6.0.4 → 10.1.1 时分支总数 776 → 780、
+    # 覆盖数 744 → 740，分支率 95.88% → 94.87%），而**行覆盖率仍然是 100%**。
+    # 只判行的话，这种下降完全看不见 —— 门禁「跑起来了，但什么都没检查到」。
+    # 取当前实测值向下取整 1 个百分点作为地板，之后逐步抬高（ratchet）。
+    "分支覆盖": 94.0,
 }
 
 
 def check_thresholds(per_class):
-    """核对覆盖率门槛；未达标返回 False。"""
+    """核对覆盖率门槛；未达标返回 False。
+
+    行与分支分别判定：两者分母不同、变化方向也可能相反，不能只看行。
+    """
     src_hit, src_valid = totals(per_class, want_non_source=False)
-    actual = pct(src_hit, src_valid)
+    b_hit, b_valid = branch_totals(per_class, want_non_source=False)
+    actual = {"行覆盖": pct(src_hit, src_valid), "分支覆盖": pct(b_hit, b_valid)}
 
     print()
     print("=== 覆盖率门槛 ===")
     ok = True
     for label, floor in THRESHOLDS.items():
-        got = actual
+        got = actual.get(label, 0.0)
         status = "PASS" if got >= floor else "FAIL"
         if got < floor:
             ok = False
-        print("  %-8s 实际 %5.1f%%  门槛 %5.1f%%  %s" % (label, got, floor, status))
+        print("  %-8s 实际 %5.2f%%  门槛 %5.1f%%  %s" % (label, got, floor, status))
     return ok
 
 
