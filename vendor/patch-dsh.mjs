@@ -139,9 +139,46 @@ function fromHomeLayout() {
   return null;
 }
 
+/**
+ * 显式指定的目标（`--target <路径>`）。
+ *
+ * 为什么需要它：三个自动候选都是「找本机正在用的那份」，
+ * 但 CI 里目标是 `baseline/` 下刚装好的一份，三个候选都找不到，
+ * 于是 e2e 会因为「补丁没打上」而红。加一个显式入口比让 CI 猜路径可靠。
+ *
+ * 接受两种写法：
+ *   - 指向包目录（.../node_modules/@deepseek-ai/dsh-subprocess-local）
+ *   - 指向 workspace 根（.../baseline）—— 内部补全 node_modules 路径
+ *
+ * @returns {string|null} index.js 的绝对路径；未指定或不存在时 null
+ */
+function fromExplicitTarget() {
+  const idx = process.argv.indexOf('--target');
+  if (idx < 0) return null;
+  const raw = process.argv[idx + 1];
+  if (!raw) {
+    console.error('❌ --target 后面需要跟一个路径');
+    process.exit(2);
+  }
+  const abs = path.resolve(raw);
+  const candidates = [
+    abs,
+    path.join(abs, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'index.js'),
+    path.join(abs, 'lib', 'index.js'),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c) && c.endsWith('index.js')) return c;
+  }
+  console.error(`❌ --target 下找不到 lib/index.js：${abs}`);
+  console.error('   试过:');
+  for (const c of candidates) console.error(`     ${c}`);
+  process.exit(2);
+}
+
 /** 找到 DSH 实际加载的那份 dsh-subprocess-local（按可靠性顺序试三个候选）。 */
 function findTarget() {
-  return fromModuleResolution() ?? fromRunningProcess() ?? fromHomeLayout();
+  // 显式优先：CI 里目标是刚装好的 baseline，自动候选找不到它。
+  return fromExplicitTarget() ?? fromModuleResolution() ?? fromRunningProcess() ?? fromHomeLayout();
 }
 
 /**
@@ -320,7 +357,10 @@ if (arg === 'status') {
   console.log(`DSH subprocess-local 补丁工具
 
 用法:
-  node vendor/patch-dsh.mjs [命令]
+  node vendor/patch-dsh.mjs [命令] [--target <路径>]
+
+  --target  显式指定目标（包目录或 workspace 根）。不指定则自动探测
+            本机正在使用的 DSH 安装。CI 里必须用这个。
 
 命令:
   status   查看当前打补丁状态（默认）

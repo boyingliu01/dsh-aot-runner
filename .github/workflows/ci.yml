@@ -381,6 +381,42 @@ jobs:
           echo "DSH_RUNNER=$RUNNER_JS" >> "$GITHUB_ENV"
           echo "A/B 基线: $RUNNER_JS"
 
+      - name: 给基线包打上游补丁（e2e 前置）
+        shell: bash
+        run: |
+          # 为什么 CI 要打这个补丁：
+          #
+          # 上游 `spawn()` 没有把 `internals` 透传给 `launchWindowsJob` /
+          # `launchLinuxScope`（discussion #11893 / #12532），所以在**原版**包上
+          # 「装了插件后真的会用 AOT」这件事物理上测不出来 —— 不是我们的 bug，
+          # 是上游还没修。
+          #
+          # 如果把 e2e 跑在原版包上，CI 会永久红着。而按本项目 sprint retro 的
+          # 结论：「长期红的门禁最后一定会被关掉」。所以这里明确选择：
+          #
+          #   打上 vendor 补丁 → e2e 验证的是「补丁生效后插件确实工作」
+          #
+          # 这样 CI 绿代表的是「我们的补丁 + 我们的插件是对的」，
+          # 而不是「假装上游已经修好了」。上游修好后应当删掉这一步与 vendor/。
+          #
+          # 顺带让 patch 工具本身进了回归：形态匹配一旦失效，这里会直接红，
+          # 而不是等到用户装的时候才发现。
+          #
+          # --target 指向 baseline/：测试用 DSH_RUNNER 定位包，
+          # e2e 也从同一个 runner.js 回溯包根，两边必须是同一个包。
+          #
+          # 路径必须转成 Windows 原生形式：Git Bash 里 $GITHUB_WORKSPACE 是
+          # /d/a/repo 这种 POSIX 形式，Node 在 Windows 上会把它当相对路径，
+          # 拼出 C:/Program Files/Git/baseline 这种不存在的目标（本地实测踩过）。
+          # 与上面 DSH_RUNNER 那步用同样的 cygpath -w 处理。
+          TARGET="$GITHUB_WORKSPACE/baseline"
+          if command -v cygpath >/dev/null 2>&1; then
+            TARGET=$(cygpath -w "$TARGET")
+          fi
+          echo "补丁目标: $TARGET"
+          node vendor/patch-dsh.mjs apply --target "$TARGET"
+          node vendor/patch-dsh.mjs status --target "$TARGET"
+
       - name: A/B 一致性验证
         # 注意：完整套件含 100 次泄漏回归（约 3 分钟）和竞态（约 3 分钟），
         # 这里只跑核心 A/B 以控制额度消耗。完整套件在本地跑。
@@ -441,18 +477,23 @@ jobs:
           cat /tmp/e2e.tap
           echo "node --test 退出码: $NODE_RC"
 
-          # ── 判据设计（2026-11-27 修正过一次，值得读完再改）────────────────
+          # ── 判据设计（2026-11-27 第三次修订，前两版都错了，读完再改）─────
           #
-          # e2e 的第一条用例只有在「上游 spawn() 透传 internals」时才真正跑得起来；
-          # 上游未修且未打 vendor 补丁时，它会**主动 skip** 并给出原因。
+          # **前提**：CI 上一步已经给 baseline 包打过 vendor 补丁。
+          # 所以这里的 SKIP 只可能意味着**补丁没生效** —— 那是真问题，必须判红。
           #
-          # 这个 skip 是**诚实的结论**，不是失败：
-          #   - 判红 → CI 会因为上游未修而长期红，而长期红的门禁最终一定被关掉
-          #   - 判绿（不管）→ 又变成「跑了但什么也没测」的假绿
+          # 修订史（为什么最终是这个判据）：
+          #   v1. 「有 SKIP 即失败」→ 但当时 CI 没打补丁，SKIP 是诚实的结论，
+          #        判红等于让 CI 因为上游未修而长期红。
+          #   v2. 「有 SKIP 但无失败 → 通过 + warning」→ 补上补丁步骤后，
+          #        SKIP 不再是正常状态，再放过就变成「补丁坏了没人知道」。
+          #   v3. **当前**：先打补丁，再要求「全部实跑」。
+          #        认哪条判据，取决于**前置步骤做了什么**，不能脱离上下文照抄。
           #
-          # 所以判据分两档：
-          #   * 有 SKIP，且其余用例全过 → **通过**，但打印醒目提示「AOT 端到端未验证」
-          #   * 有失败（not ok）或一条都没跑到 → **失败**
+          # 三条断言，缺一不可：
+          #   * 有失败（not ok）或 node 退出码非零 → 失败
+          #   * 实跑数 < 2 → 失败（防「文件还在但没测到东西」）
+          #   * 出现 SKIP → 失败（补丁未生效，AOT 路径没被验证）
           PASSED=$(grep -cE '^ok [0-9]+' /tmp/e2e.tap || true)
           FAILED=$(grep -cE '^not ok [0-9]+' /tmp/e2e.tap || true)
           SKIPPED=$(grep -cE '^ok [0-9]+.*# SKIP' /tmp/e2e.tap || true)
@@ -468,9 +509,10 @@ jobs:
             exit 1
           fi
           if [ "$SKIPPED" -gt 0 ] || [ "${SKIPPED_SUM:-0}" -gt 0 ]; then
-            # 不是失败，但要让人看见：CI 绿了不等于 AOT 端到端被验证过。
-            echo "::warning title=AOT 端到端未验证::上游 #11893 未修，e2e 的 AOT 断言被 skip。绿表示「无失败」，不代表「AOT 路径已验证」。"
-            echo "⚠️ AOT 端到端断言被 SKIP —— CI 绿 ≠ AOT 路径已验证。原因见上。"
+            echo "::error::e2e 有 $SKIPPED 项被 SKIP —— 上一步已给 baseline 打过补丁，"
+            echo "::error::所以 SKIP 意味着**补丁没生效**（或 patch 锚点已失效）。AOT 路径没有被验证。"
+            echo "::error::排查：node vendor/patch-dsh.mjs status --target \$GITHUB_WORKSPACE/baseline"
+            exit 1
           fi
           echo "✅ e2e 完成（无失败）"
 
