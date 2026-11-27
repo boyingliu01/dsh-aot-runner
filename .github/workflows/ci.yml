@@ -389,6 +389,37 @@ jobs:
         run: |
           node --test test/ab-verify.js
 
+      - name: 端到端验证（插件注入 + 真实 runtime）
+        # 这一步长期缺失（docs/TODO.md 里记了很久），意味着
+        # 「装上插件后真的会用 AOT」这个**唯一**的端到端断言没有回归保护 ——
+        # 前面的套件各自只测了一半：host-path-verify 测 runtime 能调 AOT，
+        # plugin 单测测插件对**假** runtime 正确，两者合起来才是真结论。
+        #
+        # 依赖上一阶段产物：dist/dsh-aot-runner.exe（已构建）与基线 runner
+        # （DSH_RUNNER 已在上一步写进 GITHUB_ENV）。缺任一都会 SKIP ——
+        # 而 SKIP 不等于通过，所以这里显式断言「至少跑了 2 项」。
+        env:
+          AOT_RUNNER: ${{ github.workspace }}\dist\dsh-aot-runner.exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap test/e2e-plugin-verify.js | tee /tmp/e2e.tap
+          # SKIP 不得当成通过：这条断言防的是「文件在、但什么也没测」
+          PASSED=$(grep -cE '^ok [0-9]+' /tmp/e2e.tap || true)
+          # SKIP 有两种呈现：用例行的 `# SKIP` 后缀，以及末尾汇总的 `# skipped N`。
+          # 两个都看，避免只堵一个口子。
+          SKIPPED=$(grep -cE '^ok [0-9]+.*# SKIP' /tmp/e2e.tap || true)
+          SKIPPED_SUM=$(grep -oE '^# skipped [0-9]+' /tmp/e2e.tap | awk '{print $3}' || true)
+          echo "通过 $PASSED 项；行内 SKIP=$SKIPPED，汇总 skipped=${SKIPPED_SUM:-0}"
+          if [ "$SKIPPED" -gt 0 ] || [ "${SKIPPED_SUM:-0}" -gt 0 ]; then
+            echo "::error::e2e 有 SKIP（行内 $SKIPPED / 汇总 ${SKIPPED_SUM:-0}）—— 端到端验证没真正执行，不等于通过"
+            exit 1
+          fi
+          if [ "$PASSED" -lt 2 ]; then
+            echo "::error::e2e 只跑了 $PASSED 项，期望 2 项 —— 文件还在，但没测到东西"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -204,16 +204,39 @@ FAIL  1 个被引用的入口脚本不在白名单里：
 > 实际 27 行报 59~373 行）是 **xp-gate #861 的测量失步，不是技术债**。
 > 详见 `docs/XP-GATE-BASELINE.md` §7。**不要去"修"它们。**
 
-### TODO-1.5 `NdjsonChannel` 的 `solid.dip` 告警
+### TODO-1.5 `NdjsonChannel` 的 `solid.dip` 告警 —— **已失效，且失效方式值得记录**
 
-*验证状态：**已确认当前存在***
+*验证状态：**2026-11-27 复核：该告警已不再出现，但它是"规则不再报"，不是"问题已解决"***
+
+原记录（xp-gate v0.38.82 时期）：
 
 ```
 ⚠ [WARNING] solid.dip  line 38: Direct instantiation detected: new LineReader()
 ```
 
-- [ ] 评估：`NdjsonChannel` 里 `new LineReader()` 是否应该注入
-- [ ] 若是误报（`LineReader` 是无状态工具类），在 `.archlint.yaml` 或规则级做豁免并写明理由
+**本轮复核结论（xp-gate v0.38.126）：**
+
+1. 跑 `xp-gate principles src/`，21 条规则里**没有** `solid.dip` 的任何输出。
+2. 为确认是「规则不再报」还是「代码变好了」，我造了一个**必然触发**的探针
+   （`src/DipProbe.cs`，含 `_r = new LineReader(...)`），单独跑该文件 ——
+   结果仍是 `✓ No violations found`。**探针已删除，`git status` 确认干净。**
+3. 所以：`solid.dip` 这条规则对 **C# 已经不生效**，而它的输出形态是
+   **`✓ No violations found`** —— 与「真的没问题」在视觉上无法区分。
+
+> **这与 `archlint` 的「Found 0 files to analyze」是同一类假绿**：
+> 工具对 C# 失明，却用「通过」的措辞汇报。`.archlint.yaml` 顶部第 12 行
+> 其实已经诚实写了「只分析 JS/TS，不解析 C#」，但 `xp-gate` 这一侧没有。
+
+**因此原待办的两条都不需要做了**：
+- ~~评估是否应该注入 `LineReader`~~ —— 它的注入路径**早就存在**：
+  `NdjsonChannel(Stream input, Stream output)` 是测试专用构造，
+  且 `SmallFileCoverageTests` 已用它覆盖了读一行/多行/EOF/Send-flush 四种情形。
+  原待办的前提（"没有注入路径"）本身就不成立。
+- ~~若是误报则豁免~~ —— 无需豁免，规则已不报。
+
+**真正该记的是**：C# 项目里依赖 `xp-gate`/`archlint` 的架构类告警时要当心 ——
+它们可能压根没在分析 C#。判据：造一个必然违规的探针，看它是否报。
+不报就是工具盲区，不是代码干净。（已记入 `docs/XP-GATE-BASELINE.md` 的限制清单。）
 
 ### TODO-1.6 `src/` 之外的历史告警（**有意不动**）
 
@@ -419,7 +442,15 @@ containmentMode === "linux-scope" ? launchLinuxScope(spec, env) : launchWindowsJ
    说明这不是「忘了加参数」，而是**那条代码路径没被测试覆盖到**。
    建议在 #11893 下补这个观察（比单纯说「还是坏的」更有说服力）。
 
-- [ ] 网络恢复后，把上表与 `index.js:1574` 的实际代码补到 discussion #11893
+- [x] ~~网络恢复后，把上表与 `index.js:1574` 的实际代码补到 discussion #11893~~
+      —— **已完成（2026-11-27 07:47 已在 #11893 发出证据回复）**：
+      含生产路径 A/B 实测（59.1%~59.6%，p99 改善 73~124ms）、
+      对 `aturzone@ab42e3b983` 的背书、以及最小 patch 形态。
+
+      > **行号口径澄清（本轮核实）**：`1574` 是**打包产物**（`lib/index.js`）的行号，
+      > 在 `@0.2.3-alpha.2` 上实测准确（`launchWindowsJob(spec, env)` 恰在该行）；
+      > 而已发评论引的是**源码**行号（`src/index.ts:215/217`）。两者是同一缺陷的
+      > 两个视角，引用时务必说明是哪个文件 —— 混淆会让人找不到代码。
 - [ ] 若决定升级 DSH，改补丁锚点 + 重跑 A/B（**不要只改锚点就宣布可用**）
 
 ## 2. 上游（xp-gate）待跟踪
@@ -554,6 +585,17 @@ line 667: Function "s" is too long: 84 lines (maximum: 50)
 - [ ] 待网络恢复后向 `boyingliu01/xp-gate` 提交 issue（附上面两条已知、
       一条已知的反例，明确说明「最小复现未找到」，不夸大结论）
 
+      > **2026-11-27 复核：已部分被 [#861](https://github.com/boyingliu01/xp-gate/issues/861)
+      > 覆盖，但仍应补一条。** #861 已提交（2026-11-23，OPEN），标题为
+      > 「C# 适配器 long-function 系统性误报：extractCodeBlock 从声明起点数花括号」，
+      > 且正文确实引用了本项目的 `JobRunner` / `EmitSpawnEnoent` / `Trace`。
+      >
+      > **但 #861 未包含本条最有价值的那个观察**：
+      > 「抽成常量以规避告警 → 实测告警跟着走 → 回退」这个**证伪过程**。
+      > 它证明的是「这类误报无法通过调整代码结构来消除」——
+      > 这对维护者的价值高于再报一次「报错了」。
+      > 补一条简短评论即可，不必新开 issue。
+
 > **这条记录里最重要的不是 bug 本身，而是那个「抽常量规避 → 失败 → 回退」的过程。**
 > 遇到工具误报时，先验证「改法是否真的能让告警消失」，再决定改不改代码。
 > 我当时假设抽成常量能规避，实测发现误报会跟着走 —— 如果没验证就提交，
@@ -566,7 +608,7 @@ line 667: Function "s" is too long: 84 lines (maximum: 50)
 - [x] **#768**（Gate 5 不解析 Cobertura）→ **0.38.82 已修**。实测 `line-rate=0.9724` 能正确解析
 - [x] **#762**（Gate 4 的 `SOURCE_EXTENSIONS` 缺 `.cs`）→ **0.38.82 已修**。实测 `principles src/` 现在检查 17 个 `.cs`
 - [x] **#774**（Gate 3 >64KB SIGPIPE fail-open）→ 已修
-- [ ] `#760`（vitest 硬编码）→ 对本项目**无影响**（无 TypeScript），可关闭或标注
+- [x] `#760`（vitest 硬编码）→ **已关闭（2026-11-27 核实：xp-gate#760 为 CLOSED）**；对本项目本无影响
 
 ---
 
@@ -582,8 +624,8 @@ line 667: Function "s" is too long: 84 lines (maximum: 50)
 | **#32**（archlint 白名单落后） | ❌ 未做 | 见 TODO-1.1 |
 | **#33**（xp-gate 漏检汇总） | 🔵 跟踪中 | 具体修复点已拆到上游 #859 / #860 |
 
-- [ ] 关闭 #29 / #30（迁移后各跑一次复验命令再关，避免"看代码觉得改了"就关）
-- [ ] #31 按 TODO-1.4 的结论再定
+- [x] ~~关闭 #29 / #30~~ —— **已完成（2026-11-27 核实：两者均为 CLOSED）**
+- [x] ~~#31 按 TODO-1.4 的结论再定~~ —— **已完成（2026-11-27 核实：CLOSED，JobRunner 已拆分）**
 
 ---
 
@@ -637,8 +679,12 @@ xp-gate check 6             # 期望：8.5/10，0 high/critical
 
 三者都是「看起来通过，实际什么都没测」。
 
-- [ ] 新增任何自检后，**故意改坏被测对象，确认它会红**
-- [x] `test/eslint-config-coverage-selftest.mjs` 已做过（删 ESM block → `AC-EC-1b` 红）
+> **这是常驻准则，不是待办项**（复选框会让人误以为「做完就不用再管了」）：
+> 每次新增自检，都要故意改坏被测对象确认它会红。
+
+- 已执行：`test/eslint-config-coverage-selftest.mjs`（删 ESM block → `AC-EC-1b` 红）
+- 已执行：`test/contract-coverage-check-verify.js`（两处变异均擒获，2026-11-27）
+- 已执行：`test/coverage-summary-ratchet.test.mjs`（退回旧缺陷 → 立即变红，2026-11-27）
 
 ### TODO-4.2 临时探针文件必须清理
 
@@ -646,17 +692,27 @@ xp-gate check 6             # 期望：8.5/10，0 high/critical
 `.tmp-*` 被 `.gitignore` 挡住 → `git status` 里看不见 → 我以为删干净了，
 但它**留在磁盘上**，被 `dotnet format` 扫到，`build.sh --check` 直接 FAIL。
 
-- [ ] 造探针文件时优先放**仓库外**（或 `%TEMP%`）
-- [ ] 必须放仓库内时，用完立刻 `rm`，并跑一次 `build.sh --check` 确认恢复
+> **同样是常驻准则，不是待办项。**
+
+- 造探针文件时优先放**仓库外**（或 `%TEMP%`）
+- 必须放仓库内时，用完立刻 `rm`，并跑一次 `build.sh --check` 确认恢复
 
 ---
 
 ## 5. 可选长期项（不做也不影响任何事）
 
-- [ ] **e2e 进 CI**：`test/e2e-plugin-verify.js` 等长期未被执行，等于没有回归保护。
-      本机缺 VS C++ `link.exe` 跑不了 AOT，但 **GitHub Actions 的 `windows-latest` 有**
-      —— CI 里的「Windows 构建 + A/B」job 已经在跑 AOT，可以考虑把 e2e 也挂上去
-- [ ] **`docs/开发环境.md` 的 SDK 版本过期**：写的是 8.0.427，实际是 10.0.404。
+- [x] ~~**e2e 进 CI**~~ —— **已完成（2026-11-27）**：在 `ci.yml` 的
+      「Windows 构建 + A/B」job 里，A/B 之后新增「端到端验证（插件注入 + 真实 runtime）」。
+      实测该项本地 2/2 通过后才接入；接入时额外加了两道断言防「跑了但没测到东西」：
+      **有 SKIP 即失败**（行内 `# SKIP` 与汇总 `# skipped N` 两个口子都堵）、
+      **通过数 < 2 即失败**。断言本身已用变异测试确认会红。
+      > 更正一处旧描述：`test:e2e` 其实**一直在 `npm run test:all` 里**，
+      > 缺的只是 CI —— 所以本地有保护、CI 没有，正是「本机能过、推送后无人守」的典型缝。
+- [x] ~~**`docs/开发环境.md` 的 SDK 版本过期**~~ —— **已完成（2026-11-27）**。
+      实际比「版本号写错」更麻烦：原文写「需要 .NET SDK 8.0」，而本机只装了
+      **10.0.404** 且全绿 —— 说明**根本没有 8.0 SDK 也行**。真正固定的是
+      csproj 里的**目标框架 `net8.0`**（产物属性），不是 SDK 版本。
+      已改为「能构建 net8.0 即可」并补一段说明，避免下一个人照文档去装错 SDK。
       不是错误（10.x 能构建 net8.0），但读者会困惑，值得补一句说明
 
 ---

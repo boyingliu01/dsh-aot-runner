@@ -334,6 +334,18 @@ hook 判 `✅ PASSED - Principles checker (no errors found)`（error 计数为 0
    报数不变、把别的函数改长后报数跟着变），确认为适配器的括号扫描失步，不是技术债。
    同理 `src/Trace.cs` 的 `Timed`(52 行) 实测只有 1 行。
 
+7.5 **`solid.dip` 对 C# 已静默失效（2026-11-27 实测，v0.38.126）**：
+   本项目 `docs/TODO.md` 曾记录 `NdjsonChannel` 触发 `solid.dip` 告警。
+   本轮复核发现该告警**已不再出现**，且原因是**规则不再对 C# 生效**，不是问题被解决。
+   验证方式：造一个必然触发 `solid.dip` 的探针文件（含 `new LineReader(...)`），
+   单独跑 `xp-gate principles <探针>` → 仍输出 `✓ No violations found`。探针已删除。
+   **危险点**：这条规则失明的输出形态是「✓ No violations found」，
+   与「真的没有违规」在视觉上完全一致。
+   与 `.archlint.yaml` 第 12 行已诚实声明的「只分析 JS/TS，不解析 C#」同类，
+   但 `xp-gate` 侧不会主动告诉你它没看 C#。
+   **通用判据**：对 C# 项目里的架构类告警，不要相信「没有告警」，
+   要造一个必然违规的探针验证「告警机制本身是活的」。
+
 ### 5.1 关于 Gate 3 的扫描范围（重要）
 
 `xp-gate check 3` **不是全树扫描** —— 它的输入是 `CHANGED_FILES`（staged diff）。
