@@ -5,7 +5,11 @@ obj/
 dist/
 dist-opt/
 dist-final/
-publish/
+# ⚠️ 必须写成 `/publish/`（锚定仓库根），不能写 `publish/`。
+# 不带前导 / 时 git 会匹配任意层级，于是 `docs/articles/publish/`（发布指南、
+# 掘金版、英文版、封面图 —— 都是要进仓库的内容资产）被整目录静默忽略。
+# 2026-11-27 实际踩过：链接回填改完发布指南，`git status` 里什么都看不到。
+/publish/
 *.exe
 *.exe.old
 *.dll

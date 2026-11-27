@@ -45,7 +45,7 @@ DSH 每跑一条命令都要先起一个 `runner.js` 子进程 —— 光加载 
 |---|---|
 | 这东西怎么装、能不能用 | 往下看「[下载](#下载)」+「[安装前必读](#-安装前必读两步缺一不可)」 |
 | **凭什么信它**（改了上游什么、怎么复核） | [`SECURITY.md`](SECURITY.md) · [`vendor/README.md`](vendor/README.md) |
-| **性能数字怎么来的、哪些不可信** | [`docs/测量方法论`](docs/测量方法论-当工具比被测对象更容易出错.md) · [发布稿](docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md) |
+| **性能数字怎么来的、哪些不可信** | **已发布：[掘金](https://juejin.cn/post/7712783109374869558)**（2026-11-27）· [`docs/测量方法论`](docs/测量方法论-当工具比被测对象更容易出错.md) · 仓库原稿 [`docs/articles/…`](docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md) |
 | 测试覆盖到什么程度、缺口在哪 | [`docs/测试覆盖率口径.md`](docs/测试覆盖率口径.md) |
 | 我想帮忙 | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | 想帮我推广 | [`docs/articles/publish/发布指南.md`](docs/articles/publish/发布指南.md) |
@@ -636,7 +636,7 @@ cp: cannot create regular file 'plugin/bin/dsh-aot-runner.exe': Device or resour
 > **5 条里有 4 条，第一直觉都指向了错误的方向。**
 
 📄 **面向外部的发布稿（中文）**：
-[`docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md`](docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md)
+[`docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md`](docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md) · [已发布](https://juejin.cn/post/7712783109374869558)
 —— 同样的教训，写成给不熟悉本项目的人看的样子。**如果你只想读一篇，读这个。**
 
 📄 **测试覆盖率口径**：[`docs/测试覆盖率口径.md`](docs/测试覆盖率口径.md)

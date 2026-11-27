@@ -3,6 +3,13 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布] - 2026-11-27 测量方法论长文对外发布
+
+- 掘金：<https://juejin.cn/post/7712783109374869558>
+- 仓库内稿件：`docs/articles/2026-11-26-我的基准测试说我的代码慢了20ms.md`
+- 已回填：README「先读哪一篇」表、`docs/测量方法论` 开头、
+  `docs/articles/publish/发布指南.md` §四
+
 ## [0.2.8] - 2026-11-25
 
 > **补丁工具支持多代上游写法（2026-11-26）**
