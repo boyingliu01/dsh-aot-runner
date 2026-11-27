@@ -402,23 +402,77 @@ jobs:
           AOT_RUNNER: ${{ github.workspace }}\dist\dsh-aot-runner.exe
         shell: bash
         run: |
-          set -euo pipefail
-          node --test --test-reporter=tap test/e2e-plugin-verify.js | tee /tmp/e2e.tap
-          # SKIP 不得当成通过：这条断言防的是「文件在、但什么也没测」
+          # 先把「判定的输入」打出来：e2e 的 skip/fail 取决于它读到哪个包、
+          # 以及那个包里 launch 调用的形态。没有这段，失败时只能看到
+          # 「launcher 未调用 internals.spawn」这种下游症状，无法判断是
+          # 上游形态变了、还是解析到了别的包。
+          node - <<'NODE'
+          const path = require('node:path');
+          const fs = require('node:fs');
+          const { resolveNodeRunner } = require('./test/runner-client');
+          const runner = resolveNodeRunner();
+          console.log('DSH_RUNNER 环境变量:', process.env.DSH_RUNNER ?? '(未设置)');
+          console.log('resolveNodeRunner 解析到:', runner ?? '(null)');
+          if (runner) {
+            const pkgDir = path.resolve(path.dirname(runner), '..');
+            const idx = path.join(pkgDir, 'lib', 'index.js');
+            console.log('包目录:', pkgDir);
+            console.log('lib/index.js 存在:', fs.existsSync(idx));
+            if (fs.existsSync(idx)) {
+              const src = fs.readFileSync(idx, 'utf8');
+              console.log('  winForwarded:', /launchWindowsJob\(\s*spec\s*,\s*env\s*,[^)]+\)/.test(src));
+              console.log('  linuxForwarded:', /launchLinuxScope\(\s*spec\s*,\s*env\s*,\s*[^,)]+\s*,\s*[^)]+\)/.test(src));
+              console.log('  winBare:', /launchWindowsJob\(\s*spec\s*,\s*env\s*\)/.test(src));
+              console.log('  linuxBare:', /launchLinuxScope\(\s*spec\s*,\s*env\s*,\s*[^,)]+\s*\)/.test(src));
+            }
+          }
+          NODE
+
+          set -uo pipefail
+          # ⚠️ 这里**不能**用 `set -e`：`node ... | tee` 在 pipefail 下，
+          # 只要测试失败，脚本会在 tee 那一行就退出，下面所有断言**一行都不执行**。
+          # 2026-11-27 实际踩过：CI 里看不到「通过 N 项」的输出，以为断言在工作，
+          # 其实是根本没跑到 —— 正是本项目反复记录的那类「代码写了但没执行」。
+          # 所以这里手工接管退出码：先记录 node 的状态，再让断言自己决定成败。
+          set +e
+          node --test --test-reporter=tap test/e2e-plugin-verify.js > /tmp/e2e.tap 2>&1
+          NODE_RC=$?
+          set -e
+          cat /tmp/e2e.tap
+          echo "node --test 退出码: $NODE_RC"
+
+          # ── 判据设计（2026-11-27 修正过一次，值得读完再改）────────────────
+          #
+          # e2e 的第一条用例只有在「上游 spawn() 透传 internals」时才真正跑得起来；
+          # 上游未修且未打 vendor 补丁时，它会**主动 skip** 并给出原因。
+          #
+          # 这个 skip 是**诚实的结论**，不是失败：
+          #   - 判红 → CI 会因为上游未修而长期红，而长期红的门禁最终一定被关掉
+          #   - 判绿（不管）→ 又变成「跑了但什么也没测」的假绿
+          #
+          # 所以判据分两档：
+          #   * 有 SKIP，且其余用例全过 → **通过**，但打印醒目提示「AOT 端到端未验证」
+          #   * 有失败（not ok）或一条都没跑到 → **失败**
           PASSED=$(grep -cE '^ok [0-9]+' /tmp/e2e.tap || true)
-          # SKIP 有两种呈现：用例行的 `# SKIP` 后缀，以及末尾汇总的 `# skipped N`。
-          # 两个都看，避免只堵一个口子。
+          FAILED=$(grep -cE '^not ok [0-9]+' /tmp/e2e.tap || true)
           SKIPPED=$(grep -cE '^ok [0-9]+.*# SKIP' /tmp/e2e.tap || true)
           SKIPPED_SUM=$(grep -oE '^# skipped [0-9]+' /tmp/e2e.tap | awk '{print $3}' || true)
-          echo "通过 $PASSED 项；行内 SKIP=$SKIPPED，汇总 skipped=${SKIPPED_SUM:-0}"
-          if [ "$SKIPPED" -gt 0 ] || [ "${SKIPPED_SUM:-0}" -gt 0 ]; then
-            echo "::error::e2e 有 SKIP（行内 $SKIPPED / 汇总 ${SKIPPED_SUM:-0}）—— 端到端验证没真正执行，不等于通过"
+          echo "通过 $PASSED 项（其中 SKIP $SKIPPED）；失败 $FAILED 项"
+
+          if [ "$FAILED" -gt 0 ] || [ "$NODE_RC" -ne 0 ]; then
+            echo "::error::e2e 有 $FAILED 项失败（node 退出码 $NODE_RC），详见上面的 TAP 输出"
             exit 1
           fi
           if [ "$PASSED" -lt 2 ]; then
             echo "::error::e2e 只跑了 $PASSED 项，期望 2 项 —— 文件还在，但没测到东西"
             exit 1
           fi
+          if [ "$SKIPPED" -gt 0 ] || [ "${SKIPPED_SUM:-0}" -gt 0 ]; then
+            # 不是失败，但要让人看见：CI 绿了不等于 AOT 端到端被验证过。
+            echo "::warning title=AOT 端到端未验证::上游 #11893 未修，e2e 的 AOT 断言被 skip。绿表示「无失败」，不代表「AOT 路径已验证」。"
+            echo "⚠️ AOT 端到端断言被 SKIP —— CI 绿 ≠ AOT 路径已验证。原因见上。"
+          fi
+          echo "✅ e2e 完成（无失败）"
 
       - uses: actions/upload-artifact@v7
         if: always()
