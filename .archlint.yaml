@@ -76,6 +76,12 @@ ignore:
   # 判据始终是「有没有被 import」，只有入口脚本才该进来。
   - 'scripts/check-release-slot.mjs'
 
+  # 2026-11-27：文章发布后的回填工具，**手工执行**（无 npm script 入口）：
+  #   node scripts/backfill-article-links.mjs --url <文章URL> [--dry-run|--check]
+  # 它把发布链接写回文章状态行、README 与 CHANGELOG。
+  # 正因为是手工调用，archlint 找不到 import 就必然报死代码 —— 与上面同类。
+  - 'scripts/backfill-article-links.mjs'
+
   # 2026-11-26：`npm run contract:coverage` 的本地包装器 —— 把契约覆盖率
   # `--check` 的四态退出码翻译成「该不该让整条链变红」。由 package.json 直接
   # 调用，不是被 import 的模块。
