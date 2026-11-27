@@ -41,7 +41,20 @@ handle = bindManagedProcess(spec,
 > **旁证**：`fallback` 分支是正确的（`spawnSubprocess(spec, internals)` 传到位了）。
 > 两条路径不一致，说明这不是设计意图，是遗漏。
 
-上游讨论：**[deepseek-ai/deepseek-harness#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893)**
+上游讨论有两个（同一根因，**两个都还没修**）：
+
+| | [#12532](https://github.com/deepseek-ai/deepseek-harness/discussions/12532) | [#11893](https://github.com/deepseek-ai/deepseek-harness/discussions/11893) |
+|---|---|---|
+| 创建时间 | 早 2 分钟 | 晚 2 分钟 |
+| 第三方修复挂在哪 | ✅ **这里**（`aturzone`） | |
+| 想帮上忙就去 | ✅ **这条** | |
+
+> **如果你是从文章来的**：直接去 **#12532**。
+> 它先创建，而且 `aturzone` 的修复分支（含回归测试）挂在那条下面 ——
+> 维护者最可能看的是这一条。
+>
+> 现成 patch 已导出并实测可干净应用到 master：见
+> [`upstream/aturzone-fix-d631ef32.patch`](upstream/aturzone-fix-d631ef32.patch)。
 
 ### 2026-11-26 补证：这是「测试没覆盖到」，不是「忘了加参数」
 
