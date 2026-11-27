@@ -34,7 +34,7 @@
          "Could not determine csharp coverage percentage" 并 BLOCK。
          装上它是为了让覆盖率这个指标真的可测，而不是让门禁闭嘴。
          注意：XML 注释里不能出现连续两个减号，故此处不写完整命令。 -->
-    <PackageReference Include="coverlet.collector" Version="6.0.4">
+    <PackageReference Include="coverlet.collector" Version="10.1.1">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
